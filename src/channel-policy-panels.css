@@ -1,0 +1,396 @@
+@layer theme, base, components, utilities, app-layout;
+
+@layer app-layout {
+  .cpp-root {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    min-width: 0;
+  }
+  .cpp-two-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    min-width: 0;
+  }
+  .cpp-choice {
+    width: 100%;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 12px;
+    height: auto;
+    min-height: 95px;
+    padding: 17px;
+    white-space: normal;
+    text-align: left;
+  }
+  .cpp-choice > svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .cpp-choice > span {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+  }
+  .cpp-choice strong {
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .cpp-choice small {
+    font-size: 12px;
+    line-height: 1.65;
+    opacity: 0.82;
+  }
+  .cpp-choice .cpp-choice-check {
+    margin-left: auto;
+  }
+  .cpp-field {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    margin-top: 20px;
+    font-size: 13px;
+  }
+  .cpp-field small,
+  .cpp-helper {
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+  .cpp-address {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 18px;
+    font-size: 12px;
+  }
+  .cpp-address > span {
+    color: var(--muted);
+  }
+  .cpp-address code {
+    overflow-wrap: anywhere;
+  }
+  .cpp-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-top: 16px;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+  .cpp-notice > svg {
+    flex-shrink: 0;
+    margin-top: 3px;
+  }
+  .cpp-notice p {
+    margin: 0;
+  }
+  .cpp-route {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
+    gap: 12px;
+    align-items: center;
+  }
+  .cpp-route-node {
+    padding: 18px;
+    gap: 8px;
+    align-items: center;
+    text-align: center;
+    box-shadow: none;
+  }
+  .cpp-route-node strong {
+    font-size: 13px;
+  }
+  .cpp-route-node small {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .cpp-route-arrow {
+    color: var(--muted);
+    justify-self: center;
+  }
+  .cpp-preview {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 16px 0 0;
+    font-size: 12px;
+  }
+  .cpp-preview code {
+    overflow-wrap: anywhere;
+    line-height: 1.8;
+  }
+  .cpp-preview .chip {
+    flex-shrink: 0;
+  }
+  .cpp-example {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
+    gap: 13px;
+    align-items: center;
+    margin-top: 18px;
+  }
+  .cpp-example > div {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    min-width: 0;
+    height: 100%;
+  }
+  .cpp-example > div > small {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .cpp-example code {
+    font-size: 12px;
+    line-height: 1.9;
+    overflow-wrap: anywhere;
+  }
+  .cpp-example p {
+    font-size: 12px;
+    line-height: 1.7;
+    margin: 0;
+  }
+  .cpp-example > svg {
+    color: var(--muted);
+  }
+  .cpp-presets {
+    display: flex;
+    gap: 7px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+  .cpp-presets > button {
+    flex: 1;
+    min-width: 54px;
+  }
+  .cpp-limit-summary,
+  .cpp-protocol-summary {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 18px;
+  }
+  .cpp-limit-summary > svg,
+  .cpp-protocol-summary > svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .cpp-limit-summary > div,
+  .cpp-protocol-summary > div {
+    flex: 1;
+    min-width: 0;
+  }
+  .cpp-limit-summary strong,
+  .cpp-protocol-summary strong {
+    font-size: 13px;
+  }
+  .cpp-limit-summary p,
+  .cpp-protocol-summary p {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.7;
+    margin: 7px 0 0;
+  }
+  .cpp-limit-summary > button,
+  .cpp-protocol-summary > .chip {
+    flex-shrink: 0;
+  }
+  .cpp-endpoint-list {
+    display: flex;
+    flex-direction: column;
+    gap: 21px;
+  }
+  .cpp-endpoint {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+  }
+  .cpp-endpoint + .cpp-endpoint {
+    padding-top: 21px;
+    border-top: 1px solid var(--border);
+  }
+  .cpp-endpoint-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .cpp-endpoint-title > strong {
+    font-size: 13px;
+    margin-right: 2px;
+  }
+  .cpp-endpoint-title > button {
+    margin-left: auto;
+  }
+  .cpp-endpoint > small {
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+  .cpp-endpoint-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 12px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-lg);
+  }
+  .cpp-endpoint-preview > span {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .cpp-endpoint-preview code {
+    font-size: 12px;
+    line-height: 1.8;
+    overflow-wrap: anywhere;
+  }
+  .cpp-status-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .cpp-status-choice {
+    width: 100%;
+    height: auto;
+    min-height: 74px;
+    flex-direction: column;
+    gap: 5px;
+    padding: 12px 6px;
+    white-space: normal;
+    position: relative;
+  }
+  .cpp-status-choice strong {
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+  }
+  .cpp-status-choice span {
+    font-size: 12px;
+    line-height: 1.5;
+    opacity: 0.85;
+  }
+  .cpp-status-choice > svg {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+  }
+  .cpp-custom-statuses {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 14px;
+  }
+  .cpp-custom-statuses > small {
+    color: var(--muted);
+    font-size: 12px;
+    width: 100%;
+  }
+  .cpp-add-status {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 16px;
+  }
+  .cpp-add-status > .input {
+    flex: 1;
+    min-width: 0;
+  }
+  .cpp-add-status > button {
+    flex-shrink: 0;
+  }
+  .cpp-error {
+    font-size: 12px;
+    color: var(--danger);
+    margin: 8px 0 0;
+  }
+  .cpp-policy-flow {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 19px;
+  }
+  .cpp-policy-step {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 15px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    min-width: 0;
+  }
+  .cpp-step-number {
+    position: absolute;
+    right: 11px;
+    top: 11px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .cpp-policy-step > strong {
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .cpp-policy-step > small {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  @media (max-width: 700px) {
+    .cpp-two-columns {
+      grid-template-columns: 1fr;
+    }
+    .cpp-choice {
+      min-height: 82px;
+    }
+    .cpp-status-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .cpp-policy-flow {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .cpp-limit-summary {
+      flex-wrap: wrap;
+    }
+    .cpp-limit-summary > button {
+      margin-left: 34px;
+    }
+  }
+  @media (max-width: 440px) {
+    .cpp-example {
+      grid-template-columns: 1fr;
+    }
+    .cpp-example > svg {
+      transform: rotate(90deg);
+      justify-self: center;
+    }
+    .cpp-route {
+      gap: 5px;
+      grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
+    }
+    .cpp-route-node {
+      padding: 14px 9px;
+    }
+    .cpp-status-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .cpp-protocol-summary {
+      flex-wrap: wrap;
+    }
+    .cpp-protocol-summary > .chip {
+      margin-left: 34px;
+    }
+  }
+}

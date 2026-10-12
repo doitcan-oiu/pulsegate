@@ -1,0 +1,61 @@
+@layer theme, base, components, utilities, app-layout;
+@layer app-layout {
+  :root {
+    --font-sans: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    --default-font-family: var(--font-sans);
+    --field-radius: 8px;
+    --field-border-width: 1px;
+    --field-border: var(--border);
+    --field-shadow: none;
+    font-family: var(--font-sans);
+  }
+  body { font-family: var(--font-sans); font-size: 14px; line-height: 1.6; }
+  button, input, textarea, select { font-family: inherit; }
+  .button { border-radius: 8px; font-size: 14px; font-weight: 500; }
+  .button--sm { font-size: 13px; }
+  .button--icon-only { border-radius: 8px; }
+  .card { border: 1px solid var(--border); border-radius: 12px; box-shadow: none; }
+  .card--transparent { border: 0; }
+  .input, .textarea, .select__trigger, .number-field__group { font-size: 14px; }
+  .chip { border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; flex-shrink: 0; }
+  .modal__dialog { border-radius: 16px; box-shadow: var(--shadow-overlay); }
+  .modal__heading { font-size: 21px; line-height: 1.4; font-weight: 600; }
+  .modal__close-trigger { border-radius: 8px; }
+  .dropdown__popover, .popover__content, .select__popover { border-radius: 12px; }
+  .dropdown__item { font-size: 14px; min-height: 36px; border-radius: 6px; }
+  .label { font-size: 13px; font-weight: 500; }
+  .alert { border-radius: 10px; box-shadow: none; font-size: 13px; }
+  .table-root { border-radius: 12px; }
+  .table__content { font-size: 14px; }
+  .table__column { font-size: 13px; font-weight: 500; }
+  .table__cell { padding-block: 16px; }
+  .provider-icon { display: inline-block; flex-shrink: 0; vertical-align: middle; }
+  .nav-item { font-size: 14px; border-radius: 8px; height: 42px; }
+  .nav-item svg, .topbar svg, .metric-icon svg, .panel-heading svg { stroke-width: 1.75; }
+  .page-heading h1 { font-size: 26px; font-weight: 600; letter-spacing: 0; }
+  .page-heading p { margin-top: 6px; font-size: 14px; }
+  .eyebrow { display: none; }
+  .page-title-dot { display: none; }
+  .metric-value { font-size: 32px; font-weight: 600; letter-spacing: -0.5px; }
+  .metric-top { font-size: 13px; }
+  .metric-bottom { font-size: 12px; line-height: 1.6; }
+  .panel-heading .card__title { font-size: 17px; font-weight: 600; }
+  .panel-heading .card__description { font-size: 13px; }
+  .health-banner { border-radius: 10px; padding: 16px 18px; }
+  .health-banner strong { font-size: 14px; font-weight: 600; }
+  .health-banner span { font-size: 12px; }
+  .breadcrumb, .topbar-actions { font-size: 13px; }
+  .page-footer { font-size: 12px; padding-top: 24px; }
+  .cp-section { border-radius: 12px; }
+  .cp-section .card__title { font-size: 15px; font-weight: 600; }
+  .cp-section .card__description { font-size: 13px; }
+  .cp-toggle strong { font-size: 14px; }
+  .cmp-entry, .cpp-policy-step, .cpp-endpoint-preview, .cop-attempts { border-radius: 10px; }
+  .cpp-choice, .cop-mode { border-radius: 10px; }
+  .cop-metric > strong { font-size: 25px; font-weight: 600; }
+  @media (max-width: 600px) {
+    .page-heading h1 { font-size: 24px; }
+    .metric-value { font-size: 28px; }
+    .page-footer { font-size: 12px; }
+  }
+}

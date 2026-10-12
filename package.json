@@ -1,0 +1,39 @@
+{
+  "name": "pulsegate",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "setup:local": "node scripts/local-env.mjs && wrangler d1 migrations apply DB --local --config wrangler.dev.jsonc --persist-to .wrangler/state",
+    "dev": "concurrently -k -n frontend,worker \"npm:dev:frontend\" \"npm:dev:worker\"",
+    "dev:frontend": "vite --host 127.0.0.1",
+    "dev:worker": "wrangler dev --config wrangler.dev.jsonc --ip 127.0.0.1 --port 8787 --persist-to .wrangler/state",
+    "build": "tsc -b && tsc -p tsconfig.worker.json && vite build",
+    "test": "vitest run",
+    "preview": "vite preview --host 127.0.0.1",
+    "deploy": "npm run build && wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "deploy:button": "node scripts/deploy-button.mjs"
+  },
+  "dependencies": {
+    "@heroui/react": "^3.2.6",
+    "@heroui/styles": "^3.2.6",
+    "@tailwindcss/vite": "^4.3.3",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^3.2.1",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.0",
+    "@cloudflare/workers-types": "^5.20261012.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^10.0.6",
+    "typescript": "~5.9.3",
+    "vite": "^7.1.7",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.42.0"
+  }
+}

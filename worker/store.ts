@@ -1,0 +1,271 @@
+import { defaultSettings } from '../shared/types';
+import type { AttemptRecord, CredentialMeta, DashboardData, GatewayApiKey, GatewayChannel, GatewayEvent, GatewayLog, GatewaySettings } from '../shared/types';
+import type { Credential, Env, GatewayStore, KeyRecord } from './env';
+import { decryptSecret, encryptSecret, hashToken, previewToken, randomToken, redact } from './crypto';
+import { autoDisableDecision, credentialRecoveryAllowed, evaluateHealth } from './health';
+import { HttpError } from './validation';
+import { prepareAccountSave, type AccountCredentials } from './accounts';
+import { buildAnalytics, completed } from './analytics';
+
+type DataRow = { id: string; data: string; health_version?: number };
+type CredRow = { id: string; channel_id: string; label: string; preview: string; secret: string; enabled: number; failure_count: number; recovery_count: number; disabled_at: string | null; reason: string | null; created_at: string };
+type CredentialInput = { label: string; secret: string };
+const decode = <T>(row: { data: string }): T => JSON.parse(row.data) as T;
+const now = (): string => new Date().toISOString();
+function validateCredential({ label,secret }: CredentialInput): void {
+  if (!secret || secret.length > 16000) throw new HttpError(400, 'Credential must be 1–16000 characters');
+  if (label.length > 128) throw new HttpError(400, 'Credential label exceeds 128 characters');
+}
+export class Store implements GatewayStore {
+  constructor(public env: Env, private coordinate = true) {}
+  private async coordinated<T>(operation: string, args: unknown): Promise<T> {
+    const stub = this.env.GATEWAY_STATE.get(this.env.GATEWAY_STATE.idFromName('gateway'));
+    const response = await stub.fetch('https://state.internal/' + operation, { method: 'POST', body: JSON.stringify(args) });
+    const result = await response.json() as { result: T; error?: string };
+    if (!response.ok) throw new Error(result.error ?? 'Gateway state unavailable'); return result.result;
+  }
+  async listChannels(): Promise<GatewayChannel[]> {
+    const rows = await this.env.DB.prepare('SELECT c.data,a.channel_id AS account_id,a.balance, (SELECT COUNT(*) FROM credentials s WHERE s.channel_id=c.id) AS credential_count FROM channels c LEFT JOIN channel_accounts a ON a.channel_id=c.id ORDER BY json_extract(c.data,\'$.createdAt\') DESC').all<{ data: string; credential_count: number; account_id: string | null; balance: string | null }>();
+    return rows.results.map(row => ({ ...decode<GatewayChannel>(row), credentialCount: row.credential_count, hasAccountCredentials: !!row.account_id, accountBalance: row.balance ? JSON.parse(row.balance) : row.account_id ? { status:'pending',amount:null,unit:'',updatedAt:null,checkedAt:null } : undefined }));
+  }
+  async getChannel(id: string): Promise<GatewayChannel | null> {
+    const row = await this.env.DB.prepare('SELECT data FROM channels WHERE id=?').bind(id).first<DataRow>();
+    if (!row) return null; const channel = decode<GatewayChannel>(row); channel.credentialCount = (await this.listCredentialMeta(id)).length;
+    const account = await this.env.DB.prepare('SELECT balance FROM channel_accounts WHERE channel_id=?').bind(id).first<{ balance: string | null }>();
+    channel.hasAccountCredentials = !!account;
+    channel.accountBalance = account?.balance ? JSON.parse(account.balance) : account ? { status:'pending',amount:null,unit:'',updatedAt:null,checkedAt:null } : undefined;
+    return channel;
+  }
+  async saveChannel(channel: GatewayChannel, fixture = false, credentials: CredentialInput[] = [], account?: AccountCredentials): Promise<void> {
+    if (credentials.length > 100) throw new HttpError(400, 'Upstream API keys must be a bounded array');
+    credentials.forEach(validateCredential);
+    // Prepare every encrypted insert before the transaction; edits append and never replace existing keys.
+    const prepared = await Promise.all(credentials.map(credential => this.prepareCredential(channel.id,credential)));
+    const accountStatement = await prepareAccountSave(this.env, channel, account);
+    const statements = [this.env.DB.prepare('INSERT INTO channels(id,data,fixture) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=json_set(excluded.data,\'$.health\',json_extract(channels.data,\'$.health\'),\'$.status\',json_extract(channels.data,\'$.status\'),\'$.requests\',json_extract(channels.data,\'$.requests\'),\'$.ttft\',json_extract(channels.data,\'$.ttft\'),\'$.successRate\',json_extract(channels.data,\'$.successRate\'),\'$.history\',json_extract(channels.data,\'$.history\')),health_version=channels.health_version+1').bind(channel.id, JSON.stringify(channel), fixture ? 1 : 0), ...channel.tags.map(tag => this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(tag))];
+    statements.push(...prepared.map(entry => entry.statement));
+    if (accountStatement) statements.push(accountStatement);
+    else statements.unshift(this.env.DB.prepare("UPDATE channel_accounts SET auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE channel_id=? AND EXISTS (SELECT 1 FROM channels c WHERE c.id=? AND (json_extract(c.data,'$.endpoint')<>? OR COALESCE(json_extract(c.data,'$.config.integration'),'native')<>?))").bind(channel.id,channel.id,channel.endpoint,channel.config.integration ?? 'native'));
+    await this.env.DB.batch(statements);
+  }
+  async importChannels(entries: { channel: GatewayChannel; credentials: CredentialInput[]; account?: AccountCredentials }[]): Promise<GatewayChannel[]> {
+    const preparedCredentials: Record<string, unknown>[] = [], preparedAccounts: { channel_id: string; credentials: string }[] = [];
+    for (const entry of entries) {
+      if (entry.credentials.length > 100) throw new HttpError(400, 'Upstream API keys must be a bounded array');
+      entry.credentials.forEach(validateCredential);
+      if (entry.account && !['newapi', 'sub2api'].includes(entry.channel.config.integration ?? '')) throw new HttpError(400, 'Only NewAPI / Sub2API channels use management accounts');
+    }
+    // Encrypt the complete import before the first write. JSON inserts keep even a
+    // large import to four queries, and D1 batch rolls all of them back on failure.
+    for (const entry of entries) {
+      for (const credential of entry.credentials) {
+        const prepared = await this.prepareCredential(entry.channel.id, credential);
+        preparedCredentials.push({ ...prepared.credential, channel_id: entry.channel.id, secret: prepared.encrypted });
+      }
+      if (entry.account) preparedAccounts.push({ channel_id: entry.channel.id, credentials: await encryptSecret(JSON.stringify(entry.account), this.env) });
+    }
+    const statements = [
+      this.env.DB.prepare("INSERT INTO channels(id,data,fixture) SELECT json_extract(value,'$.id'),value,0 FROM json_each(?)").bind(JSON.stringify(entries.map(entry => entry.channel))),
+      this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) SELECT value FROM json_each(?)').bind(JSON.stringify([...new Set(entries.flatMap(entry => entry.channel.tags))])),
+    ];
+    if (preparedCredentials.length) statements.push(this.env.DB.prepare("INSERT INTO credentials(id,channel_id,label,preview,secret,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.channel_id'),json_extract(value,'$.label'),json_extract(value,'$.preview'),json_extract(value,'$.secret'),json_extract(value,'$.createdAt') FROM json_each(?)").bind(JSON.stringify(preparedCredentials)));
+    if (preparedAccounts.length) statements.push(this.env.DB.prepare("INSERT INTO channel_accounts(channel_id,credentials) SELECT json_extract(value,'$.channel_id'),json_extract(value,'$.credentials') FROM json_each(?)").bind(JSON.stringify(preparedAccounts)));
+    await this.env.DB.batch(statements);
+    return entries.map(({ channel, credentials, account }) => ({ ...channel, credentialCount: credentials.length, hasAccountCredentials: !!account, accountBalance: account ? { status: 'pending', amount: null, unit: '', updatedAt: null, checkedAt: null } : undefined }));
+  }
+  async deleteChannel(id: string): Promise<void> { await this.env.DB.prepare('DELETE FROM channels WHERE id=?').bind(id).run(); }
+  async listCredentialMeta(channelId: string): Promise<CredentialMeta[]> {
+    const rows = await this.env.DB.prepare('SELECT id,label,preview,enabled,failure_count,disabled_at,reason,created_at FROM credentials WHERE channel_id=? ORDER BY created_at').bind(channelId).all<CredRow>();
+    return rows.results.map(r => ({ id: r.id, label: r.label, preview: r.preview, enabled: !!r.enabled, failureCount: r.failure_count, disabledAt: r.disabled_at, reason: r.reason, createdAt: r.created_at }));
+  }
+  private async prepareCredential(channelId: string, { label,secret }: CredentialInput): Promise<{ credential: CredentialMeta; statement: D1PreparedStatement; encrypted: string }> {
+    validateCredential({ label,secret });
+    const credential: CredentialMeta = { id: crypto.randomUUID(), label, preview: `••••${secret.slice(-4)}`, enabled: true, failureCount: 0, disabledAt: null, reason: null, createdAt: now() };
+    const encrypted = await encryptSecret(secret, this.env);
+    const statement = this.env.DB.prepare('INSERT INTO credentials(id,channel_id,label,preview,secret,created_at) VALUES(?,?,?,?,?,?)').bind(credential.id,channelId,label,credential.preview,encrypted,credential.createdAt);
+    return { credential,statement,encrypted };
+  }
+  async addCredential(channelId: string, label: string, secret: string): Promise<CredentialMeta> {
+    const { credential,statement } = await this.prepareCredential(channelId,{ label,secret });
+    await statement.run();
+    return credential;
+  }
+  async changeCredential(channelId: string, id: string, patch: { label?: string; enabled?: boolean; secret?: string }): Promise<CredentialMeta> {
+    const meta = (await this.listCredentialMeta(channelId)).find(c => c.id === id); if (!meta) throw new HttpError(404, 'Credential not found');
+    if (patch.secret !== undefined) { if (!patch.secret || patch.secret.length > 16000) throw new HttpError(400, 'Invalid credential'); await this.env.DB.prepare('UPDATE credentials SET secret=?,preview=?,failure_count=0,disabled_at=NULL,reason=NULL WHERE id=? AND channel_id=?').bind(await encryptSecret(patch.secret,this.env), `••••${patch.secret.slice(-4)}`,id,channelId).run(); }
+    if (patch.label !== undefined) await this.env.DB.prepare('UPDATE credentials SET label=? WHERE id=? AND channel_id=?').bind(patch.label,id,channelId).run();
+    if (patch.enabled !== undefined) await this.setCredentialHealth(id, { enabled: patch.enabled, failureCount: 0, disabledAt: null, reason: null });
+    return (await this.listCredentialMeta(channelId)).find(c => c.id === id)!;
+  }
+  async deleteCredential(channelId: string, id: string): Promise<void> { await this.env.DB.prepare('DELETE FROM credentials WHERE id=? AND channel_id=?').bind(id,channelId).run(); }
+  async getCredentials(channelId: string, includeDisabled = false): Promise<Credential[]> {
+    const rows = await this.env.DB.prepare('SELECT * FROM credentials WHERE channel_id=?' + (includeDisabled ? '' : ' AND enabled=1') + ' ORDER BY created_at').bind(channelId).all<CredRow>();
+    const channel = includeDisabled ? await this.getChannel(channelId) : null;
+    const settings = includeDisabled ? await this.getSettings() : null;
+    const eligible = rows.results.filter(r => r.enabled || (channel && settings && credentialRecoveryAllowed(channel, settings, { enabled: false, reason: r.reason, disabledAt: r.disabled_at })));
+    return Promise.all(eligible.map(async r => ({ id: r.id, label: r.label, secret: await decryptSecret(r.secret,this.env), enabled: !!r.enabled, failureCount: r.failure_count, disabledAt: r.disabled_at })));
+  }
+  async getSettings(): Promise<GatewaySettings> {
+    const row = await this.env.DB.prepare('SELECT value FROM settings WHERE id=?').bind('gateway').first<{ value: string }>();
+    const token = await this.env.DB.prepare('SELECT id FROM settings WHERE id=?').bind('ai_gateway_token').first();
+    return { ...defaultSettings, ...(row ? JSON.parse(row.value) as GatewaySettings : {}), hasAiGatewayToken: !!token || !!this.env.AI_GATEWAY_TOKEN };
+  }
+  async saveSettings(settings: GatewaySettings, token?: string, clear = false): Promise<void> {
+    const encrypted = token ? await encryptSecret(token,this.env) : null;
+    const statements = [this.env.DB.prepare('INSERT INTO settings(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('gateway', JSON.stringify({ ...settings, hasAiGatewayToken: false }))];
+    if (clear) statements.push(this.env.DB.prepare('DELETE FROM settings WHERE id=?').bind('ai_gateway_token'));
+    else if (encrypted) statements.push(this.env.DB.prepare('INSERT INTO settings(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('ai_gateway_token',encrypted));
+    await this.env.DB.batch(statements);
+  }
+  async getAiGatewayToken(): Promise<string | null> {
+    const row = await this.env.DB.prepare('SELECT value FROM settings WHERE id=?').bind('ai_gateway_token').first<{ value: string }>();
+    return row ? decryptSecret(row.value,this.env) : this.env.AI_GATEWAY_TOKEN ?? null;
+  }
+  async listKeys(): Promise<GatewayApiKey[]> { const rows = await this.env.DB.prepare('SELECT data,used FROM api_keys ORDER BY json_extract(data,\'$.createdAt\') DESC').all<{ data: string; used: number }>(); return rows.results.map(r => ({ ...decode<GatewayApiKey>(r), used: r.used })); }
+  async getKey(id: string): Promise<KeyRecord | null> { const row = await this.env.DB.prepare('SELECT data,token_hash,used FROM api_keys WHERE id=?').bind(id).first<{ data: string; token_hash: string; used: number }>(); return row ? { ...decode<GatewayApiKey>(row), used: row.used, tokenHash: row.token_hash } : null; }
+  async findKey(token: string): Promise<KeyRecord | null> { const row = await this.env.DB.prepare('SELECT data,token_hash,used FROM api_keys WHERE token_hash=?').bind(await hashToken(token)).first<{ data: string; token_hash: string; used: number }>(); return row ? { ...decode<GatewayApiKey>(row), used: row.used, tokenHash: row.token_hash } : null; }
+  async createKey(key: GatewayApiKey): Promise<{ key: GatewayApiKey; token: string }> {
+    const token = randomToken(); key.preview = previewToken(token);
+    await this.env.DB.batch([this.env.DB.prepare('INSERT INTO api_keys(id,token_hash,data) VALUES(?,?,?)').bind(key.id,await hashToken(token),JSON.stringify(key)), ...key.profiles.map(p => this.env.DB.prepare('INSERT INTO profile_usage(key_id,profile_id) VALUES(?,?)').bind(key.id,p.id))]);
+    return { key,token };
+  }
+  async saveKey(key: GatewayApiKey): Promise<void> {
+    const result = await this.env.DB.batch([this.env.DB.prepare("UPDATE api_keys SET data=? WHERE id=? AND json_extract(data,'$.status')<>'revoked'").bind(JSON.stringify(key),key.id), ...key.profiles.map(p => this.env.DB.prepare("INSERT OR IGNORE INTO profile_usage(key_id,profile_id) SELECT ?,? WHERE EXISTS (SELECT 1 FROM api_keys WHERE id=? AND json_extract(data,'$.status')<>'revoked')").bind(key.id,p.id,key.id))]);
+    if (!result[0].meta.changes && key.status !== 'revoked') throw new HttpError(409, 'Revoked keys cannot be updated');
+  }
+  async rotateKey(key: GatewayApiKey): Promise<{ key: GatewayApiKey; token: string }> {
+    const token = randomToken(), preview = previewToken(token);
+    const result = await this.env.DB.prepare("UPDATE api_keys SET token_hash=?,data=json_set(data,'$.preview',?) WHERE id=? AND json_extract(data,'$.status')<>'revoked'").bind(await hashToken(token),preview,key.id).run();
+    if (!result.meta.changes) throw new HttpError(409, 'Revoked keys cannot be rotated');
+    return { key: publicKey((await this.getKey(key.id))!), token };
+  }
+  async incrementKeyUsage(keyId: string, profileId: string, limit: number): Promise<boolean> {
+    if (this.coordinate) return this.coordinated<boolean>('quota',{ keyId,profileId,limit });
+    const key = await this.getKey(keyId); if (!key || key.status !== 'active' || key.activeProfile !== profileId || expired(key)) return false;
+    const current = key.profiles.find(p => p.id === profileId); if (!current) return false;
+    limit = Math.max(0,Number(current.requestLimit) || 0);
+    const usage = await this.env.DB.prepare('UPDATE profile_usage SET used=used+1 WHERE key_id=? AND profile_id=? AND (?<=0 OR used<?) RETURNING used').bind(keyId,profileId,limit,limit).first();
+    if (!usage) return false; await this.env.DB.prepare('UPDATE api_keys SET used=used+1 WHERE id=?').bind(keyId).run(); return true;
+  }
+  async listTags(): Promise<string[]> { return (await this.env.DB.prepare('SELECT name FROM tags ORDER BY name').all<{ name: string }>()).results.map(r => r.name); }
+  async addTag(name: string): Promise<void> { await this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(name).run(); }
+  async renameTag(oldName: string, newName: string): Promise<void> {
+    if (!(await this.listTags()).includes(oldName)) throw new HttpError(404, 'Tag not found');
+    if (oldName === newName) return;
+    if ((await this.listTags()).includes(newName)) throw new HttpError(409, 'Tag already exists');
+    await this.env.DB.batch([
+      this.env.DB.prepare('UPDATE tags SET name=? WHERE name=?').bind(newName,oldName),
+      this.env.DB.prepare("UPDATE channels SET data=json_set(data,'$.tags',json((SELECT json_group_array(CASE WHEN value=? THEN ? ELSE value END) FROM json_each(channels.data,'$.tags')))),health_version=health_version+1 WHERE EXISTS (SELECT 1 FROM json_each(channels.data,'$.tags') WHERE value=?)").bind(oldName,newName,oldName),
+      this.env.DB.prepare("UPDATE api_keys SET data=json_set(data,'$.profiles',json((SELECT json_group_array(json_set(p.value,'$.tags',json((SELECT json_group_array(CASE WHEN t.value=? THEN ? ELSE t.value END) FROM json_each(p.value,'$.tags') t)))) FROM json_each(api_keys.data,'$.profiles') p))) WHERE EXISTS (SELECT 1 FROM json_each(api_keys.data,'$.profiles') p,json_each(p.value,'$.tags') t WHERE t.value=?)").bind(oldName,newName,oldName),
+    ]);
+  }
+  async deleteTag(name: string): Promise<void> {
+    if ((await this.listKeys()).some(k => k.status !== 'revoked' && k.profiles.some(p => p.scope === 'tags' && p.tags.includes(name)))) throw new HttpError(409, 'Tag is referenced by an API Key profile; update its restrictions first');
+    const referenceGuard = "NOT EXISTS (SELECT 1 FROM api_keys k,json_each(k.data,'$.profiles') p,json_each(p.value,'$.tags') t WHERE json_extract(k.data,'$.status')<>'revoked' AND json_extract(p.value,'$.scope')='tags' AND t.value=?)";
+    const result = await this.env.DB.batch([
+      this.env.DB.prepare('DELETE FROM tags WHERE name=? AND '+referenceGuard).bind(name,name),
+      this.env.DB.prepare("UPDATE channels SET data=json_set(data,'$.tags',json((SELECT json_group_array(value) FROM json_each(channels.data,'$.tags') WHERE value<>?))),health_version=health_version+1 WHERE NOT EXISTS (SELECT 1 FROM tags WHERE name=?) AND "+referenceGuard+" AND EXISTS (SELECT 1 FROM json_each(channels.data,'$.tags') WHERE value=?)").bind(name,name,name,name),
+    ]);
+    if (!result[0].meta.changes && (await this.listTags()).includes(name)) throw new HttpError(409, 'Tag is referenced by an API Key profile; update its restrictions first');
+  }
+  async recordAttempt(attempt: AttemptRecord): Promise<void> {
+    const clean = { ...attempt, error: redact(attempt.error) }; if (this.coordinate) { await this.coordinated('attempt',clean); return; }
+    const inserted = await this.env.DB.prepare('INSERT OR IGNORE INTO attempts(id,request_id,channel_id,stream,started_at,data) VALUES(?,?,?,?,?,?)').bind(clean.id,clean.requestId,clean.channelId,clean.stream ? 1 : 0,clean.startedAt,JSON.stringify(clean)).run();
+    if (!inserted.meta.changes) return;
+    if (clean.result === 'cancelled') {
+      // Keep the attempt for tracing, but a client cancellation says nothing about
+      // upstream health and must not evict a real sample from a bounded window.
+      await this.env.DB.prepare("UPDATE channels SET data=json_set(data,'$.requests',COALESCE(json_extract(data,'$.requests'),0)+1),health_version=health_version+1 WHERE id=?").bind(clean.channelId).run();
+      return;
+    }
+    const c = await this.getChannel(clean.channelId); if (!c) return;
+    const s = await this.getSettings(); const recent = await this.getRecentAttempts(c.id,clean.stream,s.window,s.windowSeconds);
+    const matchingRecoveryMode = c.health.reason?.includes('首字') ? clean.stream : c.health.reason?.includes('响应耗时') ? !clean.stream : true;
+    const allowRecovery = c.health.autoDisabled ? (c.config.autoDisable.enabled ? c.config.autoDisable.recover : s.autoDisableRecover) : s.autoRecover;
+    const decision = evaluateHealth(c,{ ...s,autoRecover:allowRecovery && matchingRecoveryMode },recent,clean);
+    if (decision.status === 'healthy' && c.status !== 'healthy') {
+      await this.env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind(`health-window:${c.id}:${clean.stream ? 1 : 0}`,clean.startedAt).run();
+      decision.patch.samples = 1; if (clean.stream) decision.patch.averageTtft = clean.ttft; else decision.patch.averageDuration = clean.duration;
+    }
+    if (decision.status === 'healthy' && c.health.autoDisabled) decision.patch.autoDisabled = false;
+    await this.updateHealth(c.id,decision.patch,decision.status);
+    if (decision.event) await this.recordEvent(decision.event);
+    const cred = clean.credentialId ? await this.env.DB.prepare('SELECT failure_count,recovery_count,enabled,disabled_at,reason FROM credentials WHERE id=? AND channel_id=?').bind(clean.credentialId,c.id).first<CredRow>() : null;
+    const target = autoDisableDecision(c,s,clean.status,0,Date.now()).target;
+    const channelFailures = target === 'channel' ? await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=?').bind('auto-disable:'+c.id).first<{ value:string }>() : null;
+    const prior = target === 'key' ? cred?.failure_count ?? 0 : Number(channelFailures?.value ?? 0);
+    const ad = autoDisableDecision(c,s,clean.status,prior,Date.now());
+    if (target === 'channel') await this.env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('auto-disable:'+c.id,String(ad.failureCount)).run();
+    if (clean.credentialId && cred && !cred.enabled) {
+      if (credentialRecoveryAllowed(c,s,{ enabled:false,reason:cred.reason,disabledAt:cred.disabled_at })) {
+        const recovery = clean.result === 'success' ? cred.recovery_count+1 : 0;
+        const recovered = recovery >= s.recovery;
+        // A concurrent manual disable clears reason/disabled_at, so it wins even
+        // when an already-running automatic recovery probe has just succeeded.
+        await this.env.DB.prepare('UPDATE credentials SET recovery_count=?,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=0 AND reason IS NOT NULL AND disabled_at<=?').bind(recovery,ad.failureCount,recovered ? 1 : 0,recovered ? null : cred.disabled_at,recovered ? null : cred.reason,clean.credentialId,now()).run();
+      }
+    } else if (ad.target === 'key' && clean.credentialId && cred) {
+      await this.env.DB.prepare('UPDATE credentials SET recovery_count=0,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=1').bind(ad.failureCount,ad.disable ? 0 : 1,ad.disable ? ad.cooldownUntil : null,ad.disable ? `HTTP ${clean.status}` : null,clean.credentialId).run();
+    } else if (ad.disable) { await this.updateHealth(c.id,{ autoDisabled: true,cooldownUntil: ad.cooldownUntil,reason: `HTTP ${clean.status}`,failureCount:ad.failureCount },'offline'); }
+    for (let retry = 0; retry < 5; retry++) {
+      const stored = await this.env.DB.prepare('SELECT data,health_version FROM channels WHERE id=?').bind(c.id).first<DataRow>();
+      if (!stored) return;
+      const latest = decode<GatewayChannel>(stored); latest.requests += 1; latest.ttft = clean.ttft ?? 0;
+      latest.history = [...latest.history.slice(-19),clean.result === 'success' ? 0 : clean.result === 'slow' ? 1 : 2];
+      latest.successRate = recent.length ? recent.filter(a => ['success','slow'].includes(a.result)).length / recent.length * 100 : 0;
+      const updated = await this.env.DB.prepare('UPDATE channels SET data=?,health_version=health_version+1 WHERE id=? AND health_version=?').bind(JSON.stringify(latest),c.id,stored.health_version!).run();
+      if (updated.meta.changes) return;
+    }
+    throw new Error('Channel statistics update conflict');
+  }
+  async recordLog(log: GatewayLog): Promise<void> { const clean = { ...log,error: redact(log.error) }; await this.env.DB.prepare('INSERT OR REPLACE INTO request_logs(id,created_at,channel_id,result,source,model,data) VALUES(?,?,?,?,?,?,?)').bind(log.id,log.createdAt,log.channelId,log.result,log.source,log.model,JSON.stringify(clean)).run(); }
+  async recordEvent(event: GatewayEvent): Promise<void> { const clean = { ...event,description: redact(event.description) ?? '' }; await this.env.DB.prepare('INSERT OR REPLACE INTO events(id,created_at,data) VALUES(?,?,?)').bind(clean.id,clean.createdAt,JSON.stringify(clean)).run(); }
+  async getRecentAttempts(channelId: string, stream: boolean, limit: number, seconds = 0): Promise<AttemptRecord[]> { const epoch = await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=?').bind(`health-window:${channelId}:${stream ? 1 : 0}`).first<{ value:string }>(); const timeSince = seconds ? new Date(Date.now()-seconds*1000).toISOString() : ''; const since = epoch && epoch.value > timeSince ? epoch.value : timeSince; const rows = await this.env.DB.prepare("SELECT data FROM attempts WHERE channel_id=? AND stream=? AND started_at>=? AND json_extract(data,'$.result')<>'cancelled' ORDER BY started_at DESC,rowid DESC LIMIT ?").bind(channelId,stream ? 1 : 0,since,Math.min(1000,limit)).all<DataRow>(); return rows.results.map(r => decode<AttemptRecord>(r)); }
+  async updateHealth(channelId: string, patch: Partial<GatewayChannel['health']>, status?: GatewayChannel['status']): Promise<void> {
+    if (this.coordinate) { await this.coordinated('health',{ channelId,patch,status }); return; }
+    for (let retry = 0; retry < 5; retry++) { const row = await this.env.DB.prepare('SELECT data,health_version FROM channels WHERE id=?').bind(channelId).first<DataRow>(); if (!row) return; const c = decode<GatewayChannel>(row); c.health = { ...c.health,...patch }; if (status) c.status = status; const result = await this.env.DB.prepare('UPDATE channels SET data=?,health_version=health_version+1 WHERE id=? AND health_version=?').bind(JSON.stringify(c),channelId,row.health_version!).run(); if (result.meta.changes) return; } throw new Error('Health update conflict');
+  }
+  async setCredentialHealth(id: string, patch: { enabled?: boolean; failureCount?: number; disabledAt?: string | null; reason?: string | null }): Promise<void> {
+    const entries = Object.entries(patch); if (!entries.length) return; const columns: Record<string,string> = { enabled:'enabled',failureCount:'failure_count',disabledAt:'disabled_at',reason:'reason' };
+    await this.env.DB.prepare('UPDATE credentials SET ' + entries.map(([k]) => columns[k] + '=?').join(',') + ' WHERE id=?').bind(...entries.map(([,v]) => typeof v === 'boolean' ? Number(v) : v),id).run();
+  }
+  async nextRoundRobin(scope: string): Promise<number> {
+    if (this.coordinate) return this.coordinated<number>('rr',{ scope });
+    const row = await this.env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,\'1\') ON CONFLICT(id) DO UPDATE SET value=CAST(value AS INTEGER)+1 RETURNING value').bind('rr:'+scope).first<{ value: string }>(); return Number(row!.value)-1;
+  }
+  async getSticky(scope: string): Promise<string | null> { const row = await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=? AND expires_at>?').bind('sticky:'+scope,Date.now()).first<{ value: string }>(); return row?.value ?? null; }
+  async setSticky(scope: string, channelId: string): Promise<void> { await this.env.DB.prepare('INSERT INTO gateway_state(id,value,expires_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value,expires_at=excluded.expires_at').bind('sticky:'+scope,channelId,Date.now()+24*3600*1000).run(); }
+  async reserveChannel(channel: GatewayChannel, estimatedTokens: number): Promise<boolean> {
+    if (this.coordinate) return this.coordinated<boolean>('rate',{ channel,estimatedTokens });
+    const minute = Math.floor(Date.now()/60000); const id = `rate:${channel.id}:${minute}`;
+    const row = await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=?').bind(id).first<{ value: string }>();
+    const value = row ? JSON.parse(row.value) as { requests: number; tokens: number } : { requests:0,tokens:0 };
+    const limits = channel.config.rateLimit; if (limits.requestsPerMinute > 0 && value.requests >= limits.requestsPerMinute || limits.tokensPerMinute > 0 && value.tokens + estimatedTokens > limits.tokensPerMinute) return false;
+    value.requests++; value.tokens += estimatedTokens;
+    await this.env.DB.prepare('INSERT INTO gateway_state(id,value,expires_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value,expires_at=excluded.expires_at').bind(id,JSON.stringify(value),Date.now()+120000).run(); return true;
+  }
+  async listLogs(options: { limit?: number; offset?: number; q?: string; result?: string; channelId?: string; source?: string } = {}): Promise<{ logs: GatewayLog[]; total: number }> {
+    const where = ['1=1']; const args: (string | number)[] = [];
+    if (options.q) { where.push('(model LIKE ? OR json_extract(data,\'$.channel\') LIKE ? OR id LIKE ?)'); const q = '%'+options.q+'%'; args.push(q,q,q); }
+    for (const [key,column] of [['result','result'],['channelId','channel_id'],['source','source']] as const) if (options[key]) { where.push(column+'=?'); args.push(options[key]!); }
+    const clause = where.join(' AND '); const total = await this.env.DB.prepare('SELECT COUNT(*) AS total FROM request_logs WHERE '+clause).bind(...args).first<{ total: number }>();
+    const rows = await this.env.DB.prepare('SELECT data FROM request_logs WHERE '+clause+' ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(...args,options.limit ?? 50,options.offset ?? 0).all<DataRow>(); return { logs:rows.results.map(r => decode<GatewayLog>(r)),total:total?.total ?? 0 };
+  }
+  async getLog(id: string): Promise<{ log: GatewayLog; attempts: AttemptRecord[] } | null> { const row = await this.env.DB.prepare('SELECT data FROM request_logs WHERE id=?').bind(id).first<DataRow>(); if (!row) return null; const attempts = await this.env.DB.prepare('SELECT data FROM attempts WHERE request_id=? ORDER BY started_at,rowid').bind(id).all<DataRow>(); return { log:decode<GatewayLog>(row),attempts:attempts.results.map(r => decode<AttemptRecord>(r)) }; }
+  async listEvents(limit = 30): Promise<GatewayEvent[]> { const rows = await this.env.DB.prepare('SELECT data FROM events ORDER BY created_at DESC LIMIT ?').bind(limit).all<DataRow>(); return rows.results.map(r => decode<GatewayEvent>(r)); }
+  async dashboard(range: string): Promise<DashboardData> {
+    const hours = range === '1h' ? 1 : range === '7d' ? 168 : 24; const since = new Date(Date.now()-hours*3600000).toISOString();
+    const logs = (await this.env.DB.prepare("SELECT json_remove(data,'$.error') AS data FROM request_logs WHERE created_at>=? AND source<>'probe' ORDER BY created_at").bind(since).all<DataRow>()).results.map(r => decode<GatewayLog>(r));
+    const attempts = (await this.env.DB.prepare("SELECT json_remove(a.data,'$.error') AS data FROM attempts a JOIN request_logs l ON l.id=a.request_id WHERE l.created_at>=? AND l.source<>'probe' ORDER BY a.started_at").bind(since).all<DataRow>()).results.map(r => decode<AttemptRecord>(r));
+    const requestIds = new Set(logs.map(l => l.id)); const useful = attempts.filter(a => requestIds.has(a.requestId)); const channels = await this.listChannels();
+    const buckets = new Map<string,{ time: string; primary: number[]; backup: number[]; requests: number }>(); const sorted = channels.filter(c => !c.archived).sort((a,b) => a.priority-b.priority || b.weight-a.weight); const interval = hours === 1 ? 5*60000 : hours === 24 ? 3600000 : 12*3600000;
+    logs.forEach(l => { const date = new Date(Math.floor(Date.parse(l.createdAt)/interval)*interval).toISOString(); let bucket = buckets.get(date); if (!bucket) { bucket = { time:date,primary:[],backup:[],requests:0 }; buckets.set(date,bucket); } bucket.requests++; if (completed(l) && l.stream && l.ttft > 0) (l.channelId === sorted[0]?.id ? bucket.primary : bucket.backup).push(l.ttft); });
+    const average = (v: number[]): number | null => v.length ? v.reduce((a,b) => a+b,0)/v.length : null;
+    const analytics = buildAnalytics(logs,useful,channels,range);
+    return { analytics, totals: analytics.totals, latency:[...buckets.values()].map(b => ({ ...b,primary:average(b.primary),backup:average(b.backup) })),events:await this.listEvents(),channels };
+  }
+  async cleanup(days: number): Promise<void> { const before = new Date(Date.now()-days*86400000).toISOString(); await this.env.DB.batch([this.env.DB.prepare('DELETE FROM attempts WHERE started_at<?').bind(before),this.env.DB.prepare('DELETE FROM request_logs WHERE created_at<?').bind(before),this.env.DB.prepare('DELETE FROM events WHERE created_at<?').bind(before),this.env.DB.prepare('DELETE FROM gateway_state WHERE expires_at<?').bind(Date.now()),this.env.DB.prepare('DELETE FROM admin_sessions WHERE expires_at<?').bind(Date.now())]); }
+  async clearFixtures(): Promise<void> { await this.env.DB.prepare('DELETE FROM channels WHERE fixture=1').run(); }
+}
+export function publicKey(key: KeyRecord): GatewayApiKey { const { tokenHash: _tokenHash,...data } = key; return data; }
+export function expired(key: GatewayApiKey): boolean { if (['','永不过期','never'].includes(key.expires)) return false; const date = /^\d{4}-\d{2}-\d{2}$/.test(key.expires) ? key.expires+'T23:59:59.999+08:00' : key.expires; return Date.parse(date) <= Date.now(); }

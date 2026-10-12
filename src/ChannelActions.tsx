@@ -1,0 +1,719 @@
+import { useId, useState } from "react";
+import type { ReactNode } from "react";
+import { Chip, Dropdown } from "@heroui/react";
+import {
+  Archive,
+  ArrowLeftRight,
+  CircleGauge,
+  Copy,
+  Ellipsis,
+  History,
+  KeyRound,
+  Network,
+  Pencil,
+  Play,
+  Settings2,
+  Shield,
+  Tags,
+  Trash2,
+  Wallet,
+} from "lucide-react";
+import { Button, Dialog, toast } from "./ui";
+import type {
+  ChannelConfig,
+  CredentialMeta,
+  GatewayChannel,
+} from "../shared/types";
+import { api } from "./api";
+import { PanelSection } from "./ChannelPanelUI";
+import {
+  ModelAliasesPanel,
+  ModelPricesPanel,
+  OverridesPanel,
+  overridesToRows,
+  serializeOverrides,
+} from "./ChannelModelPanels";
+import type { OverrideRow } from "./ChannelModelPanels";
+import { ChannelPolicyPanel } from "./ChannelPolicyPanels";
+import {
+  ChannelTestPanel,
+  ChannelCredentialsPanel,
+  ChannelDeletePanel,
+  TestHistory,
+  TestResult,
+} from "./ChannelOperationPanels";
+import "./channel-actions.css";
+
+export function ChannelDialog({
+  title,
+  subtitle,
+  children,
+  onClose,
+  wide = false,
+  footer,
+  className,
+}: {
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+  onClose: () => void;
+  wide?: boolean;
+  footer?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <Dialog
+      title={title}
+      subtitle={subtitle}
+      close={onClose}
+      wide={wide}
+      footer={footer}
+      className={className}
+    >
+      {children}
+    </Dialog>
+  );
+}
+
+type Panel =
+  | "test"
+  | "history"
+  | "aliases"
+  | "prices"
+  | "overrides"
+  | "relay"
+  | "conversions"
+  | "rateLimit"
+  | "endpoints"
+  | "credentials"
+  | "autoDisable"
+  | "delete"
+  | null;
+const titles = {
+  test: "渠道测试",
+  history: "测试历史",
+  aliases: "模型别名",
+  prices: "模型价格",
+  overrides: "覆盖设置",
+  relay: "代理配置",
+  conversions: "转换选项",
+  rateLimit: "速率限制",
+  endpoints: "端点配置",
+  credentials: "上游密钥管理",
+  autoDisable: "自动禁用与恢复",
+  delete: "删除渠道",
+};
+const configPanels = [
+  "aliases",
+  "prices",
+  "overrides",
+  "relay",
+  "conversions",
+  "rateLimit",
+  "endpoints",
+  "autoDisable",
+];
+
+function validateConfig(config: ChannelConfig, panel: Panel): ChannelConfig {
+  const next = structuredClone(config);
+  if (panel === "aliases") {
+    next.aliases = next.aliases.map((alias) => ({
+      from: alias.from.trim(),
+      to: alias.to.trim(),
+    }));
+    if (next.aliases.some((alias) => !alias.from || !alias.to))
+      throw new Error("请填写每条别名的请求模型和上游模型");
+    if (
+      new Set(next.aliases.map((alias) => alias.from)).size !==
+      next.aliases.length
+    )
+      throw new Error("请求模型名称不能重复");
+  }
+  if (panel === "prices") {
+    next.prices = next.prices.map((price) => ({
+      ...price,
+      model: price.model.trim(),
+    }));
+    if (
+      next.prices.some(
+        (price) =>
+          !price.model ||
+          !Number.isFinite(price.input) ||
+          price.input < 0 ||
+          price.input > 1e6 ||
+          !Number.isFinite(price.output) ||
+          price.output < 0 ||
+          price.output > 1e6,
+      )
+    ) {
+      throw new Error("请填写模型名称，输入和输出价格须在 0–1,000,000 之间");
+    }
+    if (
+      new Set(next.prices.map((price) => price.model)).size !==
+      next.prices.length
+    )
+      throw new Error("同一模型只能设置一条价格");
+  }
+  if (panel === "rateLimit") {
+    if (
+      !Number.isInteger(next.rateLimit.requestsPerMinute) ||
+      next.rateLimit.requestsPerMinute < 0 ||
+      next.rateLimit.requestsPerMinute > 1e6 ||
+      !Number.isInteger(next.rateLimit.tokensPerMinute) ||
+      next.rateLimit.tokensPerMinute < 0 ||
+      next.rateLimit.tokensPerMinute > 1e9
+    ) {
+      throw new Error("请求和 token 限额须为有效的非负整数");
+    }
+  }
+  if (panel === "endpoints") {
+    for (const path of Object.values(next.endpoints)) {
+      if (
+        !path.startsWith("/") ||
+        path.startsWith("//") ||
+        /[?#\r\n]/.test(path)
+      )
+        throw new Error("端点须为以 / 开头的相对路径，不能包含查询参数或片段");
+    }
+  }
+  if (panel === "relay" && next.relayUrl.trim()) {
+    let relay: URL;
+    try {
+      relay = new URL(next.relayUrl.trim());
+    } catch {
+      throw new Error("请填写有效的 HTTPS 中继地址");
+    }
+    if (
+      relay.protocol !== "https:" ||
+      relay.username ||
+      relay.password ||
+      relay.search ||
+      relay.hash
+    ) {
+      throw new Error("中继地址须为 HTTPS，不能包含登录信息、查询参数或片段");
+    }
+    next.relayUrl = next.relayUrl.trim();
+  }
+  if (panel === "autoDisable") {
+    const rule = next.autoDisable;
+    if (
+      rule.statuses.some(
+        (status) => !Number.isInteger(status) || status < 400 || status > 599,
+      )
+    )
+      throw new Error("触发状态码须为 400–599");
+    if (
+      !Number.isInteger(rule.threshold) ||
+      rule.threshold < 1 ||
+      rule.threshold > 100
+    )
+      throw new Error("连续错误次数须为 1–100 的整数");
+    if (
+      !Number.isFinite(rule.cooldown) ||
+      rule.cooldown < 1 ||
+      rule.cooldown > 86400
+    )
+      throw new Error("恢复冷却须为 1–86400 秒");
+  }
+  return next;
+}
+
+export default function ChannelActions({
+  channel,
+  onEdit,
+  onRefresh,
+  onPlayground,
+}: {
+  channel: GatewayChannel;
+  onEdit: (channel: GatewayChannel) => void;
+  onRefresh: () => Promise<void>;
+  onPlayground?: (channelId?: string) => void;
+}) {
+  const configFormId = useId();
+  const [panel, setPanel] = useState<Panel>(null);
+  const [busy, setBusy] = useState(false);
+  const [config, setConfig] = useState(channel.config);
+  const [headerRows, setHeaderRows] = useState<OverrideRow[]>([]);
+  const [bodyRows, setBodyRows] = useState<OverrideRow[]>([]);
+  const [result, setResult] = useState<unknown>(null);
+  const [testModel, setTestModel] = useState(channel.model);
+  const [testStream, setTestStream] = useState(true);
+  const [credentials, setCredentials] = useState<CredentialMeta[]>([]);
+  const [label, setLabel] = useState("");
+  const [secret, setSecret] = useState("");
+  const [rotating, setRotating] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [pendingCredential, setPendingCredential] =
+    useState<CredentialMeta | null>(null);
+  const close = () => {
+    setPanel(null);
+    setSecret("");
+    setLabel("");
+    setRotating(null);
+    setResult(null);
+  };
+  const path = `/api/channels/${encodeURIComponent(channel.id)}`;
+  async function operation(task: () => Promise<unknown>, success?: string) {
+    setBusy(true);
+    try {
+      const data = await task();
+      await onRefresh();
+      if (success) toast.success(success);
+      return data;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "操作失败");
+      throw error;
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function loadCredentials() {
+    const data = await api<
+      { credentials: CredentialMeta[] } | CredentialMeta[]
+    >(`${path}/credentials`);
+    setCredentials(Array.isArray(data) ? data : data.credentials);
+  }
+  async function open(next: Panel) {
+    setPanel(next);
+    setResult(null);
+    setConfig(structuredClone(channel.config));
+    setHeaderRows(overridesToRows(channel.config.headers, true));
+    setBodyRows(overridesToRows(channel.config.bodyOverrides));
+    setDeleteConfirm("");
+    setSecret("");
+    setLabel("");
+    setRotating(null);
+    setTestModel(channel.model || channel.models[0] || "");
+    setTestStream(true);
+    if (next !== "credentials" && next !== "history") return;
+    setBusy(true);
+    try {
+      if (next === "credentials") await loadCredentials();
+      else setResult(await api(`${path}/tests`));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function patchConfig() {
+    let next: ChannelConfig;
+    try {
+      next = validateConfig(config, panel);
+      if (panel === "overrides") {
+        next.headers = serializeOverrides(headerRows, true) as Record<
+          string,
+          string
+        >;
+        next.bodyOverrides = serializeOverrides(bodyRows);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "请检查配置");
+      return;
+    }
+    await operation(
+      () =>
+        api(path, { method: "PATCH", body: JSON.stringify({ config: next }) }),
+      "渠道配置已保存",
+    )
+      .then(close)
+      .catch(() => undefined);
+  }
+  function runTest(recover = false) {
+    void operation(() =>
+      api(`${path}/${recover ? "recover" : "test"}`, {
+        method: "POST",
+        ...(recover
+          ? {}
+          : { body: JSON.stringify({ model: testModel, stream: testStream }) }),
+      }),
+    )
+      .then((data) => {
+        setResult(data);
+        if (
+          data &&
+          typeof data === "object" &&
+          "success" in data &&
+          data.success === false
+        ) {
+          toast.error(
+            recover ? "恢复探测失败，请查看结果" : "渠道测试失败，请查看结果",
+          );
+        } else
+          toast.success(
+            recover ? "恢复探测完成，健康状态已更新" : "渠道测试成功",
+          );
+      })
+      .catch(() => undefined);
+  }
+  const menuItems: {
+    panel?: Panel;
+    label: string;
+    icon: typeof Play;
+    action?: () => void;
+    danger?: boolean;
+  }[] = [
+    { panel: "test", label: "测试", icon: Play },
+    { panel: "history", label: "测试历史", icon: History },
+    {
+      label: "复制",
+      icon: Copy,
+      action: () => {
+        void operation(
+          () => api(`${path}/clone`, { method: "POST" }),
+          "已复制为停用渠道，请添加上游密钥",
+        ).catch(() => undefined);
+      },
+    },
+    { panel: "aliases", label: "模型别名", icon: Tags },
+    { panel: "prices", label: "模型价格", icon: Wallet },
+    { panel: "overrides", label: "覆盖设置", icon: Settings2 },
+    { panel: "relay", label: "代理配置", icon: Network },
+    { panel: "conversions", label: "转换选项", icon: ArrowLeftRight },
+    { panel: "rateLimit", label: "速率限制", icon: CircleGauge },
+    { panel: "endpoints", label: "端点配置", icon: Network },
+    { panel: "credentials", label: "密钥管理", icon: KeyRound },
+    { panel: "autoDisable", label: "自动禁用与恢复", icon: Shield },
+    {
+      label: channel.archived ? "恢复渠道" : "归档",
+      icon: Archive,
+      action: () => {
+        void operation(
+          () =>
+            api(path, {
+              method: "PATCH",
+              body: JSON.stringify({
+                archived: !channel.archived,
+                ...(!channel.archived ? { enabled: false } : {}),
+              }),
+            }),
+          channel.archived ? "渠道已恢复，需手动启用" : "渠道已归档",
+        ).catch(() => undefined);
+      },
+    },
+    { panel: "delete", label: "删除", icon: Trash2, danger: true },
+  ];
+  const hasConfig = !!panel && configPanels.includes(panel);
+  return (
+    <div className="cx-actions">
+      <Button
+        variant="ghost"
+        isIconOnly
+        aria-label={`编辑 ${channel.name}`}
+        title="编辑"
+        onClick={() => onEdit(channel)}
+      >
+        <Pencil size={15} />
+      </Button>
+      <Button
+        variant="ghost"
+        isIconOnly
+        title="进入测试场"
+        aria-label={`测试 ${channel.name}`}
+        onClick={() =>
+          onPlayground ? onPlayground(channel.id) : void open("test")
+        }
+      >
+        <Play size={15} />
+      </Button>
+      <Dropdown>
+        <Button
+          variant="ghost"
+          isIconOnly
+          aria-label={`${channel.name} 更多操作`}
+          title="更多操作"
+        >
+          <Ellipsis size={18} />
+        </Button>
+        <Dropdown.Popover placement="bottom end" className="cx-menu">
+          <Dropdown.Menu
+            aria-label={`${channel.name} 渠道操作`}
+            onAction={(key) => {
+              const item = menuItems.find((item) => item.label === key);
+              if (item?.panel) void open(item.panel);
+              else item?.action?.();
+            }}
+          >
+            {menuItems.map((item) => (
+              <Dropdown.Item
+                key={item.label}
+                id={item.label}
+                textValue={item.label}
+                variant={item.danger ? "danger" : "default"}
+              >
+                <item.icon size={15} />
+                {item.label}
+              </Dropdown.Item>
+            ))}
+          </Dropdown.Menu>
+        </Dropdown.Popover>
+      </Dropdown>
+      {pendingCredential && (
+        <Dialog
+          title="删除上游密钥"
+          subtitle={channel.name}
+          close={() => setPendingCredential(null)}
+          className="cp-dialog"
+          footer={
+            <div className="cp-dialog-footer">
+              <span>删除后无法恢复密钥原文</span>
+              <div>
+                <Button
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => setPendingCredential(null)}
+                >
+                  取消
+                </Button>
+                <Button
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() => {
+                    void operation(async () => {
+                      await api(
+                        `${path}/credentials/${encodeURIComponent(pendingCredential.id)}`,
+                        { method: "DELETE" },
+                      );
+                      await loadCredentials();
+                    }, "上游密钥已删除")
+                      .then(() => setPendingCredential(null))
+                      .catch(() => undefined);
+                  }}
+                >
+                  {busy ? "删除中…" : "删除密钥"}
+                </Button>
+              </div>
+            </div>
+          }
+        >
+          <PanelSection
+            title="确认删除此密钥"
+            description="该密钥将从渠道中移除，后续请求使用其他可用密钥。"
+            icon={KeyRound}
+          >
+            <div className="cp-confirm-detail">
+              <Chip color="danger" size="sm">
+                永久删除
+              </Chip>
+              <div>
+                <strong>{pendingCredential.label}</strong>
+                <code>{pendingCredential.preview}</code>
+              </div>
+            </div>
+          </PanelSection>
+        </Dialog>
+      )}
+      {panel && (
+        <ChannelDialog
+          title={titles[panel]}
+          subtitle={`${channel.name} · ${channel.provider}`}
+          onClose={close}
+          wide={panel !== "delete"}
+          className="cp-dialog"
+          footer={
+            hasConfig ? (
+              <div className="cp-dialog-footer">
+                <span>仅应用于当前渠道</span>
+                <div>
+                  <Button variant="secondary" disabled={busy} onClick={close}>
+                    取消
+                  </Button>
+                  <Button
+                    variant="primary"
+                    disabled={busy}
+                    type="submit"
+                    form={configFormId}
+                  >
+                    {busy ? "保存中…" : "保存配置"}
+                  </Button>
+                </div>
+              </div>
+            ) : undefined
+          }
+        >
+          {hasConfig && (
+            <form
+              id={configFormId}
+              className="cp-config-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void patchConfig();
+              }}
+            >
+              {panel === "aliases" && (
+                <ModelAliasesPanel
+                  config={config}
+                  setConfig={setConfig}
+                  models={channel.models}
+                />
+              )}
+              {panel === "prices" && (
+                <ModelPricesPanel
+                  config={config}
+                  setConfig={setConfig}
+                  models={channel.models}
+                />
+              )}
+              {panel === "overrides" && (
+                <OverridesPanel
+                  headerRows={headerRows}
+                  setHeaderRows={setHeaderRows}
+                  bodyRows={bodyRows}
+                  setBodyRows={setBodyRows}
+                />
+              )}
+              {(panel === "relay" ||
+                panel === "conversions" ||
+                panel === "rateLimit" ||
+                panel === "endpoints" ||
+                panel === "autoDisable") && (
+                <ChannelPolicyPanel
+                  panel={panel}
+                  config={config}
+                  setConfig={setConfig}
+                  channel={channel}
+                />
+              )}
+              {panel === "autoDisable" && (
+                <PanelSection
+                  title="健康状态与恢复探测"
+                  icon={Shield}
+                  description="探测通过并达到全局健康策略要求后，渠道才恢复参与路由。"
+                >
+                  <div className="cp-recovery-status">
+                    <Chip
+                      size="sm"
+                      color={
+                        channel.health.autoDisabled
+                          ? "danger"
+                          : channel.status === "healthy"
+                            ? "success"
+                            : "warning"
+                      }
+                    >
+                      {channel.health.autoDisabled
+                        ? "已自动禁用"
+                        : channel.status === "healthy"
+                          ? "健康"
+                          : channel.status === "degraded"
+                            ? "延迟异常"
+                            : "不可用"}
+                    </Chip>
+                    <span>{channel.health.reason || "暂无异常记录"}</span>
+                  </div>
+                  <div>
+                    <Button disabled={busy} onClick={() => runTest(true)}>
+                      <Play size={14} />
+                      {busy ? "探测中…" : "执行恢复探测"}
+                    </Button>
+                  </div>
+                  {result != null && <TestResult result={result} />}
+                </PanelSection>
+              )}
+            </form>
+          )}
+          {panel === "credentials" && (
+            <ChannelCredentialsPanel
+              credentials={credentials}
+              busy={busy}
+              label={label}
+              onLabelChange={setLabel}
+              secret={secret}
+              onSecretChange={setSecret}
+              rotating={rotating}
+              onRotate={(key) => {
+                setRotating(key.id);
+                setLabel(key.label);
+                setSecret("");
+              }}
+              onToggle={(key) => {
+                void operation(async () => {
+                  await api(
+                    `${path}/credentials/${encodeURIComponent(key.id)}`,
+                    {
+                      method: "PATCH",
+                      body: JSON.stringify({ enabled: !key.enabled }),
+                    },
+                  );
+                  await loadCredentials();
+                }, "密钥状态已更新").catch(() => undefined);
+              }}
+              onDelete={setPendingCredential}
+              onCancelRotate={() => {
+                setRotating(null);
+                setSecret("");
+                setLabel("");
+              }}
+              onSubmit={() => {
+                if (!label.trim() || !secret.trim()) {
+                  toast.error("请填写密钥名称和上游 API Key");
+                  return;
+                }
+                void operation(
+                  async () => {
+                    await api(
+                      rotating
+                        ? `${path}/credentials/${encodeURIComponent(rotating)}`
+                        : `${path}/credentials`,
+                      {
+                        method: rotating ? "PATCH" : "POST",
+                        body: JSON.stringify({
+                          label: label.trim(),
+                          secret: secret.trim(),
+                        }),
+                      },
+                    );
+                    setSecret("");
+                    setLabel("");
+                    setRotating(null);
+                    await loadCredentials();
+                  },
+                  rotating ? "上游密钥已轮换" : "上游密钥已添加",
+                ).catch(() => undefined);
+              }}
+            />
+          )}
+          {panel === "test" && (
+            <ChannelTestPanel
+              channel={channel}
+              model={testModel}
+              onModelChange={setTestModel}
+              stream={testStream}
+              onStreamChange={setTestStream}
+              busy={busy}
+              result={result}
+              onTest={() => runTest()}
+              onPlayground={
+                onPlayground
+                  ? () => {
+                      close();
+                      onPlayground(channel.id);
+                    }
+                  : undefined
+              }
+            />
+          )}
+          {panel === "history" && <TestHistory result={result} busy={busy} />}
+          {panel === "delete" && (
+            <ChannelDeletePanel
+              channel={channel}
+              confirmation={deleteConfirm}
+              onConfirmationChange={setDeleteConfirm}
+              busy={busy}
+              onClose={close}
+              onDelete={() => {
+                if (deleteConfirm !== channel.name) return;
+                void operation(
+                  () => api(path, { method: "DELETE" }),
+                  "渠道已删除",
+                )
+                  .then(close)
+                  .catch(() => undefined);
+              }}
+            />
+          )}
+        </ChannelDialog>
+      )}
+    </div>
+  );
+}
