@@ -64,9 +64,10 @@ function ChannelBalance({ channel, refresh }: { channel: GatewayChannel; refresh
   const [loading, setLoading] = useState(false);
   const balance = channel.accountBalance;
   const amount = balance?.amount;
-  const label = amount != null ? `余额 ${balance?.unit === 'USD' ? '$' : ''}${amount.toLocaleString('zh-CN', { maximumFractionDigits: 4 })}${balance?.unit === 'USD' ? '' : ` ${balance?.unit}`}` : balance?.status === 'error' ? '余额刷新失败' : channel.hasAccountCredentials ? '余额待更新' : '未配置账户';
-  const detail = [balance?.updatedAt ? `余额更新于 ${new Date(balance.updatedAt).toLocaleString('zh-CN')}` : '每 5 分钟自动刷新', balance?.error ?? '', '点击立即刷新'].filter(Boolean).join(' · ');
-  return <Button type="button" variant="ghost" size="sm" className={`gx-balance ${balance?.status === 'error' ? 'gx-balance-error' : ''}`} disabled={loading || !channel.hasAccountCredentials} aria-label={`刷新 ${channel.name} 余额`} title={detail} onClick={async () => {
+  const unit = balance?.unit ?? '';
+  const label = amount != null ? `${unit === 'USD' ? '$' : ''}${amount.toLocaleString('zh-CN', { maximumFractionDigits: 4 })}${unit && unit !== 'USD' ? ` ${unit}` : ''}` : balance?.status === 'error' ? '刷新失败' : channel.hasAccountCredentials ? '待更新' : '未配置账户';
+  const detail = [`余额 ${label}`, balance?.updatedAt ? `余额更新于 ${new Date(balance.updatedAt).toLocaleString('zh-CN')}` : '每 5 分钟自动刷新', balance?.error ?? '', '点击立即刷新'].filter(Boolean).join(' · ');
+  return <Button type="button" variant="ghost" size="sm" className={`gx-balance ${balance?.status === 'error' ? 'gx-balance-error' : ''}`} disabled={loading || !channel.hasAccountCredentials} aria-label={`刷新 ${channel.name} 余额`} aria-busy={loading} title={detail} onClick={async () => {
     setLoading(true);
     try {
       const result = await api<{ channel: GatewayChannel }>(`/api/channels/${channel.id}/balance`, { method: 'POST' });
@@ -74,7 +75,12 @@ function ChannelBalance({ channel, refresh }: { channel: GatewayChannel; refresh
       await refresh();
     } catch (error) { toast.error(error instanceof Error ? error.message : '余额刷新失败'); }
     finally { setLoading(false); }
-  }}>{label}{balance?.status === 'error' && amount != null && <span>· 更新失败</span>}<RefreshCw size={12} className={loading ? 'gx-spin' : ''} /></Button>;
+  }}>
+    <span className="gx-balance-caption" title={detail}>余额</span>
+    <strong className="gx-balance-amount" title={detail}>{label}</strong>
+    {balance?.status === 'error' && amount != null && <span className="gx-balance-status" title={detail}>更新失败</span>}
+    <RefreshCw size={13} aria-hidden="true" className={loading ? 'gx-spin' : ''} />
+  </Button>;
 }
 function Filter({
   label,
@@ -1405,9 +1411,10 @@ function ChannelRows({
         <strong>{channel.name}</strong>
         <div className="gx-name-meta">
           {channel.config.protocol === "mock" && <small>本地故障实验</small>}
-          {['newapi','sub2api'].includes(channel.config.integration ?? '') && <>
-            <small>{channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'} 余额监控</small><ChannelBalance channel={channel} refresh={refresh} />
-          </>}
+          {['newapi','sub2api'].includes(channel.config.integration ?? '') && <div className="gx-account-summary">
+            <span className="gx-balance-provider" title={`${channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'} 余额监控`}>{channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'}</span>
+            <ChannelBalance channel={channel} refresh={refresh} />
+          </div>}
         </div>
       </Table.Cell>
       {show("provider") && (
