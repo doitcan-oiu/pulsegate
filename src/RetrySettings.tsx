@@ -25,11 +25,11 @@ const numericFields = {
   retryDelayMs: { title: "重试延迟", description: "两次尝试之间的等待时间。", min: 100, max: 10000, unit: "ms" },
   streamFirstTokenTimeout: { title: "流式首字超时", description: "等待第一个有效内容事件；0 表示关闭。", min: 0, max: 600, unit: "s", step: 0.1 },
   nonStreamTimeout: { title: "非流式传输超时", description: "等待完整响应的最长时间；0 表示关闭。", min: 0, max: 600, unit: "s", step: 0.1 },
-  threshold: { title: "首字延迟健康阈值", description: "最近窗口的平均首字延迟超过阈值时判为异常。", min: 0.1, max: 600, unit: "s", step: 0.1 },
+  threshold: { title: "首字延迟健康阈值", description: "流式窗口满 N 次，且每次都正常取得首字并超过阈值，才判为延迟异常。", min: 0.1, max: 600, unit: "s", step: 0.1 },
   responseThreshold: { title: "完整响应健康阈值", description: "非流式请求的平均完成延迟上限。", min: 0.1, max: 600, unit: "s", step: 0.1 },
-  window: { title: "最近请求窗口", description: "按最近 N 次实际尝试聚合健康指标。", min: 1, max: 1000, unit: "次" },
+  window: { title: "最近请求窗口", description: "流式与非流式分别统计最近 N 次实际尝试；首字需连续 N 次都慢。", min: 1, max: 1000, unit: "次" },
   windowSeconds: { title: "窗口时间上限", description: "仅统计该时间内的请求；0 表示不限。", min: 0, max: 86400, unit: "s" },
-  samples: { title: "最少样本数", description: "达到样本数后，才基于平均延迟判定。", min: 1, max: 1000, unit: "次" },
+  samples: { title: "最少样本数", description: "用于失败比例和非流式平均耗时判定；首字延迟需满整个窗口。", min: 1, max: 1000, unit: "次" },
   cooldown: { title: "异常渠道冷却时间", description: "冷却结束后进入探测恢复。", min: 1, max: 3600, unit: "s" },
   recovery: { title: "恢复所需健康次数", description: "连续健康探测达到次数后恢复正常调度。", min: 1, max: 100, unit: "次" },
   autoDisableThreshold: { title: "连续错误阈值", description: "成功请求将重置连续错误计数。", min: 1, max: 100, unit: "次" },
@@ -118,7 +118,7 @@ export default function RetrySettings({ settings, onSave, saving = false }: Prop
             <Select aria-label="负载均衡策略" value={draft.strategy} onChange={event => change("strategy", event.target.value as GatewaySettings["strategy"])}>
               <option value="failover">故障转移 · 按优先级</option><option value="adaptive">自适应 · 优先低延迟</option>
               <option value="round-robin">轮询</option><option value="weighted">加权随机</option><option value="circuit-breaker">熔断保护</option>
-            </Select><small>先检查健康、权限与模型，再按策略排序。</small>
+            </Select><small>{draft.strategy === "adaptive" ? "在健康渠道中按平均延迟排序；未满慢请求窗口时，也可能选择其他渠道。" : "先检查健康、权限与模型，再按策略排序。"}</small>
           </label>
           <label className="rs-field"><strong>会话粘性</strong>
             <Select aria-label="会话粘性" value={draft.stickyMode} onChange={event => change("stickyMode", event.target.value as GatewaySettings["stickyMode"])}>
@@ -128,6 +128,9 @@ export default function RetrySettings({ settings, onSave, saving = false }: Prop
         </div>
         {toggle("retryEnabled", "启用重试", "在开始输出前，自动重试失败或超时请求。")}
         <div className="rs-grid rs-timeouts">{field("streamFirstTokenTimeout")}{field("nonStreamTimeout")}</div>
+        {draft.streamFirstTokenTimeout > 0 && draft.streamFirstTokenTimeout <= draft.threshold && (
+          <p className="rs-group-note">当前首字超时（{draft.streamFirstTokenTimeout} s）不高于健康阈值（{draft.threshold} s）。达到超时后，本次请求立即失败并按重试设置重试，无需满健康窗口。若要统计连续慢响应，请将首字超时调高或设为 0。</p>
+        )}
       </Card>
       <Card className="rs-section rs-advanced-section">
         <h3>高级设置</h3>
@@ -154,10 +157,10 @@ export default function RetrySettings({ settings, onSave, saving = false }: Prop
           </Accordion.Item>
           <Accordion.Item id="latency-health">
             <Accordion.Heading><Accordion.Trigger><span className="rs-accordion-title">延迟健康检查</span>
-              <small>首字 {draft.threshold} s · 完成 {draft.responseThreshold} s · 最近 {draft.window} 次{draft.autoSwitch ? " · 自动切换" : " · 仅记录"}</small><Accordion.Indicator />
+              <small>首字连续 {draft.window} 次 &gt; {draft.threshold} s · 完成 {draft.responseThreshold} s{draft.autoSwitch ? " · 自动切换" : " · 仅记录"}</small><Accordion.Indicator />
             </Accordion.Trigger></Accordion.Heading>
             <Accordion.Panel><Accordion.Body>
-              <p className="rs-group-note">HTTP 200 同样检查首字与完成延迟，样本不足时不按平均值切换。</p>
+              <p className="rs-group-note">流式需满窗口且每次首字都超过阈值；快请求会打断连续慢请求。非流式达到最少样本后，按平均完成延迟判定。</p>
               <div className="rs-grid">{field("threshold")}{field("responseThreshold")}</div>
               <h4 className="rs-group-title">采样窗口</h4>
               <div className="rs-grid">{field("window")}{field("samples")}{field("windowSeconds")}</div>

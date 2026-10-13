@@ -12,15 +12,20 @@ export function credentialRecoveryAllowed(channel: GatewayChannel, settings: Gat
 export function evaluateHealth(channel: GatewayChannel, settings: GatewaySettings, recent: AttemptRecord[], latest: AttemptRecord, nowMs = Date.now()): HealthDecision {
   if (latest.result === 'cancelled') return { patch: {}, status: channel.status };
   const since = settings.windowSeconds > 0 ? nowMs - settings.windowSeconds * 1000 : 0;
-  const samples = recent.filter(a => a.stream === latest.stream && a.result !== 'cancelled' && Date.parse(a.startedAt) >= since).slice(0, Math.max(1, settings.window));
+  const window = Math.max(1, settings.window);
+  const samples = recent.filter(a => a.stream === latest.stream && a.result !== 'cancelled' && Date.parse(a.startedAt) >= since).slice(0, window);
   const valid = samples.filter(a => a.result === 'success' || a.result === 'slow');
   const mean = (numbers: number[]) => numbers.length ? numbers.reduce((a, b) => a + b, 0) / numbers.length : null;
-  const ttft = mean(valid.flatMap(a => a.ttft === null ? [] : [a.ttft]));
+  const ttft = mean(valid.flatMap(a => a.ttft === null || !Number.isFinite(a.ttft) || a.ttft < 0 ? [] : [a.ttft]));
   const duration = mean(valid.map(a => a.duration));
   const failed = latest.result === 'error' || latest.result === 'empty';
   const failureCount = failed ? channel.health.failureCount + 1 : 0;
   const enough = samples.length >= Math.max(1, settings.samples);
-  const tooSlow = enough && (latest.stream ? ttft !== null && ttft > settings.threshold : duration !== null && duration > settings.responseThreshold);
+  // A slow first token only affects routing after the entire recent window is slow.
+  // Include intervening failures/missing TTFT rather than filtering them into a false streak.
+  const tooSlow = latest.stream
+    ? samples.length === window && samples.every(a => (a.result === 'success' || a.result === 'slow') && a.ttft !== null && Number.isFinite(a.ttft) && a.ttft > settings.threshold)
+    : enough && duration !== null && duration > settings.responseThreshold;
   const mostlyFailed = enough && samples.filter(a => a.result === 'error' || a.result === 'empty').length / samples.length >= 0.5;
   let status = channel.status;
   let reason = channel.health.reason;
@@ -28,7 +33,7 @@ export function evaluateHealth(channel: GatewayChannel, settings: GatewaySetting
   let recoveryCount = channel.health.recoveryCount;
   if (settings.autoSwitch && (tooSlow || mostlyFailed)) {
     status = mostlyFailed ? 'offline' : 'degraded';
-    reason = mostlyFailed ? '最近请求失败率超过 50%' : latest.stream ? `平均首字延迟 ${ttft?.toFixed(2)}s 超过 ${settings.threshold}s` : `平均响应耗时 ${duration?.toFixed(2)}s 超过 ${settings.responseThreshold}s`;
+    reason = mostlyFailed ? '最近请求失败率超过 50%' : latest.stream ? `连续 ${window} 次首字延迟均超过 ${settings.threshold}s` : `平均响应耗时 ${duration?.toFixed(2)}s 超过 ${settings.responseThreshold}s`;
     if (channel.status === 'healthy') cooldownUntil = new Date(nowMs + settings.cooldown * 1000).toISOString();
     recoveryCount = 0;
   }

@@ -442,11 +442,61 @@ describe('protocol conversions and safety', () => {
 
 describe('quality health', () => {
   function sample(stream: boolean, ttft: number, duration = 1): AttemptRecord { return { id: crypto.randomUUID(), requestId: 'r', channelId: 'a', channelName: 'a', credentialId: null, model: 'test', stream, startedAt: new Date().toISOString(), ttft: stream ? ttft : null, duration, status: 200, result: 'success', error: null, inputTokens: 0, outputTokens: 0, attempt: 1 }; }
-  it('evaluates streaming and non-streaming independently with minimum sample count', () => {
-    const c = channel(), latest = sample(true, 12); const settings = { ...defaultSettings, samples: 2 };
+  it('evaluates streaming and non-streaming independently, using a full slow TTFT window', () => {
+    const c = channel(), latest = sample(true, 12); const settings = { ...defaultSettings, window: 3, samples: 2 };
     expect(evaluateHealth(c, settings, [latest, sample(false, 0, 100)], latest).status).toBe('healthy');
-    expect(evaluateHealth(c, settings, [latest, sample(true, 13)], latest).status).toBe('degraded');
+    expect(evaluateHealth(c, settings, [latest, sample(true, 13)], latest).status).toBe('healthy');
+    expect(evaluateHealth(c, settings, [latest, sample(true, 13), sample(true, 14)], latest).status).toBe('degraded');
     const json = sample(false, 0, 30); expect(evaluateHealth(c, settings, [json, sample(false, 0, 30)], json).status).toBe('degraded');
+  });
+  it('requires all 20 consecutive slow responses even when only 10 samples are configured', () => {
+    const c = channel(), latest = sample(true, 11), settings = { ...defaultSettings, threshold: 10, window: 20, samples: 10 };
+    const history = Array.from({ length: 20 }, () => sample(true, 11));
+    for (const length of [1, 2, 10, 19]) {
+      const decision = evaluateHealth(c, settings, history.slice(0, length), latest);
+      expect(decision.status).toBe('healthy'); expect(decision.event).toBeUndefined();
+    }
+    const decision = evaluateHealth(c, settings, history, latest);
+    expect(decision.status).toBe('degraded'); expect(decision.patch.reason).toBe('连续 20 次首字延迟均超过 10s'); expect(decision.event?.type).toBe('warning');
+  });
+  it.each([1, 2])('keeps a full mixed window healthy despite %i extreme slow responses raising the mean', slowCount => {
+    const c = channel(), history = Array.from({ length: 20 }, (_, index) => sample(true, index < slowCount ? 1000 : 1));
+    const decision = evaluateHealth(c, { ...defaultSettings, threshold: 10, window: 20, samples: 10 }, history, history[0]);
+    expect(decision.patch.averageTtft).toBeGreaterThan(10); expect(decision.status).toBe('healthy'); expect(decision.event).toBeUndefined();
+  });
+  it('restarts the consecutive slow window after a normal first token, including exactly the threshold', () => {
+    const c = channel(), settings = { ...defaultSettings, threshold: 10, window: 3, samples: 1 }, recent: AttemptRecord[] = [];
+    for (const [index, ttft] of [12, 12, 10, 12, 12, 12].entries()) {
+      const latest = sample(true, ttft); recent.unshift(latest);
+      const decision = evaluateHealth(c, settings, recent, latest);
+      expect(decision.status).toBe(index === 5 ? 'degraded' : 'healthy');
+    }
+  });
+  it.each(['error', 'empty'] as const)('does not skip an intervening %s attempt into a consecutive slow window', result => {
+    const c = channel(), latest = sample(true, 12), interrupted = { ...sample(true, 12), result, ttft: null };
+    const decision = evaluateHealth(c, { ...defaultSettings, window: 4, samples: 4 }, [latest, sample(true, 12), interrupted, sample(true, 12)], latest);
+    expect(decision.status).toBe('healthy'); expect(decision.patch.averageTtft).toBe(12); expect(decision.event).toBeUndefined();
+  });
+  it.each([null, Number.NaN, Number.POSITIVE_INFINITY, -1])('does not call a missing or invalid TTFT (%s) slow', ttft => {
+    const c = channel(), latest = sample(true, 12), invalid = { ...sample(true, 12), ttft };
+    const decision = evaluateHealth(c, { ...defaultSettings, window: 3, samples: 1 }, [latest, invalid, sample(true, 12)], latest);
+    expect(decision.status).toBe('healthy'); expect(decision.patch.averageTtft).toBe(12);
+  });
+  it('does not count old or other-mode samples toward a full slow TTFT window', () => {
+    const c = channel(), now = Date.now(), latest = sample(true, 12), old = { ...sample(true, 12), startedAt: new Date(now - 11000).toISOString() };
+    const decision = evaluateHealth(c, { ...defaultSettings, window: 3, samples: 1, windowSeconds: 10 }, [latest, sample(false, 0, 100), sample(true, 12), old], latest, now);
+    expect(decision.status).toBe('healthy'); expect(decision.patch.samples).toBe(2);
+  });
+  it('ignores client cancellation without interrupting or occupying the slow window', () => {
+    const c = channel(), latest = sample(true, 12), cancelled = { ...sample(true, 1), result: 'cancelled' as const };
+    const settings = { ...defaultSettings, window: 3, samples: 1 };
+    expect(evaluateHealth(c, settings, [cancelled, latest], cancelled)).toEqual({ patch: {}, status: 'healthy' });
+    expect(evaluateHealth(c, settings, [latest, cancelled, sample(true, 12), sample(true, 12)], latest).status).toBe('degraded');
+  });
+  it('retains consecutive slow samples for monitoring when automatic health switching is off', () => {
+    const c = channel(), latest = sample(true, 12);
+    const decision = evaluateHealth(c, { ...defaultSettings, window: 2, samples: 1, autoSwitch: false }, [latest, sample(true, 12)], latest);
+    expect(decision.status).toBe('healthy'); expect(decision.patch.averageTtft).toBe(12); expect(decision.event).toBeUndefined();
   });
   it('recovers through consecutive fresh probes after cooldown despite stale slow samples', () => {
     const c = channel(); c.status = 'degraded'; c.health.recoveryCount = 1; c.health.cooldownUntil = new Date(Date.now() - 1).toISOString();

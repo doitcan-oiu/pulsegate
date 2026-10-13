@@ -282,13 +282,16 @@ describe('persisted routing state and administration', () => {
     let sequence = 0;
     const attempt = (ttft:number,stream = true): AttemptRecord => ({ id:crypto.randomUUID(),requestId:crypto.randomUUID(),channelId:c.id,channelName:c.name,credentialId:null,model:'test-model',stream,startedAt:new Date(Date.now()+sequence++*100).toISOString(),ttft:stream ? ttft : null,duration:.01,status:200,result:ttft > .02 ? 'slow' : 'success',error:null,inputTokens:1,outputTokens:1,attempt:1 });
     await Promise.all([store.recordAttempt(attempt(.1)),store.recordAttempt(attempt(.1))]);
+    expect((await store.getChannel(c.id))!.status).toBe('healthy');
+    expect((await call('/api/events')).json.events).toEqual([]);
+    await Promise.all([store.recordAttempt(attempt(.1)),store.recordAttempt(attempt(.1))]);
     expect((await store.getChannel(c.id))!.status).toBe('degraded');
     await store.updateHealth(c.id,{ cooldownUntil:new Date(Date.now()-1000).toISOString() });
     await store.recordAttempt(attempt(.001,false)); expect((await store.getChannel(c.id))!.health.recoveryCount).toBe(0);
     await store.recordAttempt(attempt(.001)); expect((await store.getChannel(c.id))!.health.recoveryCount).toBe(1);
     await store.recordAttempt(attempt(.001)); expect((await store.getChannel(c.id))!.status).toBe('healthy');
     await store.recordAttempt(attempt(.001)); const recovered = (await store.getChannel(c.id))!;
-    expect(recovered.status).toBe('healthy'); expect(recovered.health.averageTtft).toBeLessThan(.02); expect(recovered.requests).toBe(6);
+    expect(recovered.status).toBe('healthy'); expect(recovered.health.averageTtft).toBeLessThan(.02); expect(recovered.requests).toBe(8);
   });
   it('routes subsequent real SSE requests away from HTTP 200 channels after their TTFT window degrades',async () => {
     const primary = await newChannel('HTTP 200 slow primary',['slow-test']); const backup = await newChannel('Fast backup',['slow-test']);
@@ -297,18 +300,57 @@ describe('persisted routing state and administration', () => {
     await call('/api/settings','PATCH',{ threshold:.06,window:4,samples:2,streamFirstTokenTimeout:.5,maxSameChannelRetries:0,maxChannelRetries:1,retryDelayMs:100,stickyMode:'off' });
     const k = await newKey({ profiles:[{ id:'slow',name:'Slow isolated scope',scope:'tags',tags:['slow-test'],requestLimit:'10' }],activeProfile:'slow' });
     const input = { model:'test-model',messages:[{ role:'user',content:'Window integration test' }],stream:true,max_tokens:32 };
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 4; i++) {
       const result = await call('/v1/chat/completions','POST',input,{ token:k.token });
       expect(result.response.status).toBe(200); expect(result.response.headers.get('x-pulsegate-channel-id')).toBe(primary.id); expect(result.content).toContain('[DONE]');
+      if (i < 3) {
+        expect((await call(`/api/channels/${primary.id}`)).json.channel.status).toBe('healthy');
+        expect((await call('/api/events')).json.events).toEqual([]);
+      }
     }
     const health = (await call(`/api/channels/${primary.id}`)).json.channel as GatewayChannel;
-    expect(health.status).toBe('degraded'); expect(health.health.samples).toBe(2); expect(health.health.averageTtft).toBeGreaterThan(.06);
+    expect(health.status).toBe('degraded'); expect(health.health.samples).toBe(4); expect(health.health.averageTtft).toBeGreaterThan(.06);
+    expect(health.health.reason).toContain('连续 4');
     const next = await call('/v1/chat/completions','POST',input,{ token:k.token });
     expect(next.response.status).toBe(200); expect(next.response.headers.get('x-pulsegate-channel-id')).toBe(backup.id);
     const logs = (await call('/api/logs')).json.logs;
     const primaryLogs = logs.filter((l:{channelId:string}) => l.channelId === primary.id);
-    expect(primaryLogs).toHaveLength(2); expect(primaryLogs.every((l:{status:number;result:string}) => l.status === 200 && l.result === 'slow')).toBe(true);
-    expect((await call('/api/events')).json.events.some((e:{channelId:string;type:string}) => e.channelId === primary.id && e.type === 'warning')).toBe(true);
+    expect(primaryLogs).toHaveLength(4); expect(primaryLogs.every((l:{status:number;result:string}) => l.status === 200 && l.result === 'slow')).toBe(true);
+    expect((await call('/api/events')).json.events.filter((e:{channelId:string;type:string}) => e.channelId === primary.id && e.type === 'warning')).toHaveLength(1);
+  });
+  it('keeps a primary with a mixed high-average TTFT window until four consecutive slow requests complete',async () => {
+    const primary = await newChannel('Mixed-window primary',['mixed-window']); const backup = await newChannel('Mixed-window backup',['mixed-window']);
+    await call(`/api/channels/${primary.id}`,'PATCH',{ priority:0,config:{ mock:{ scenario:'slow',delayMs:120 } } });
+    await call(`/api/channels/${backup.id}`,'PATCH',{ priority:1,config:{ mock:{ scenario:'healthy',delayMs:1 } } });
+    await call('/api/settings','PATCH',{ threshold:.06,window:4,samples:2,streamFirstTokenTimeout:.5,maxSameChannelRetries:0,maxChannelRetries:1,retryDelayMs:100,stickyMode:'off' });
+    const store = new Store(testEnv); const recordedAt = Date.now()-5000;
+    for (const [index,ttft] of [.001,2,.001,.001].entries()) {
+      await store.recordAttempt({ id:crypto.randomUUID(),requestId:crypto.randomUUID(),channelId:primary.id,channelName:primary.name,credentialId:null,model:'test-model',stream:true,startedAt:new Date(recordedAt+index*100).toISOString(),ttft,duration:ttft+.01,status:200,result:ttft > .06 ? 'slow' : 'success',error:null,inputTokens:1,outputTokens:1,attempt:1 });
+      expect((await store.getChannel(primary.id))!.status).toBe('healthy');
+      expect((await call('/api/events')).json.events).toEqual([]);
+    }
+    const mixed = (await store.getChannel(primary.id))!;
+    expect(mixed.health.samples).toBe(4); expect(mixed.health.averageTtft).toBeGreaterThan(.06);
+    const k = await newKey({ profiles:[{ id:'mixed',name:'Mixed scope',scope:'tags',tags:['mixed-window'],requestLimit:'10' }],activeProfile:'mixed' });
+    const input = { model:'test-model',messages:[{ role:'user',content:'Consecutive slow window test' }],stream:true };
+    for (let index = 0; index < 4; index++) {
+      const response = await call('/v1/chat/completions','POST',input,{ token:k.token });
+      expect(response.response.status).toBe(200); expect(response.response.headers.get('x-pulsegate-channel-id')).toBe(primary.id);
+      expect(response.response.headers.get('x-pulsegate-attempts')).toBe('1'); expect(response.content).toContain('[DONE]'); expect(response.content).not.toContain('"error"');
+      const current = (await store.getChannel(primary.id))!;
+      expect(current.status).toBe(index === 3 ? 'degraded' : 'healthy');
+      const warnings = (await call('/api/events')).json.events.filter((event:{ channelId:string;type:string }) => event.channelId === primary.id && event.type === 'warning');
+      expect(warnings).toHaveLength(index === 3 ? 1 : 0);
+    }
+    const degraded = (await store.getChannel(primary.id))!;
+    expect(degraded.health.reason).toContain('连续 4'); expect(degraded.health.reason).toContain('0.06'); expect(degraded.requests).toBe(8);
+    const next = await call('/v1/chat/completions','POST',input,{ token:k.token });
+    expect(next.response.status).toBe(200); expect(next.response.headers.get('x-pulsegate-channel-id')).toBe(backup.id); expect(next.content).toContain('[DONE]');
+    expect((await store.getChannel(backup.id))!.requests).toBe(1); expect((await store.getKey(k.key.id))!.used).toBe(5);
+    const logs = (await call('/api/logs')).json.logs as GatewayLog[];
+    expect(logs).toHaveLength(5); expect(logs.filter(log => log.channelId === primary.id)).toHaveLength(4);
+    expect(logs.every(log => log.status === 200 && log.attempts === 1)).toBe(true);
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS total FROM attempts').first<{ total:number }>())?.total).toBe(9);
   });
   it('fails over before the first meaningful token on a hard TTFT timeout without waiting for a full health window',async () => {
     const primary = await newChannel('Timeout primary',['timeout-test']); const backup = await newChannel('Timeout backup',['timeout-test']);
@@ -322,7 +364,8 @@ describe('persisted routing state and administration', () => {
     expect(output).not.toContain('Timeout primary'); expect(output).toContain('Timeout backup');
     const detail = (await call(`/api/logs/${result.response.headers.get('x-pulsegate-request-id')}`)).json;
     expect(detail.log.result).toBe('failover'); expect(detail.attempts).toHaveLength(2); expect(detail.attempts[0].channelId).toBe(primary.id); expect(detail.attempts[0].status).toBe(504); expect(detail.attempts[0].ttft).toBeNull(); expect(detail.attempts[1].result).toBe('success');
-    expect((await call(`/api/channels/${primary.id}`)).json.channel.health.samples).toBe(1);
+    const primaryHealth = (await call(`/api/channels/${primary.id}`)).json.channel as GatewayChannel;
+    expect(primaryHealth.health.samples).toBe(1); expect(primaryHealth.status).toBe('healthy');
   });
   it('preserves credential failure counters on cancellation and requires consecutive recovery probes',async () => {
     const c = await newChannel(); const store = new Store(testEnv);
