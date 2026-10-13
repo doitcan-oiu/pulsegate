@@ -162,52 +162,6 @@
     color: var(--muted);
     font-size: 12px;
   }
-  .fn-log-filters {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    padding-bottom: 18px;
-    font-size: 13px;
-    color: var(--muted);
-  }
-  .fn-log-filters > div {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    flex: 1;
-    min-width: 180px;
-  }
-  .fn-log-filters > .select {
-    min-width: 150px;
-  }
-  .fn-log-table {
-    min-width: 900px;
-  }
-  .fn-log-table small {
-    display: block;
-    font-size: 12px;
-    color: var(--muted);
-    margin-top: 5px;
-  }
-  .fn-log-table .table__cell {
-    white-space: nowrap;
-  }
-  .fn-log-table .table__cell:last-child svg {
-    display: inline;
-    margin-left: 10px;
-  }
-  .fn-pagination {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    justify-content: flex-end;
-    margin-top: 18px;
-    font-size: 13px;
-    color: var(--muted);
-  }
-  .fn-pagination span {
-    margin-right: auto;
-  }
   .fn-analytics-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
@@ -387,21 +341,6 @@
     }
     .fn-form-grid {
       grid-template-columns: 1fr;
-    }
-    .fn-log-filters {
-      flex-wrap: wrap;
-    }
-    .fn-log-filters > div {
-      flex-basis: 100%;
-    }
-    .fn-log-filters > .select {
-      flex: 1;
-    }
-    .fn-pagination {
-      flex-wrap: wrap;
-    }
-    .fn-pagination > span:first-child {
-      flex-basis: 100%;
     }
     .fn-attempts li > div {
       flex-wrap: wrap;

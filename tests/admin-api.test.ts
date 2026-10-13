@@ -226,6 +226,56 @@ describe('persisted routing state and administration', () => {
     const details = (await call(`/api/logs/${logs[0].id}`)).json; expect(details.attempts).toHaveLength(1); expect(details.attempts[0].result).toBe('success');
     expect((await call('/api/dashboard')).json.totals.requests).toBe(1);
   });
+  it('clears every request log and attempt while preserving channels, usage, health and independent records',async () => {
+    const c = await newChannel(); const k = await newKey(); const store = new Store(testEnv);
+    await call('/api/settings','PATCH',{ threshold:.1 });
+    const chat = await call('/v1/chat/completions','POST',{ model:'test-model',messages:[{ role:'user',content:'Log clearing test' }] },{ token:k.token });
+    expect(chat.response.status).toBe(200);
+    expect((await call(`/api/channels/${c.id}/test`,'POST',{ stream:false })).response.status).toBe(200);
+    await store.recordAttempt({ id:crypto.randomUUID(),requestId:'orphan-request',channelId:c.id,channelName:c.name,credentialId:null,model:'test-model',stream:false,startedAt:new Date().toISOString(),ttft:null,duration:.01,status:200,result:'success',error:null,inputTokens:1,outputTokens:1,attempt:1 });
+    await store.recordEvent({ id:'kept-event',time:'now',createdAt:new Date().toISOString(),title:'Independent event',description:'Keep this event',type:'info',channelId:c.id });
+    const logs = (await call('/api/logs')).json.logs as GatewayLog[];
+    expect(logs).toHaveLength(2); expect(new Set(logs.map(log => log.source))).toEqual(new Set(['api','probe']));
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS total FROM attempts').first<{ total:number }>())?.total).toBe(3);
+    expect((await store.getChannel(c.id))!.requests).toBe(3); expect((await store.getKey(k.key.id))!.used).toBe(1);
+    const preservedTables = ['channels','credentials','api_keys','profile_usage','events','settings','tags','gateway_state','admin_sessions'];
+    const snapshot = async () => Promise.all(preservedTables.map(async table => ({ table,rows:(await testEnv.DB.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results })));
+    const before = await snapshot();
+    const cleared = await call('/api/logs?q=does-not-match&result=error','DELETE');
+    expect(cleared.response.status).toBe(200); expect(cleared.json).toEqual({ cleared:true });
+    expect((await call('/api/logs')).json).toEqual({ logs:[],total:0 });
+    for (const log of logs) expect((await call(`/api/logs/${log.id}`)).response.status).toBe(404);
+    expect((await call(`/api/channels/${c.id}/tests`)).json).toEqual({ logs:[],total:0 });
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS total FROM attempts').first<{ total:number }>())?.total).toBe(0);
+    expect(await snapshot()).toEqual(before);
+    expect((await call('/api/logs','DELETE')).json).toEqual({ cleared:true });
+  });
+  it('requires administrator authentication and same-origin protection before clearing logs',async () => {
+    await newChannel(); const k = await newKey();
+    await call('/v1/chat/completions','POST',{ model:'test-model',messages:[{ role:'user',content:'Keep this log' }] },{ token:k.token });
+    expect((await call('/api/logs','DELETE',undefined,{ cookie:'' })).response.status).toBe(401);
+    expect((await call('/api/logs','DELETE',undefined,{ cookie:'',token:k.token })).response.status).toBe(401);
+    expect((await call('/api/logs','DELETE',undefined,{ origin:'https://evil.example' })).response.status).toBe(403);
+    const ctx = createExecutionContext();
+    const withoutOrigin = await worker.fetch(new Request('http://127.0.0.1:8787/api/logs',{ method:'DELETE',headers:{ cookie } }),testEnv,ctx);
+    expect(withoutOrigin.status).toBe(403); await withoutOrigin.text(); await waitOnExecutionContext(ctx);
+    expect((await call('/api/logs')).json.total).toBe(1);
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS total FROM attempts').first<{ total:number }>())?.total).toBe(1);
+    expect((await call('/api/logs','DELETE',undefined,{ cookie:'',token:testEnv.ADMIN_TOKEN })).json).toEqual({ cleared:true });
+  });
+  it('rolls back both log tables if clearing either table fails',async () => {
+    await newChannel(); const k = await newKey();
+    await call('/v1/chat/completions','POST',{ model:'test-model',messages:[{ role:'user',content:'Atomic clear' }] },{ token:k.token });
+    const beforeLogs = (await testEnv.DB.prepare('SELECT * FROM request_logs').all()).results;
+    const beforeAttempts = (await testEnv.DB.prepare('SELECT * FROM attempts').all()).results;
+    expect(beforeLogs).toHaveLength(1); expect(beforeAttempts).toHaveLength(1);
+    await testEnv.DB.prepare("CREATE TRIGGER reject_log_clear BEFORE DELETE ON request_logs BEGIN SELECT RAISE(ABORT,'synthetic clear failure'); END").run();
+    try {
+      expect((await call('/api/logs','DELETE')).response.status).toBe(500);
+      expect((await testEnv.DB.prepare('SELECT * FROM request_logs').all()).results).toEqual(beforeLogs);
+      expect((await testEnv.DB.prepare('SELECT * FROM attempts').all()).results).toEqual(beforeAttempts);
+    } finally { await testEnv.DB.prepare('DROP TRIGGER reject_log_clear').run(); }
+  });
   it('aggregates health across requests, requires the matching mode and starts a fresh recovery window',async () => {
     const c = await newChannel(); const store = new Store(testEnv);
     await call('/api/settings','PATCH',{ threshold:.02,window:4,samples:2,cooldown:1,recovery:2 });

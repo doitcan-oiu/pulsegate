@@ -267,6 +267,7 @@ export class Store implements GatewayStore {
     const rows = await this.env.DB.prepare('SELECT data FROM request_logs WHERE '+clause+' ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(...args,options.limit ?? 50,options.offset ?? 0).all<DataRow>(); return { logs:rows.results.map(r => decode<GatewayLog>(r)),total:total?.total ?? 0 };
   }
   async getLog(id: string): Promise<{ log: GatewayLog; attempts: AttemptRecord[] } | null> { const row = await this.env.DB.prepare('SELECT data FROM request_logs WHERE id=?').bind(id).first<DataRow>(); if (!row) return null; const attempts = await this.env.DB.prepare('SELECT data FROM attempts WHERE request_id=? ORDER BY started_at,rowid').bind(id).all<DataRow>(); return { log:decode<GatewayLog>(row),attempts:attempts.results.map(r => decode<AttemptRecord>(r)) }; }
+  async clearLogs(): Promise<void> { await this.env.DB.batch([this.env.DB.prepare('DELETE FROM attempts'),this.env.DB.prepare('DELETE FROM request_logs')]); }
   async listEvents(limit = 30): Promise<GatewayEvent[]> { const rows = await this.env.DB.prepare('SELECT data FROM events ORDER BY created_at DESC LIMIT ?').bind(limit).all<DataRow>(); return rows.results.map(r => decode<GatewayEvent>(r)); }
   async dashboard(range: string): Promise<DashboardData> {
     const hours = range === '1h' ? 1 : range === '7d' ? 168 : 24; const since = new Date(Date.now()-hours*3600000).toISOString();

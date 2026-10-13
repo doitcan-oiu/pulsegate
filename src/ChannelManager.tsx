@@ -67,7 +67,11 @@ function ChannelBalance({ channel, refresh }: { channel: GatewayChannel; refresh
   const unit = balance?.unit ?? '';
   const label = amount != null ? `${unit === 'USD' ? '$' : ''}${amount.toLocaleString('zh-CN', { maximumFractionDigits: 4 })}${unit && unit !== 'USD' ? ` ${unit}` : ''}` : balance?.status === 'error' ? '刷新失败' : channel.hasAccountCredentials ? '待更新' : '未配置账户';
   const detail = [`余额 ${label}`, balance?.updatedAt ? `余额更新于 ${new Date(balance.updatedAt).toLocaleString('zh-CN')}` : '每 5 分钟自动刷新', balance?.error ?? '', '点击立即刷新'].filter(Boolean).join(' · ');
-  return <Button type="button" variant="ghost" size="sm" className={`gx-balance ${balance?.status === 'error' ? 'gx-balance-error' : ''}`} disabled={loading || !channel.hasAccountCredentials} aria-label={`刷新 ${channel.name} 余额`} aria-busy={loading} title={detail} onClick={async () => {
+  return <div className={`gx-balance ${balance?.status === 'error' ? 'gx-balance-error' : ''} ${amount == null ? 'gx-balance-pending' : ''}`} aria-busy={loading} title={detail}>
+    <span className="gx-balance-caption">余额</span>
+    <strong className="gx-balance-amount">{label}</strong>
+    {balance?.status === 'error' && amount != null && <span className="gx-balance-status">更新失败</span>}
+    <Button type="button" variant="ghost" size="sm" isIconOnly className="gx-balance-refresh" disabled={loading || !channel.hasAccountCredentials} aria-label={`刷新 ${channel.name} 余额`} aria-busy={loading} title={loading ? '正在刷新余额' : detail} onClick={async () => {
     setLoading(true);
     try {
       const result = await api<{ channel: GatewayChannel }>(`/api/channels/${channel.id}/balance`, { method: 'POST' });
@@ -75,12 +79,10 @@ function ChannelBalance({ channel, refresh }: { channel: GatewayChannel; refresh
       await refresh();
     } catch (error) { toast.error(error instanceof Error ? error.message : '余额刷新失败'); }
     finally { setLoading(false); }
-  }}>
-    <span className="gx-balance-caption" title={detail}>余额</span>
-    <strong className="gx-balance-amount" title={detail}>{label}</strong>
-    {balance?.status === 'error' && amount != null && <span className="gx-balance-status" title={detail}>更新失败</span>}
+    }}>
     <RefreshCw size={13} aria-hidden="true" className={loading ? 'gx-spin' : ''} />
-  </Button>;
+    </Button>
+  </div>;
 }
 function Filter({
   label,
@@ -1408,28 +1410,25 @@ function ChannelRows({
         />
       </Table.Cell>
       <Table.Cell className="gx-name" textValue={channel.name}>
-        <strong>{channel.name}</strong>
-        <div className="gx-name-meta">
-          {channel.config.protocol === "mock" && <small>本地故障实验</small>}
-          {['newapi','sub2api'].includes(channel.config.integration ?? '') && <div className="gx-account-summary">
-            <span className="gx-balance-provider" title={`${channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'} 余额监控`}>{channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'}</span>
-            <ChannelBalance channel={channel} refresh={refresh} />
-          </div>}
+        <div className="gx-channel-identity">
+          <span className="gx-channel-mark">
+            <ProviderIcon provider={channel.config.protocol === 'mock' ? channel.provider : channel.config.protocol} size={19} />
+          </span>
+          <div className="gx-channel-info">
+            <strong className="gx-channel-title" title={channel.name}>{channel.name}</strong>
+            {(channel.config.protocol === 'mock' || ['newapi', 'sub2api'].includes(channel.config.integration ?? '')) && <div className="gx-name-meta">
+              {channel.config.protocol === "mock" && <small>本地故障实验</small>}
+              {['newapi','sub2api'].includes(channel.config.integration ?? '') && <div className="gx-account-summary">
+                <span className="gx-balance-provider" title={`${channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'} 余额监控`}>{channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'}</span>
+                <ChannelBalance channel={channel} refresh={refresh} />
+              </div>}
+            </div>}
+          </div>
         </div>
       </Table.Cell>
       {show("provider") && (
         <Table.Cell>
-          <Chip size="sm" className="gx-provider">
-            <ProviderIcon
-              provider={
-                channel.config.protocol === "mock"
-                  ? channel.provider
-                  : channel.config.protocol
-              }
-              size={16}
-            />
-            <Chip.Label>{channel.provider}</Chip.Label>
-          </Chip>
+          <span className="gx-provider" title={channel.provider}>{channel.provider}</span>
         </Table.Cell>
       )}
       {show("enabled") && (

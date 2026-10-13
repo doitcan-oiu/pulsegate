@@ -67,6 +67,7 @@ import ApiKeys from "./ApiKeys";
 import RetrySettings from "./RetrySettings";
 import Playground from "./Playground";
 import UsageAnalytics from "./UsageAnalytics";
+import RequestLogs from "./RequestLogs";
 import "./app-functional.css";
 
 type Page =
@@ -271,6 +272,11 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState("");
   const [logPage, setLogPage] = useState(1);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsClearing, setLogsClearing] = useState(false);
+  const logsRequestId = useRef(0);
+  const logsClearingRef = useRef(false);
+  const logDetailRequestId = useRef(0);
   const [logDetail, setLogDetail] = useState<{
     log: GatewayLog;
     attempts: AttemptRecord[];
@@ -344,6 +350,9 @@ export default function App() {
     return () => clearInterval(timer);
   }, [session?.authenticated, refresh]);
   const refreshLogs = useCallback(async () => {
+    if (logsClearingRef.current) return;
+    const requestId = ++logsRequestId.current;
+    setLogsLoading(true);
     const params = new URLSearchParams({
       limit: "25",
       offset: String((logPage - 1) * 25),
@@ -354,10 +363,15 @@ export default function App() {
       const data = await api<{ logs: GatewayLog[]; total: number }>(
         "/api/logs?" + params,
       );
+      if (requestId !== logsRequestId.current || logsClearingRef.current) return;
       setLogs(data.logs);
       setTotalLogs(data.total);
+      if (logPage > 1 && (logPage - 1) * 25 >= data.total)
+        setLogPage(Math.max(1, Math.ceil(data.total / 25)));
     } catch (e) {
-      toast.error(errorText(e));
+      if (requestId === logsRequestId.current) toast.error(errorText(e));
+    } finally {
+      if (requestId === logsRequestId.current) setLogsLoading(false);
     }
   }, [logPage, query, result]);
   useEffect(() => {
@@ -402,10 +416,38 @@ export default function App() {
     await refresh(true);
   }
   async function showLog(id: string) {
+    if (logsClearingRef.current) return;
+    const requestId = ++logDetailRequestId.current;
     try {
-      setLogDetail(await api("/api/logs/" + encodeURIComponent(id)));
+      const detail = await api<{ log: GatewayLog; attempts: AttemptRecord[] }>("/api/logs/" + encodeURIComponent(id));
+      if (requestId === logDetailRequestId.current && !logsClearingRef.current) setLogDetail(detail);
     } catch (e) {
-      toast.error(errorText(e));
+      if (requestId === logDetailRequestId.current) toast.error(errorText(e));
+    }
+  }
+  async function clearLogs() {
+    if (logsClearingRef.current) return;
+    logsClearingRef.current = true;
+    setLogsClearing(true);
+    setLogsLoading(false);
+    ++logsRequestId.current;
+    ++logDetailRequestId.current;
+    try {
+      await api("/api/logs", { method: "DELETE" });
+      setLogs([]);
+      setTotalLogs(0);
+      setQuery("");
+      setResult("");
+      setLogPage(1);
+      setLogDetail(null);
+      toast.success("全部请求日志已清空");
+      await refresh(true);
+    } catch (error) {
+      toast.error(errorText(error));
+      throw error;
+    } finally {
+      logsClearingRef.current = false;
+      setLogsClearing(false);
     }
   }
   async function exportLogs() {
@@ -723,13 +765,13 @@ export default function App() {
               <Button
                 className={
                   "button button-secondary refresh-button " +
-                  (refreshing ? "refreshing" : "")
+                  (refreshing || (page === "requests" && logsLoading) ? "refreshing" : "")
                 }
                 onClick={() => {
                   void refresh();
                   if (page === "requests") void refreshLogs();
                 }}
-                disabled={refreshing}
+                disabled={refreshing || (page === "requests" && (logsLoading || logsClearing))}
               >
                 <RefreshCw size={14} />
                 刷新
@@ -747,6 +789,7 @@ export default function App() {
                 <Button
                   className="button button-primary"
                   onClick={() => void exportLogs()}
+                  disabled={logsClearing}
                 >
                   <Download size={15} />
                   导出日志
@@ -1012,123 +1055,20 @@ export default function App() {
             />
           )}
           {page === "requests" && (
-            <Card className="panel fn-logs">
-              <div className="fn-log-filters">
-                <div>
-                  <FileText size={16} />
-                  <Input
-                    aria-label="搜索请求日志"
-                    placeholder="搜索请求 ID、模型或渠道"
-                    value={query}
-                    onChange={(e) => {
-                      setQuery(e.target.value);
-                      setLogPage(1);
-                    }}
-                  />
-                </div>
-                <Select
-                  aria-label="请求结果"
-                  value={result}
-                  onChange={(e) => {
-                    setResult(e.target.value);
-                    setLogPage(1);
-                  }}
-                >
-                  <option value="">全部结果</option>
-                  {Object.entries(resultNames)
-                    .slice(0, 4)
-                    .map(([value, label]) => (
-                      <option value={value} key={value}>
-                        {label}
-                      </option>
-                    ))}
-                </Select>
-                <span>{totalLogs} 条记录</span>
-              </div>
-              <div className="table-scroll">
-                <Table>
-                  <Table.ScrollContainer>
-                    <Table.Content
-                      aria-label="请求日志"
-                      className="fn-log-table"
-                      onRowAction={(id) => void showLog(String(id))}
-                    >
-                      <Table.Header>
-                        <Table.Column id="column-0" isRowHeader>
-                          请求 / 时间
-                        </Table.Column>
-                        <Table.Column id="column-1">模型 / 渠道</Table.Column>
-                        <Table.Column id="column-2">类型</Table.Column>
-                        <Table.Column id="column-3">首字</Table.Column>
-                        <Table.Column id="column-4">完成</Table.Column>
-                        <Table.Column id="column-5">Tokens</Table.Column>
-                        <Table.Column id="column-6">HTTP</Table.Column>
-                        <Table.Column id="column-7">结果</Table.Column>
-                        <Table.Column id="column-8">尝试</Table.Column>
-                      </Table.Header>
-                      <Table.Body>
-                        {logs.map((log) => (
-                          <Table.Row key={log.id} id={log.id}>
-                            <Table.Cell>
-                              <code>{log.id.slice(0, 12)}</code>
-                              <small>{dateTime(log.createdAt)}</small>
-                            </Table.Cell>
-                            <Table.Cell>
-                              <strong>{log.model}</strong>
-                              <small>{log.channel || "未选中渠道"}</small>
-                            </Table.Cell>
-                            <Table.Cell>
-                              {log.stream ? "SSE" : "JSON"}
-                              <small>
-                                {
-                                  {
-                                    api: "API",
-                                    playground: "测试场",
-                                    probe: "健康探测",
-                                  }[log.source]
-                                }
-                              </small>
-                            </Table.Cell>
-                            <Table.Cell>
-                              {log.stream && log.ttft ? seconds(log.ttft) : "—"}
-                            </Table.Cell>
-                            <Table.Cell>{seconds(log.duration)}</Table.Cell>
-                            <Table.Cell>{count(log.tokens)}</Table.Cell>
-                            <Table.Cell>{log.status}</Table.Cell>
-                            <Table.Cell>
-                              <Badge result={log.result} />
-                            </Table.Cell>
-                            <Table.Cell>
-                              {log.attempts}
-                              <ChevronRight size={13} />
-                            </Table.Cell>
-                          </Table.Row>
-                        ))}
-                      </Table.Body>
-                    </Table.Content>
-                  </Table.ScrollContainer>
-                </Table>
-              </div>
-              {!logs.length && <Empty>没有符合条件的请求记录。</Empty>}
-              <div className="fn-pagination">
-                <span>
-                  第 {logPage} 页 / 共 {Math.max(1, Math.ceil(totalLogs / 25))}{" "}
-                  页
-                </span>
-                <Button
-                  disabled={logPage === 1}
-                  onClick={() => setLogPage((n) => n - 1)}
-                >
-                  上一页
-                </Button>
-                <Button
-                  disabled={logPage * 25 >= totalLogs}
-                  onClick={() => setLogPage((n) => n + 1)}
-                >
-                  下一页
-                </Button>
-              </div>
-            </Card>
+            <RequestLogs
+              logs={logs}
+              total={totalLogs}
+              query={query}
+              result={result}
+              page={logPage}
+              loading={logsLoading}
+              clearing={logsClearing}
+              onQuery={(value) => { if (value === query) return; ++logsRequestId.current; setLogsLoading(true); setQuery(value); setLogPage(1); }}
+              onResult={(value) => { if (value === result) return; ++logsRequestId.current; setLogsLoading(true); setResult(value); setLogPage(1); }}
+              onPage={(value) => { ++logsRequestId.current; setLogsLoading(true); setLogPage(value); }}
+              onOpen={(id) => void showLog(id)}
+              onClear={clearLogs}
+            />
           )}
           {page === "analytics" && <UsageAnalytics dashboard={dashboard} />}
           {page === "settings" && (
