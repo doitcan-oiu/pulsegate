@@ -4,9 +4,10 @@ import { Store, expired, publicKey } from './store';
 import { hashToken, randomToken } from './crypto';
 import { handleGateway, probeChannel } from './gateway';
 import { HttpError, apiKey, assert, bool, channel, number, object, oneOf, settings, strings, text } from './validation';
-import { parseAccountCredentials, refreshAccountBalance, refreshDueAccounts } from './accounts';
+import { assertAccountReuse, parseAccountCredentials, refreshAccountBalance, refreshDueAccounts } from './accounts';
 import { discoverModels } from './model-discovery';
 import { credentialRecoveryAllowed } from './health';
+import { anthropicErrorResponse, handleAnthropicMessages } from './anthropic-ingress';
 export { GatewayState } from './state';
 
 function loopback(request: Request): boolean { return ['127.0.0.1','localhost','[::1]'].includes(new URL(request.url).hostname); }
@@ -41,7 +42,7 @@ function response(data: unknown, status = 200, extra: Record<string,string> = {}
 function noContent(): Response { return new Response(null,{ status:204 }); }
 async function needChannel(store: Store, id: string): Promise<GatewayChannel> { const found = await store.getChannel(id); if (!found) throw new HttpError(404,'Channel not found'); return found; }
 async function needKey(store: Store, id: string): Promise<KeyRecord> { const found = await store.getKey(id); if (!found) throw new HttpError(404,'API Key not found'); return found; }
-async function authorizeApi(request: Request, store: Store): Promise<KeyRecord> { const token = bearer(request); const key = token && token.startsWith('pg_live_') ? await store.findKey(token) : null; if (!key || key.status !== 'active' || expired(key)) throw new HttpError(401,'Invalid, disabled or expired API key'); return key; }
+async function authorizeApi(request: Request, store: Store, anthropic = false): Promise<KeyRecord> { const token = bearer(request) ?? (anthropic ? request.headers.get('x-api-key') : null); const key = token && token.startsWith('pg_live_') ? await store.findKey(token) : null; if (!key || key.status !== 'active' || expired(key)) throw new HttpError(401,'Invalid, disabled or expired API key'); return key; }
 function currentProfile(key: GatewayApiKey): KeyProfile { const profile = key.profiles.find(p => p.id === key.activeProfile); if (!profile) throw new HttpError(403,'Active profile is unavailable'); return profile; }
 function allowedChannel(c: GatewayChannel,p: KeyProfile): boolean { if (!c.enabled || c.archived) return false; if (p.scope === 'channels') return p.channelIds.includes(c.id); if (p.scope === 'tags') { if (p.match === 'none') return !p.tags.some(t => c.tags.includes(t)); return p.match === 'all' ? p.tags.every(t => c.tags.includes(t)) : p.tags.some(t => c.tags.includes(t)); } return true; }
 function modelsFor(channels: GatewayChannel[],p: KeyProfile): string[] {
@@ -139,17 +140,16 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
       if (method === 'PATCH') {
         const b = await body(request); const changed = channel(b,dev,c);
         const account = parseAccountCredentials(b.accountCredentials);
-        assert(!['newapi','sub2api'].includes(changed.config.integration ?? '') || c.hasAccountCredentials || account, '请填写后台账号密码；NewAPI 也可使用后台访问令牌');
-        assert(changed.config.integration !== 'sub2api' || c.accountAuthMode !== 'token' || account, '切换服务商时请重新填写后台账号密码');
+        assertAccountReuse(changed,c,account);
         await store.saveChannel(changed,false,importedCredentials(b),account);
         if (account || changed.endpoint !== c.endpoint || changed.config.integration !== c.config.integration) ctx.waitUntil(refreshAccountBalance(env,changed,dev,true));
         return response({ channel:await store.getChannel(c.id) });
       }
       if (method === 'DELETE') { await store.deleteChannel(c.id); return noContent(); }
     }
-    if (tail === 'clone' && method === 'POST') { const clone = { ...structuredClone(c),id:crypto.randomUUID(),name:c.name+' · 副本',enabled:false,credentialCount:0,hasAccountCredentials:false,accountAuthMode:undefined,accountBalance:undefined,createdAt:new Date().toISOString(),requests:0,ttft:0,successRate:0,history:[],health:{ averageTtft:null,averageDuration:null,samples:0,autoDisabled:false,cooldownUntil:null,recoveryCount:0,failureCount:0,reason:null },status:'healthy' as const }; await store.saveChannel(clone); return response({ channel:clone },201); }
+    if (tail === 'clone' && method === 'POST') { const clone = { ...structuredClone(c),id:crypto.randomUUID(),name:c.name+' · 副本',enabled:false,credentialCount:0,hasAccountCredentials:false,accountAuthMode:undefined,accountIntegration:undefined,accountBalance:undefined,createdAt:new Date().toISOString(),requests:0,ttft:0,successRate:0,history:[],health:{ averageTtft:null,averageDuration:null,samples:0,autoDisabled:false,cooldownUntil:null,recoveryCount:0,failureCount:0,reason:null },status:'healthy' as const }; await store.saveChannel(clone); return response({ channel:clone },201); }
     if (tail === 'test' && method === 'POST') return testChannel(request,env,ctx,store,c,await body(request));
-    if (tail === 'balance' && method === 'POST') { await refreshAccountBalance(env,c,dev,true); return response({ channel:await store.getChannel(c.id) }); }
+    if (tail === 'balance' && method === 'POST') { assert(['newapi','sub2api'].includes(c.config.integration ?? ''), '请先开启上游余额监控'); await refreshAccountBalance(env,c,dev,true); return response({ channel:await store.getChannel(c.id) }); }
     if (tail === 'recover' && method === 'POST') return testChannel(request,env,ctx,store,c,{},true);
     if (tail === 'tests' && method === 'GET') return response(await store.listLogs({ channelId:c.id,source:'probe',limit:50 }));
     if (tail === 'credentials') { if (method === 'GET') return response({ credentials:await store.listCredentialMeta(c.id) }); if (method === 'POST') { const b = await body(request); return response({ credential:await store.addCredential(c.id,text(b.label,'密钥',128),text(b.secret,'',16000)) },201); } }
@@ -182,9 +182,14 @@ export default {
       if (path.startsWith('/api/')) return await admin(request,env,ctx,store);
       if (path === '/v1/models' && request.method === 'GET') { const key = await authorizeApi(request,store); const models = modelsFor(await store.listChannels(),currentProfile(key)); return response({ object:'list',data:models.map(id => ({ id,object:'model',created:0,owned_by:'pulsegate' })) }); }
       if (path === '/v1/chat/completions' && request.method === 'POST') { const key = await authorizeApi(request,store); const input = await body(request,4*1024*1024); return await handleGateway(new Request(request.url,{ method:'POST',headers:request.headers,body:JSON.stringify(input),signal:request.signal }),await context(env,ctx,store,'api',key),store); }
+      if (path === '/v1/messages' && request.method === 'POST') {
+        const key = await authorizeApi(request,store,true);
+        const input = await body(request,4*1024*1024);
+        return await handleAnthropicMessages(request,input,await context(env,ctx,store,'api',key),store);
+      }
       if (path.startsWith('/v1/')) throw new HttpError(404,'API endpoint not found');
       return await env.ASSETS.fetch(request);
-    } catch (error) { if (error instanceof HttpError) return response({ error:{ message:error.message,type:'gateway_error' } },error.status); return response({ error:{ message:'Gateway operation failed; check server configuration',type:'gateway_error' } },500); }
+    } catch (error) { if (path === '/v1/messages') return anthropicErrorResponse(error instanceof HttpError ? error.status : 500,error instanceof HttpError ? error.message : 'Gateway operation failed; check server configuration'); if (error instanceof HttpError) return response({ error:{ message:error.message,type:'gateway_error' } },error.status); return response({ error:{ message:'Gateway operation failed; check server configuration',type:'gateway_error' } },500); }
   },
   async scheduled(_controller: ScheduledController,env: Env,ctx: ExecutionContext): Promise<void> {
     const store = new Store(env); const s = await store.getSettings(); const channels = await store.listChannels(); const due = channels.filter(c => c.enabled && !c.archived && c.health.cooldownUntil && Date.parse(c.health.cooldownUntil) <= Date.now() && (c.health.autoDisabled ? (c.config.autoDisable.enabled ? c.config.autoDisable.recover : s.autoDisableRecover) : s.autoRecover));

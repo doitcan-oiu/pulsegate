@@ -107,6 +107,21 @@ describe('model alias response identity', () => {
     await expectAliasResponse(await handleGateway(aliasRequest(stream), context, store), stream);
     expect(fetcher).toHaveBeenCalledTimes(1); expect(attempts[0].model).toBe('provider-model'); expect(logs[0].model).toBe('client-alias');
   });
+  it.each(['anthropic', 'gemini'] as const)('routes %s inference with a NewAPI account monitor using the native protocol and the inference API key', async protocol => {
+    const c = channel(); c.config.protocol = protocol; c.config.integration = 'newapi'; c.models = ['provider-model']; c.model = 'provider-model';
+    c.hasAccountCredentials = true; c.accountAuthMode = 'token'; c.accountIntegration = 'newapi'; c.endpoint = 'https://upstream.example';
+    c.config.aliases = [{ from: 'client-alias', to: 'provider-model' }];
+    const { context, store } = setup([c]);
+    const fetcher = vi.fn(async (target: RequestInfo | URL, options?: RequestInit) => {
+      const path = new URL(String(target)).pathname, payload = JSON.parse(String(options?.body)), headers = new Headers(options?.headers);
+      expect(path).toBe(protocol === 'anthropic' ? '/v1/messages' : '/v1beta/models/provider-model:generateContent');
+      expect(headers.get(protocol === 'anthropic' ? 'x-api-key' : 'x-goog-api-key')).toBe('secret-super-important'); expect(headers.get('authorization')).toBeNull();
+      if (protocol === 'anthropic') expect(payload).toMatchObject({ model: 'provider-model', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] });
+      else { expect(payload.contents).toEqual([{ role: 'user', parts: [{ text: 'hello' }] }]); expect(payload.messages).toBeUndefined(); }
+      return upstreamReply(protocol, false);
+    }); vi.stubGlobal('fetch', fetcher);
+    await expectAliasResponse(await handleGateway(aliasRequest(false), context, store), false); expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it.each([false, true])('preserves the client alias through a Key profile mapping and failover when stream=%s', async stream => {
     const primary = channel('a'), backup = channel('b');
     for (const [c, alias, target] of [[primary, 'mapped-primary', 'provider-primary'], [backup, 'mapped-backup', 'provider-backup']] as const) {

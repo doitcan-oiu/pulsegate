@@ -2,13 +2,13 @@
 
 基于 **Cloudflare Workers + D1 + Durable Objects + React** 的大模型网关。结合 HTTP 状态、SSE 首字延迟（TTFT）、非流式完整响应耗时、空响应及流中断判断上游质量，在 API Key 授权范围内重试和切换渠道。
 
-已接入真实后端、D1 持久化、OpenAI 兼容入口、Anthropic/Gemini 转换、Cloudflare AI Gateway 自定义服务商和交互式测试场。新安装的数据为空；本地测试渠道需要主动创建，生产不会安装演示数据。前端统一使用 HeroUI 3 的组件及默认配色；[DESIGN.md](DESIGN.md) 保留为早期设计参考。
+已接入真实后端、D1 持久化、OpenAI 兼容及 Anthropic Messages 入口、Anthropic/Gemini 上游转换、Cloudflare AI Gateway 自定义服务商和交互式测试场。新安装的数据为空；本地测试渠道需要主动创建，生产不会安装演示数据。前端统一使用 HeroUI 3 的组件及默认配色；[DESIGN.md](DESIGN.md) 保留为早期设计参考。
 
 ## 功能
 
 | 模块 | 当前实现 |
 | --- | --- |
-| 添加渠道 | OpenAI / Anthropic / Gemini / NewAPI / Sub2API，独立配置草稿、多密钥；从上游模型接口获取、搜索、多选加入，支持手动/批量模型、默认测试模型 |
+| 添加渠道 | OpenAI / Anthropic / Gemini 上游协议，独立的 NewAPI / Sub2API 余额监控选项、多密钥；从上游模型接口获取、搜索、多选加入，支持手动/批量模型、默认测试模型 |
 | 后台余额 | NewAPI / Sub2API 账号密码与登录会话 AES-GCM 加密；每 5 分钟刷新，名称副标题展示余额与状态，可点击立即刷新 |
 | 渠道列表 | 搜索、服务商/状态/标签/模型筛选、分页、列设置、批量启停/标签/权重、JSON 导入 |
 | 渠道菜单 | HeroUI 可视化弹窗：模型映射行、价格与成本预览、类型化请求覆盖、连接与端点预览、限额卡片、状态码选择与恢复流程、密钥轮换、SSE/非流式测试及历史；支持复制、归档与删除 |
@@ -32,6 +32,8 @@ NewAPI / Sub2API 的后台凭据独立于推理 API Key。后台地址从 Base U
 NewAPI 开启 Turnstile 人机验证时，账号密码登录会提示改用后台访问令牌。二次验证、禁用密码登录、令牌失效和用户 ID 错误也会给出具体提示，失败时保留上次成功余额及时间。自动刷新采用 D1 租约、版本校验和有限批次，账户较多时分批处理；归档渠道不刷新。Cloudflare Cron 在页面关闭后继续运行，本地打开控制台时也会触发到期刷新。
 
 模型别名采用可搜索的紧凑列表编辑；请求转发使用上游模型名称，JSON 响应及每个 SSE JSON 事件的 `model` 返回客户端原始请求的公开模型名，跨渠道切换后也保持一致。
+
+上游协议与余额后台分别配置：选择 OpenAI / Anthropic / Gemini 后，可独立打开「上游余额监控」并选择 NewAPI / Sub2API。它只决定后台余额的认证和读取方式，不改变推理或模型发现协议。已有渠道按原协议和监控类型加载，可直接切换真实上游协议；关闭监控保留已保存凭据、会话和最近余额，恢复同一后台可继续使用。切换后台类型须提供对应凭据，账户草稿按后台类型独立保留。历史数据无需数据库迁移。
 
 已有安装升级时需应用新的账户表迁移，账号和会话均不保存在渠道公开 JSON 中：
 
@@ -115,7 +117,7 @@ npm run deploy:button -- https://github.com/your-name/pulsegate
 
 复制只复制配置，默认停用，不复制凭据；归档不参与调度，删除会删除上游密钥。客户端修改渠道时不能覆盖健康状态、计数等服务端指标。批量导入先完成所有校验和凭据加密，再以 D1 事务统一写入；失败会整批回滚。
 
-SDK `base_url` 使用 `https://你的worker地址/v1`。公开入口：`GET /v1/models`、`POST /v1/chat/completions`。
+OpenAI SDK 的 `base_url` 使用 `https://你的worker地址/v1`。公开入口：`GET /v1/models`、`POST /v1/chat/completions` 和 Anthropic 原生 `POST /v1/messages`。输入协议与上游协议独立，Messages 请求可经网关转换发往 OpenAI、Anthropic 或 Gemini 渠道，并复用 Key Profile、别名、重试、健康及用量记录。
 
 ```bash
 curl https://你的worker地址/v1/chat/completions \
@@ -125,6 +127,18 @@ curl https://你的worker地址/v1/chat/completions \
 ```
 
 `x-trace-id`、`x-thread-id` 启用会话粘性：先 trace 最近成功渠道，再 thread，失效后正常调度；状态按 Key/Profile/模型隔离。响应的 `x-pulsegate-request-id` 用于查询轨迹，SSE 响应还返回首字耗时/尝试次数。
+
+Anthropic 客户端使用根地址 `https://你的worker地址`，`x-api-key` 填本程序创建的 `pg_live_...`；也支持 Bearer 认证。在 NewAPI 中创建指向本程序的 Anthropic 渠道时，代理地址同样只填根地址，由 NewAPI 添加 `/v1/messages`：
+
+```bash
+curl https://你的worker地址/v1/messages \
+  -H "x-api-key: pg_live_替换为真实Token" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"你的模型或映射名","max_tokens":1024,"messages":[{"role":"user","content":"你好"}],"stream":true}'
+```
+
+Messages 入口支持文本、system、图片、客户端工具调用、JSON 和原生 SSE 事件。当前无法跨协议完整保留的 thinking 控制/历史、缓存控制、服务端工具及其他高级参数会明确返回 400，避免静默丢弃。原生 Anthropic 上游的响应保留内容块、签名、缓存用量和停止信息；OpenAI/Gemini 上游返回内容转换为 Messages 响应。
 
 ### Profile 权限
 

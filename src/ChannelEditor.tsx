@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from "react";
 import { Accordion, Card, Chip, Link } from "@heroui/react";
 import {
   Check,
+  CircleDollarSign,
   Download,
   Globe,
   Info,
@@ -34,7 +35,7 @@ import type { GatewayChannel, ProviderProtocol } from "../shared/types";
 import "./channel-editor.css";
 
 type NativeService = Exclude<ProviderProtocol, "mock">;
-type Service = NativeService | "newapi" | "sub2api";
+type BalanceBackend = "newapi" | "sub2api";
 type Connection = "direct" | "relay" | "ai-gateway";
 type ProviderDraft = {
   connection: Connection;
@@ -47,12 +48,21 @@ type ProviderDraft = {
   modelInput: string;
   batchInput: string;
   batchOpen: boolean;
+};
+type AccountDraft = {
   username: string;
   password: string;
   accountAuth: "password" | "token";
   accessToken: string;
   accountUserId: string;
 };
+const emptyAccountDraft = (): AccountDraft => ({
+  username: "",
+  password: "",
+  accountAuth: "password",
+  accessToken: "",
+  accountUserId: "",
+});
 type Props = {
   channel?: GatewayChannel;
   tags: string[];
@@ -63,7 +73,7 @@ type Props = {
 };
 
 const services: {
-  id: Service;
+  id: NativeService;
   protocol: NativeService;
   name: string;
   format: string;
@@ -93,22 +103,6 @@ const services: {
     format: "Gemini (Contents)",
     endpoint: "https://generativelanguage.googleapis.com",
     description: "Gemini 原生接口",
-  },
-  {
-    id: "newapi",
-    protocol: "openai",
-    name: "NewAPI",
-    format: "OpenAI (Chat Completions)",
-    endpoint: "",
-    description: "NewAPI 聚合服务",
-  },
-  {
-    id: "sub2api",
-    protocol: "openai",
-    name: "Sub2API",
-    format: "OpenAI (Chat Completions)",
-    endpoint: "",
-    description: "Sub2API 聚合服务",
   },
 ];
 
@@ -210,15 +204,32 @@ export default function ChannelEditor({
   const [protocol, setProtocol] = useState<ProviderProtocol>(
     channel?.config.protocol ?? "openai",
   );
-  const [serviceId, setServiceId] = useState<Service>(
+  const initialBalanceBackend =
     channel?.config.integration === "newapi" ||
-      channel?.config.integration === "sub2api"
+    channel?.config.integration === "sub2api"
       ? channel.config.integration
-      : channel?.config.protocol === "anthropic" ||
-          channel?.config.protocol === "gemini"
-        ? channel.config.protocol
-        : "openai",
+      : undefined;
+  const savedBalanceBackend = channel?.accountIntegration ?? initialBalanceBackend;
+  const [balanceEnabled, setBalanceEnabled] = useState(
+    Boolean(initialBalanceBackend) && channel?.config.protocol !== "mock",
   );
+  const [balanceBackend, setBalanceBackend] = useState<BalanceBackend>(
+    initialBalanceBackend ?? savedBalanceBackend ?? "newapi",
+  );
+  const [accountDrafts, setAccountDrafts] = useState<
+    Record<BalanceBackend, AccountDraft>
+  >(() => ({
+    newapi: {
+      ...emptyAccountDraft(),
+      accountAuth:
+        savedBalanceBackend === "newapi"
+          ? (channel?.accountAuthMode ?? "password")
+          : "password",
+    },
+    sub2api: emptyAccountDraft(),
+  }));
+  const { username, password, accountAuth, accessToken, accountUserId } =
+    accountDrafts[balanceBackend];
   const [endpoint, setEndpoint] = useState(
     channel?.endpoint ?? services[0].endpoint,
   );
@@ -238,13 +249,6 @@ export default function ChannelEditor({
   const [weight, setWeight] = useState(channel?.weight ?? 1);
   const [enabled, setEnabled] = useState(channel?.enabled ?? true);
   const [secrets, setSecrets] = useState("");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [accountAuth, setAccountAuth] = useState<"password" | "token">(
-    channel?.accountAuthMode ?? "password",
-  );
-  const [accessToken, setAccessToken] = useState("");
-  const [accountUserId, setAccountUserId] = useState("");
   const initialConnection: Connection =
     channel?.config.gatewayMode === "ai-gateway"
       ? "ai-gateway"
@@ -269,13 +273,15 @@ export default function ChannelEditor({
     sequence: number;
     controller: AbortController | null;
   }>({ sequence: 0, controller: null });
-  const drafts = useRef<Partial<Record<Service, ProviderDraft>>>({});
+  const drafts = useRef<Partial<Record<NativeService, ProviderDraft>>>({});
   const simulated = protocol === "mock";
-  const service = services.find((item) => item.id === serviceId);
-  const requiresAccount = serviceId === "newapi" || serviceId === "sub2api";
-  const useAccountToken = serviceId === "newapi" && accountAuth === "token";
+  const service = services.find((item) => item.protocol === protocol);
+  const requiresAccount = balanceEnabled && !simulated;
+  const balanceBackendName = balanceBackend === "newapi" ? "NewAPI" : "Sub2API";
+  const useAccountToken = balanceBackend === "newapi" && accountAuth === "token";
   const hasSavedAccount = Boolean(
     channel?.hasAccountCredentials &&
+      savedBalanceBackend === balanceBackend &&
       (channel.accountAuthMode ?? "password") ===
         (useAccountToken ? "token" : "password"),
   );
@@ -321,7 +327,7 @@ export default function ChannelEditor({
       request.sequence += 1;
       request.controller?.abort();
     };
-  }, [endpoint, protocol, serviceId, connection, relayUrl, slug, secrets]);
+  }, [endpoint, protocol, connection, relayUrl, slug, secrets]);
 
   function closeEditor() {
     if (busy) return;
@@ -334,9 +340,11 @@ export default function ChannelEditor({
     return {
       ...(channel?.config ?? defaultChannelConfig),
       protocol,
-      integration: requiresAccount
-        ? (serviceId as "newapi" | "sub2api")
-        : ("native" as const),
+      integration: simulated
+        ? (channel?.config.integration ?? "native")
+        : requiresAccount
+          ? balanceBackend
+          : ("native" as const),
       gatewayMode: simulated
         ? (channel?.config.gatewayMode ?? "direct")
         : connection === "ai-gateway"
@@ -356,12 +364,23 @@ export default function ChannelEditor({
     };
   }
 
-  function chooseService(next: Service) {
-    if (channel || simulated || busy || next === serviceId) return;
+  function updateAccount(patch: Partial<AccountDraft>) {
+    setAccountDrafts((previous) => ({
+      ...previous,
+      [balanceBackend]: { ...previous[balanceBackend], ...patch },
+    }));
+  }
+
+  function chooseService(next: NativeService) {
+    if (simulated || busy || next === protocol) return;
     const selected = services.find((item) => item.id === next)!;
     discoveryRequest.current.sequence += 1;
     discoveryRequest.current.controller?.abort();
-    drafts.current[serviceId] = {
+    if (channel) {
+      setProtocol(selected.protocol);
+      return;
+    }
+    drafts.current[protocol as NativeService] = {
       connection,
       relayUrl,
       slug,
@@ -372,16 +391,10 @@ export default function ChannelEditor({
       modelInput,
       batchInput,
       batchOpen,
-      username,
-      password,
-      accountAuth,
-      accessToken,
-      accountUserId,
     };
     const draft = drafts.current[next];
-    setServiceId(next);
     setProtocol(selected.protocol);
-    // Each provider keeps its own model, endpoint and credential draft.
+    // New channels keep connection/model/API key drafts per request protocol.
     setEndpoint(draft?.endpoint ?? selected.endpoint);
     setConnection(draft?.connection ?? "direct");
     setRelayUrl(draft?.relayUrl ?? "");
@@ -392,11 +405,6 @@ export default function ChannelEditor({
     setModelInput(draft?.modelInput ?? "");
     setBatchInput(draft?.batchInput ?? "");
     setBatchOpen(draft?.batchOpen ?? false);
-    setUsername(draft?.username ?? "");
-    setPassword(draft?.password ?? "");
-    setAccountAuth(draft?.accountAuth ?? "password");
-    setAccessToken(draft?.accessToken ?? "");
-    setAccountUserId(draft?.accountUserId ?? "");
     if (
       services.some((item) => item.name === provider) ||
       provider === "Google Gemini"
@@ -640,7 +648,7 @@ export default function ChannelEditor({
           (!hasSavedAccount || hasEnteredAccount) &&
           (!username.trim() || !password)
         ) {
-          toast.error(`请填写完整的 ${service?.name} 账号和密码`);
+          toast.error(`请填写完整的 ${balanceBackendName} 账号和密码`);
           return;
         }
         if (username.trim().length > 256 || password.length > 4096) {
@@ -695,8 +703,10 @@ export default function ChannelEditor({
         }),
       });
       setSecrets("");
-      setPassword("");
-      setAccessToken("");
+      setAccountDrafts({
+        newapi: emptyAccountDraft(),
+        sub2api: emptyAccountDraft(),
+      });
       toast.success(channel ? "渠道已保存" : "渠道已创建");
       await onSaved();
     } catch (error) {
@@ -739,9 +749,9 @@ export default function ChannelEditor({
       }
     >
       <form id={formId} onSubmit={submit} className="ce-layout" noValidate>
-        <aside className="ce-services" aria-label="选择服务商">
+        <aside className="ce-services" aria-label="选择上游请求协议">
           <div className="ce-services-heading">
-            <h3>服务商</h3>
+            <h3>API 协议</h3>
           </div>
           <div className="ce-service-list">
             {services.map((item) => (
@@ -750,13 +760,9 @@ export default function ChannelEditor({
                 key={item.id}
                 variant="ghost"
                 className="ce-service"
-                aria-label={`选择 ${item.name} 服务商`}
-                aria-pressed={serviceId === item.id && !simulated}
-                disabled={
-                  simulated ||
-                  busy ||
-                  (Boolean(channel) && serviceId !== item.id)
-                }
+                aria-label={`选择 ${item.name} 协议`}
+                aria-pressed={protocol === item.protocol && !simulated}
+                disabled={simulated || busy}
                 onClick={() => chooseService(item.id)}
               >
                 <ProviderIcon
@@ -776,16 +782,16 @@ export default function ChannelEditor({
             <Card className="ce-service-note">
               <Server size={18} />
               <strong>本地模拟渠道</strong>
-              <p>保留模拟协议与故障场景。添加真实渠道时可选择左侧服务商。</p>
+              <p>保留模拟协议与故障场景，无法启用上游余额监控。</p>
             </Card>
           ) : (
             <Card className="ce-service-note">
               <Info size={18} />
-              <strong>{channel ? "保留现有服务商" : "兼容接口也可接入"}</strong>
+              <strong>上游请求格式</strong>
               <p>
                 {channel
-                  ? "已有渠道的协议保持固定。接入其他服务商时，请创建新渠道并配置对应密钥。"
-                  : "兼容接口可填写自定义 Base URL。切换服务商会保留配置草稿。"}
+                  ? "切换协议保留连接、模型与密钥；请确认上游支持所选格式。余额监控独立配置。"
+                  : "兼容接口可填写自定义 Base URL。每种协议保留连接与模型草稿，余额监控独立配置。"}
               </p>
             </Card>
           )}
@@ -796,12 +802,18 @@ export default function ChannelEditor({
             title="连接服务"
             description="填写连接地址和认证信息"
             icon={<Globe size={16} />}
-            action={<span className="ce-format">{format}</span>}
+            action={
+              <div className="ce-format">
+                <span>上游请求协议</span>
+                <strong>{format}</strong>
+                <small>网关转发到上游时使用的格式</small>
+              </div>
+            }
           >
             {simulated && (
               <Notice>
-                此渠道使用本地故障模拟，不发送真实上游请求；服务商和 API
-                格式保持原配置。
+                此渠道使用本地故障模拟，不发送真实上游请求；API
+                协议保持原配置。
               </Notice>
             )}
             <div className="ce-fields">
@@ -867,23 +879,61 @@ export default function ChannelEditor({
             {!simulated && credentialCount + enteredKeys.length === 0 && (
               <Notice>暂无密钥。可先关闭「启用渠道」，稍后补充。</Notice>
             )}
+          </Section>
+
+          <Section
+            title="上游余额监控"
+            description="独立选择后台类型和凭据，用于自动刷新账户余额"
+            icon={<CircleDollarSign size={16} />}
+            action={
+              <Switch
+                aria-label="启用上游余额监控"
+                checked={requiresAccount}
+                disabled={simulated || busy}
+                onChange={(event) => setBalanceEnabled(event.target.checked)}
+              />
+            }
+          >
+            {!requiresAccount && (
+              <p className="ce-balance-hint">
+                {simulated
+                  ? "本地模拟渠道不读取上游账户余额。"
+                  : "开启后可选择 NewAPI 或 Sub2API；关闭后停止余额刷新，已保存的后台凭据仍保留。"}
+              </p>
+            )}
             {requiresAccount && (
               <div className="ce-account">
+                <label className="ce-field">
+                  <span>后台类型</span>
+                  <Select
+                    aria-label="余额监控后台类型"
+                    value={balanceBackend}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setBalanceBackend(event.target.value as BalanceBackend)
+                    }
+                  >
+                    <option value="newapi">NewAPI</option>
+                    <option value="sub2api">Sub2API</option>
+                  </Select>
+                </label>
                 <div className="ce-account-heading">
                   <KeyRound size={16} />
-                  <strong>{service?.name} 账户</strong>
-                  {channel?.hasAccountCredentials && (
+                  <strong>{balanceBackendName} 账户</strong>
+                  {hasSavedAccount && (
                     <Chip size="sm">已保存</Chip>
                   )}
                 </div>
-                {serviceId === "newapi" && (
+                {balanceBackend === "newapi" && (
                   <label className="ce-field">
                     <span>余额刷新认证</span>
                     <Select
                       aria-label="NewAPI 余额刷新认证方式"
                       value={accountAuth}
                       onChange={(event) =>
-                        setAccountAuth(event.target.value as "password" | "token")
+                        updateAccount({
+                          accountAuth: event.target.value as "password" | "token",
+                        })
                       }
                     >
                       <option value="password">账号密码</option>
@@ -904,7 +954,9 @@ export default function ChannelEditor({
                           maxLength={4096}
                           autoComplete="new-password"
                           value={accessToken}
-                          onChange={(event) => setAccessToken(event.target.value)}
+                          onChange={(event) =>
+                            updateAccount({ accessToken: event.target.value })
+                          }
                           placeholder={hasSavedAccount ? "留空保留已保存令牌" : "填写后台个人访问令牌"}
                         />
                         <small>
@@ -919,7 +971,9 @@ export default function ChannelEditor({
                           maxLength={20}
                           autoComplete="off"
                           value={accountUserId}
-                          onChange={(event) => setAccountUserId(event.target.value)}
+                          onChange={(event) =>
+                            updateAccount({ accountUserId: event.target.value })
+                          }
                           placeholder={hasSavedAccount ? "留空保留；修改时请同时填写令牌" : "个人资料中的数字用户 ID；新版可留空"}
                         />
                       </label>
@@ -928,19 +982,21 @@ export default function ChannelEditor({
                     <>
                       <label className="ce-field">
                         <span>
-                          {serviceId === "sub2api" ? "邮箱 / 账号" : "账号"}
+                          {balanceBackend === "sub2api" ? "邮箱 / 账号" : "账号"}
                           <em>{hasSavedAccount ? "" : " *"}</em>
                         </span>
                         <Input
-                          aria-label={`${service?.name} 账号`}
+                          aria-label={`${balanceBackendName} 账号`}
                           maxLength={256}
                           autoComplete="off"
                           value={username}
-                          onChange={(event) => setUsername(event.target.value)}
+                          onChange={(event) =>
+                            updateAccount({ username: event.target.value })
+                          }
                           placeholder={
                             hasSavedAccount
                               ? "留空保留已保存账号"
-                              : serviceId === "sub2api"
+                              : balanceBackend === "sub2api"
                                 ? "name@example.com"
                                 : "用户名"
                           }
@@ -951,12 +1007,14 @@ export default function ChannelEditor({
                           密码<em>{hasSavedAccount ? "" : " *"}</em>
                         </span>
                         <Input
-                          aria-label={`${service?.name} 密码`}
+                          aria-label={`${balanceBackendName} 密码`}
                           type="password"
                           maxLength={4096}
                           autoComplete="new-password"
                           value={password}
-                          onChange={(event) => setPassword(event.target.value)}
+                          onChange={(event) =>
+                            updateAccount({ password: event.target.value })
+                          }
                           placeholder={hasSavedAccount ? "留空保留已保存密码" : "输入账户密码"}
                         />
                       </label>
@@ -968,7 +1026,9 @@ export default function ChannelEditor({
                   {hasSavedAccount
                     ? "留空保留原凭据，修改时请完整填写。"
                     : "后台凭据加密保存，不回显。"}
-                  {serviceId === "newapi" &&
+                  {channel?.hasAccountCredentials && !hasSavedAccount &&
+                    "切换后台类型或认证方式后，须填写对应的完整凭据。"}
+                  {balanceBackend === "newapi" &&
                     !useAccountToken &&
                     "开启人机验证的站点请使用后台访问令牌。"}
                 </small>

@@ -4,7 +4,7 @@ import type { Credential, Env, GatewayStore, KeyRecord } from './env';
 import { decryptSecret, encryptSecret, hashToken, previewToken, randomToken, redact } from './crypto';
 import { autoDisableDecision, credentialRecoveryAllowed, evaluateHealth } from './health';
 import { HttpError } from './validation';
-import { prepareAccountSave, type AccountCredentials } from './accounts';
+import { assertAccountReuse, prepareAccountSave, type AccountCredentials } from './accounts';
 import { buildAnalytics, completed } from './analytics';
 
 type DataRow = { id: string; data: string; health_version?: number };
@@ -39,16 +39,26 @@ export class Store implements GatewayStore {
   async saveChannel(channel: GatewayChannel, fixture = false, credentials: CredentialInput[] = [], account?: AccountCredentials): Promise<void> {
     if (credentials.length > 100) throw new HttpError(400, 'Upstream API keys must be a bounded array');
     credentials.forEach(validateCredential);
+    const stored = await this.env.DB.prepare('SELECT data,EXISTS(SELECT 1 FROM channel_accounts a WHERE a.channel_id=channels.id) AS has_account,(SELECT version FROM channel_accounts a WHERE a.channel_id=channels.id) AS account_version FROM channels WHERE id=?').bind(channel.id).first<{ data: string; has_account: number; account_version: number | null }>();
+    const previous = stored ? { ...decode<GatewayChannel>(stored), hasAccountCredentials: !!stored.has_account } : null;
+    if (previous && (previous.hasAccountCredentials || previous.config.integration !== channel.config.integration)) assertAccountReuse(channel, previous, account);
     // Prepare every encrypted insert before the transaction; edits append and never replace existing keys.
     const prepared = await Promise.all(credentials.map(credential => this.prepareCredential(channel.id,credential)));
     const accountStatement = await prepareAccountSave(this.env, channel, account);
-    if (account) channel = { ...channel, accountAuthMode: 'accessToken' in account ? 'token' : 'password' };
-    // A stale metadata edit must not overwrite the mode of concurrently saved credentials.
+    if (account) channel = { ...channel, accountAuthMode: 'accessToken' in account ? 'token' : 'password', accountIntegration: channel.config.integration as 'newapi' | 'sub2api' };
+    // Merge account metadata against the row inside the transaction. A newer account
+    // must keep its backend and destination even if this edit passed an older check.
     const modeSource = account ? 'excluded' : 'channels';
-    const statements = [this.env.DB.prepare(`INSERT INTO channels(id,data,fixture) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=json_patch(json_set(excluded.data,'$.health',json_extract(channels.data,'$.health'),'$.status',json_extract(channels.data,'$.status'),'$.requests',json_extract(channels.data,'$.requests'),'$.ttft',json_extract(channels.data,'$.ttft'),'$.successRate',json_extract(channels.data,'$.successRate'),'$.history',json_extract(channels.data,'$.history')),json_object('accountAuthMode',json_extract(${modeSource}.data,'$.accountAuthMode'))),health_version=channels.health_version+1`).bind(channel.id, JSON.stringify(channel), fixture ? 1 : 0), ...channel.tags.map(tag => this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(tag))];
+    const savedIntegration = account ? "json_extract(excluded.data,'$.accountIntegration')" : "COALESCE(json_extract(channels.data,'$.accountIntegration'),CASE WHEN EXISTS(SELECT 1 FROM channel_accounts a WHERE a.channel_id=channels.id) AND json_extract(channels.data,'$.config.integration') IN ('newapi','sub2api') THEN json_extract(channels.data,'$.config.integration') END)";
+    const requestedIntegration = "json_extract(excluded.data,'$.config.integration')";
+    const backendConflict = account ? '0' : `(${requestedIntegration} IN ('newapi','sub2api') AND (${savedIntegration}) IS NOT ${requestedIntegration})`;
+    const effectiveIntegration = `CASE WHEN ${backendConflict} THEN json_extract(channels.data,'$.config.integration') ELSE ${requestedIntegration} END`;
+    const accountVersion = stored?.account_version ?? -1;
+    const effectiveEndpoint = account ? "json_extract(excluded.data,'$.endpoint')" : `CASE WHEN ${backendConflict} OR COALESCE((SELECT version FROM channel_accounts a WHERE a.channel_id=channels.id),-1)<>? THEN json_extract(channels.data,'$.endpoint') ELSE json_extract(excluded.data,'$.endpoint') END`;
+    const statements = [this.env.DB.prepare(`INSERT INTO channels(id,data,fixture) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=json_patch(json_set(excluded.data,'$.health',json_extract(channels.data,'$.health'),'$.status',json_extract(channels.data,'$.status'),'$.requests',json_extract(channels.data,'$.requests'),'$.ttft',json_extract(channels.data,'$.ttft'),'$.successRate',json_extract(channels.data,'$.successRate'),'$.history',json_extract(channels.data,'$.history'),'$.endpoint',${effectiveEndpoint},'$.config.integration',${effectiveIntegration}),json_object('accountAuthMode',json_extract(${modeSource}.data,'$.accountAuthMode'),'accountIntegration',${savedIntegration})),health_version=channels.health_version+1`).bind(channel.id, JSON.stringify(channel), fixture ? 1 : 0, ...(!account ? [accountVersion] : [])), ...channel.tags.map(tag => this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(tag))];
     statements.push(...prepared.map(entry => entry.statement));
     if (accountStatement) statements.push(accountStatement);
-    else statements.unshift(this.env.DB.prepare("UPDATE channel_accounts SET auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE channel_id=? AND EXISTS (SELECT 1 FROM channels c WHERE c.id=? AND (json_extract(c.data,'$.endpoint')<>? OR COALESCE(json_extract(c.data,'$.config.integration'),'native')<>?))").bind(channel.id,channel.id,channel.endpoint,channel.config.integration ?? 'native'));
+    else if (previous && previous.endpoint !== channel.endpoint) statements.push(this.env.DB.prepare("UPDATE channel_accounts SET auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE channel_id=? AND version=? AND EXISTS (SELECT 1 FROM channels c WHERE c.id=? AND json_extract(c.data,'$.endpoint')=? AND (? NOT IN ('newapi','sub2api') OR COALESCE(json_extract(c.data,'$.accountIntegration'),json_extract(c.data,'$.config.integration'),'native')=?))").bind(channel.id,accountVersion,channel.id,channel.endpoint,channel.config.integration ?? 'native',channel.config.integration ?? 'native'));
     await this.env.DB.batch(statements);
   }
   async importChannels(entries: { channel: GatewayChannel; credentials: CredentialInput[]; account?: AccountCredentials }[]): Promise<GatewayChannel[]> {
@@ -58,7 +68,7 @@ export class Store implements GatewayStore {
       entry.credentials.forEach(validateCredential);
       if (entry.account && !['newapi', 'sub2api'].includes(entry.channel.config.integration ?? '')) throw new HttpError(400, 'Only NewAPI / Sub2API channels use management accounts');
       if (entry.account && 'accessToken' in entry.account && entry.channel.config.integration !== 'newapi') throw new HttpError(400, '后台访问令牌仅支持 NewAPI 渠道');
-      if (entry.account) entry.channel = { ...entry.channel, accountAuthMode: 'accessToken' in entry.account ? 'token' : 'password' };
+      if (entry.account) entry.channel = { ...entry.channel, accountAuthMode: 'accessToken' in entry.account ? 'token' : 'password', accountIntegration: entry.channel.config.integration as 'newapi' | 'sub2api' };
     }
     // Encrypt the complete import before the first write. JSON inserts keep even a
     // large import to four queries, and D1 batch rolls all of them back on failure.

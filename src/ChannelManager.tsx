@@ -1406,7 +1406,7 @@ function ChannelRows({
         <div className="gx-name-meta">
           {channel.config.protocol === "mock" && <small>本地故障实验</small>}
           {['newapi','sub2api'].includes(channel.config.integration ?? '') && <>
-            <small>后台账户</small><ChannelBalance channel={channel} refresh={refresh} />
+            <small>{channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'} 余额监控</small><ChannelBalance channel={channel} refresh={refresh} />
           </>}
         </div>
       </Table.Cell>
@@ -1415,7 +1415,7 @@ function ChannelRows({
           <Chip size="sm" className="gx-provider">
             <ProviderIcon
               provider={
-                channel.config.integration && channel.config.integration !== "native" ? channel.config.integration : channel.config.protocol === "mock"
+                channel.config.protocol === "mock"
                   ? channel.provider
                   : channel.config.protocol
               }

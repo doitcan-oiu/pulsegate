@@ -90,6 +90,176 @@ describe('model discovery management endpoint', () => {
   });
 });
 
+describe('account monitoring independent of the API protocol', () => {
+  type AccountSnapshot = { credentials: string; auth_secret: string | null; balance: string | null; next_refresh_at: number; lease_until: number; version: number };
+  async function accountSnapshot(id: string) {
+    return (await testEnv.DB.prepare('SELECT credentials,auth_secret,balance,next_refresh_at,lease_until,version FROM channel_accounts WHERE channel_id=?').bind(id).first<AccountSnapshot>())!;
+  }
+  it.each(['anthropic', 'gemini'] as const)('discovers %s models using inference credentials while a NewAPI token monitors the account', async protocol => {
+    const monitorToken = 'private-monitor-token', inferenceKey = 'private-inference-key';
+    const fetcher = vi.fn(async (target: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(target)).pathname, headers = new Headers(init?.headers);
+      if (path === '/api/user/self') {
+        expect(headers.get('authorization')).toBe('Bearer ' + monitorToken); expect(headers.get('x-api-key')).toBeNull(); expect(headers.get('x-goog-api-key')).toBeNull();
+        return Response.json({ success: true, data: { quota: 1500000 } });
+      }
+      if (path === '/api/status') return Response.json({ success: true, data: { quota_per_unit: 500000 } });
+      expect(path).toBe(protocol === 'anthropic' ? '/v1/models' : '/v1beta/models');
+      expect(headers.get(protocol === 'anthropic' ? 'x-api-key' : 'x-goog-api-key')).toBe(inferenceKey); expect(headers.get('authorization')).toBeNull();
+      return Response.json(protocol === 'anthropic' ? { data: [{ id: 'native-model' }], has_more: false } : { models: [{ name: 'models/native-model', supportedGenerationMethods: ['generateContent'] }] });
+    }); vi.stubGlobal('fetch', fetcher);
+    const created = await call('/api/channels', 'POST', { name: 'Native monitored', endpoint: 'https://account.example', models: ['native-model'], config: { protocol, integration: 'newapi' }, apiKeys: [inferenceKey], accountCredentials: { accessToken: monitorToken, userId: '42' } });
+    expect(created.status).toBe(201); expect(created.json.channel.config).toMatchObject({ protocol, integration: 'newapi' }); expect(created.json.channel.accountIntegration).toBe('newapi');
+    expect((await new Store(testEnv).getChannel(created.json.channel.id))?.accountBalance).toMatchObject({ status: 'ok', amount: 3 });
+    const discovered = await call('/api/channels/discover-models', 'POST', { channelId: created.json.channel.id });
+    expect(discovered.status).toBe(200); expect(discovered.json.models).toEqual(['native-model']);
+    expect(discovered.json.endpoint).toBe('https://account.example' + (protocol === 'anthropic' ? '/v1/models' : '/v1beta/models'));
+    const clientKey = await call('/api/keys', 'POST', { name: 'Native model access' }), ctx = createExecutionContext();
+    const listed = await worker.fetch(new Request('http://127.0.0.1:8787/v1/models', { headers: { authorization: 'Bearer ' + clientKey.json.token } }), testEnv, ctx);
+    expect(listed.status).toBe(200); expect((await listed.json() as any).data.map((model: { id: string }) => model.id)).toEqual(['native-model']); await waitOnExecutionContext(ctx);
+    expect(created.content + discovered.content + (await call('/api/bootstrap')).content).not.toContain(monitorToken);
+    expect(created.content + discovered.content).not.toContain(inferenceKey);
+  });
+  it.each(['newapi', 'sub2api'] as const)('retains %s credentials and cached balance/session when only the API protocol changes', async integration => {
+    mockAccount(); const created = await accountChannel(integration), id = created.json.channel.id;
+    const before = await accountSnapshot(id); expect(before.auth_secret).not.toBeNull(); expect(before.balance).not.toBeNull();
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    for (const protocol of ['anthropic', 'gemini'] as const) {
+      const edited = await call(`/api/channels/${id}`, 'PATCH', { config: { protocol } });
+      expect(edited.status).toBe(200); expect(edited.json.channel.config).toMatchObject({ protocol, integration });
+      expect(edited.json.channel.accountIntegration).toBe(integration); expect(edited.json.channel.hasAccountCredentials).toBe(true);
+      expect(await accountSnapshot(id)).toEqual(before);
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each(['newapi', 'sub2api'] as const)('keeps saved %s credentials while monitoring is off and can reenable the same backend', async integration => {
+    mockAccount(); const created = await accountChannel(integration), id = created.json.channel.id;
+    const before = await accountSnapshot(id);
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    const disabled = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'native', protocol: 'anthropic' } });
+    expect(disabled.status).toBe(200); expect(disabled.json.channel.config.integration).toBe('native'); expect(disabled.json.channel.accountIntegration).toBe(integration);
+    expect(disabled.json.channel.hasAccountCredentials).toBe(true); expect((await accountSnapshot(id)).credentials).toBe(before.credentials);
+    const manual = await call(`/api/channels/${id}/balance`, 'POST', {}); expect(manual.status).toBe(400);
+    await testEnv.DB.prepare('UPDATE channel_accounts SET next_refresh_at=0 WHERE channel_id=?').bind(id).run();
+    const offSnapshot = await accountSnapshot(id), store = new Store(testEnv), offChannel = (await store.getChannel(id))!;
+    await refreshAccountBalance(testEnv, offChannel, true, true); await refreshDueAccounts(testEnv, await store.listChannels(), true);
+    expect(fetcher).not.toHaveBeenCalled(); expect(await accountSnapshot(id)).toEqual(offSnapshot);
+    mockAccount(); const enabled = await call(`/api/channels/${id}`, 'PATCH', { config: { integration } });
+    expect(enabled.status).toBe(200); expect(enabled.json.channel.config).toMatchObject({ protocol: 'anthropic', integration }); expect(enabled.json.channel.accountIntegration).toBe(integration);
+    expect((await accountSnapshot(id)).credentials).toBe(before.credentials); expect((await store.getChannel(id))?.accountBalance?.status).toBe('ok');
+  });
+  it.each([
+    ['newapi', 'sub2api', { username: 'fresh-sub-account', password: 'fresh-sub-password' }],
+    ['sub2api', 'newapi', { accessToken: 'fresh-newapi-token', userId: '42' }],
+  ] as const)('requires fresh credentials when switching monitoring from %s to %s and rejects edits atomically', async (original, next, credentials) => {
+    mockAccount(); const created = await accountChannel(original), id = created.json.channel.id, before = await accountSnapshot(id);
+    for (const accountCredentials of [undefined, { username: 'incomplete' }]) {
+      const edited = await call(`/api/channels/${id}`, 'PATCH', { name: 'Must not save', tags: ['must-not-save'], apiKeys: ['must-not-insert'], config: { integration: next }, ...(accountCredentials ? { accountCredentials } : {}) });
+      expect(edited.status).toBe(400); expect(await accountSnapshot(id)).toEqual(before);
+      const saved = (await new Store(testEnv).getChannel(id))!;
+      expect(saved.name).toBe('Account test'); expect(saved.config.integration).toBe(original); expect(saved.credentialCount).toBe(1); expect(saved.accountIntegration).toBe(original);
+      expect(await new Store(testEnv).listTags()).not.toContain('must-not-save');
+    }
+    const replaced = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: next }, accountCredentials: credentials });
+    expect(replaced.status).toBe(200); expect(replaced.json.channel.accountIntegration).toBe(next);
+    expect(JSON.parse(await decryptSecret((await accountSnapshot(id)).credentials, testEnv))).toEqual(credentials);
+  });
+  it('retains the NewAPI token backend across monitoring disable and rejects carrying it into Sub2API', async () => {
+    mockAccount();
+    const created = await call('/api/channels', 'POST', { name: 'Token monitor', endpoint: 'https://account.example', models: ['a'], config: { protocol: 'gemini', integration: 'newapi' }, accountCredentials: { accessToken: 'private-retained-token', userId: '42' } });
+    expect(created.status).toBe(201); const id = created.json.channel.id;
+    expect((await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'native' } })).status).toBe(200);
+    const before = await accountSnapshot(id), store = new Store(testEnv);
+    expect(await store.getChannel(id)).toMatchObject({ accountAuthMode: 'token', accountIntegration: 'newapi', config: { protocol: 'gemini', integration: 'native' } });
+    for (const accountCredentials of [undefined, { accessToken: 'wrong-backend-token' }]) {
+      expect((await call(`/api/channels/${id}`, 'PATCH', { name: 'Must not save', config: { integration: 'sub2api' }, ...(accountCredentials ? { accountCredentials } : {}) })).status).toBe(400);
+      expect(await accountSnapshot(id)).toEqual(before); expect((await store.getChannel(id))?.config.integration).toBe('native');
+    }
+    const enabled = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'newapi' } });
+    expect(enabled.status).toBe(200); expect(enabled.json.channel.accountAuthMode).toBe('token'); expect((await accountSnapshot(id)).credentials).toBe(before.credentials);
+  });
+  it('keeps legacy active-backend credentials but requires fresh credentials for an unknown saved backend after monitoring was disabled', async () => {
+    mockAccount(); const created = await accountChannel(), id = created.json.channel.id;
+    await testEnv.DB.prepare("UPDATE channels SET data=json_remove(data,'$.accountIntegration') WHERE id=?").bind(id).run();
+    expect((await call(`/api/channels/${id}`, 'PATCH', { name: 'Legacy retained' })).status).toBe(200);
+    const before = await accountSnapshot(id);
+    await testEnv.DB.prepare("UPDATE channels SET data=json_remove(json_set(data,'$.config.integration','native'),'$.accountIntegration') WHERE id=?").bind(id).run();
+    for (const integration of ['newapi', 'sub2api'] as const) {
+      expect((await call(`/api/channels/${id}`, 'PATCH', { config: { integration } })).status).toBe(400); expect(await accountSnapshot(id)).toEqual(before);
+    }
+    const enabled = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'newapi' }, accountCredentials: { accessToken: 'new-legacy-token' } });
+    expect(enabled.status).toBe(200); expect(enabled.json.channel.accountIntegration).toBe('newapi'); expect(enabled.json.channel.accountAuthMode).toBe('token');
+  });
+  it.each([
+    { original: 'newapi', next: 'sub2api', credentials: { username: 'fresh-sub-user', password: 'fresh-sub-password' }, mode: 'password' },
+    { original: 'sub2api', next: 'newapi', credentials: { accessToken: 'fresh-newapi-token', userId: '42' }, mode: 'token' },
+    { original: 'newapi', next: 'newapi', credentials: { accessToken: 'fresh-same-backend-token', userId: '42' }, mode: 'token' },
+  ] as const)('keeps a concurrent $next account and destination when a $original metadata save reaches its final transaction', async ({ original, next, credentials, mode }) => {
+    mockAccount(); const created = await accountChannel(original), id = created.json.channel.id;
+    const store = new Store(testEnv), stale = (await store.getChannel(id))!;
+    const fresh = { ...stale, endpoint: 'https://fresh-account.example/v1', config: { ...stale.config, integration: next } };
+    let freshSnapshot: AccountSnapshot | undefined;
+    const racingDB = new Proxy(testEnv.DB, { get(target, property) {
+      if (property === 'batch') return async (statements: D1PreparedStatement[]) => {
+        // The older save has already passed its reuse check. Replace the account
+        // immediately before its batch to exercise the real atomic SQL merge.
+        await store.saveChannel(fresh, false, [], credentials);
+        await refreshAccountBalance(testEnv, fresh, true, true);
+        freshSnapshot = await accountSnapshot(id);
+        return target.batch(statements);
+      };
+      const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await new Store({ ...testEnv, DB: racingDB }).saveChannel({ ...stale, name: 'Concurrent metadata', config: { ...stale.config, protocol: 'gemini' } });
+    const saved = (await store.getChannel(id))!;
+    expect(saved).toMatchObject({ name: 'Concurrent metadata', endpoint: fresh.endpoint, accountAuthMode: mode, accountIntegration: next, config: { protocol: 'gemini', integration: next } });
+    expect(await accountSnapshot(id)).toEqual(freshSnapshot);
+    expect(JSON.parse(await decryptSecret(freshSnapshot!.credentials, testEnv))).toEqual(credentials);
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input)); expect(url.hostname).toBe('fresh-account.example');
+      expect([next === 'sub2api' ? '/api/v1/user/profile' : '/api/user/self', ...(next === 'newapi' ? ['/api/status'] : [])]).toContain(url.pathname);
+      return Response.json({ success: true, data: { quota: 1500000, quota_per_unit: 500000, balance: 3 } });
+    }); vi.stubGlobal('fetch', fetcher);
+    await testEnv.DB.prepare('UPDATE channel_accounts SET next_refresh_at=0 WHERE channel_id=?').bind(id).run();
+    await refreshDueAccounts(testEnv, await store.listChannels(), true);
+    expect(fetcher).toHaveBeenCalled(); expect((await store.getChannel(id))?.accountBalance).toMatchObject({ status: 'ok', amount: 3 });
+  });
+  it('can disable monitoring during a concurrent backend replacement without moving its saved credentials back to the old site', async () => {
+    mockAccount(); const created = await accountChannel(), id = created.json.channel.id;
+    const store = new Store(testEnv), stale = (await store.getChannel(id))!;
+    const fresh = { ...stale, endpoint: 'https://fresh-account.example/v1', config: { ...stale.config, integration: 'sub2api' as const } };
+    let freshSnapshot: AccountSnapshot | undefined;
+    const racingDB = new Proxy(testEnv.DB, { get(target, property) {
+      if (property === 'batch') return async (statements: D1PreparedStatement[]) => {
+        await store.saveChannel(fresh, false, [], { username: 'fresh-sub-user', password: 'fresh-sub-password' });
+        await refreshAccountBalance(testEnv, fresh, true, true);
+        freshSnapshot = await accountSnapshot(id);
+        return target.batch(statements);
+      };
+      const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await new Store({ ...testEnv, DB: racingDB }).saveChannel({ ...stale, config: { ...stale.config, integration: 'native' } });
+    const off = (await store.getChannel(id))!;
+    expect(off).toMatchObject({ endpoint: fresh.endpoint, accountIntegration: 'sub2api', config: { integration: 'native' } });
+    expect(await accountSnapshot(id)).toEqual(freshSnapshot);
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    await refreshAccountBalance(testEnv, off, true, true); await refreshDueAccounts(testEnv, await store.listChannels(), true);
+    expect(fetcher).not.toHaveBeenCalled();
+    mockAccount();
+    const enabled = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'sub2api' } });
+    expect(enabled.status).toBe(200); expect(enabled.json.channel.endpoint).toBe(fresh.endpoint);
+    expect((await accountSnapshot(id)).credentials).toBe(freshSnapshot!.credentials);
+  });
+  it.each([
+    { protocol: 'anthropic', integration: 'newapi' }, { protocol: 'gemini', integration: 'sub2api' },
+  ])('requires monitoring credentials on create and import even with native API protocol %s', async config => {
+    const input = { name: 'Missing monitor credentials', endpoint: 'https://account.example', models: ['a'], config };
+    expect((await call('/api/channels', 'POST', input)).status).toBe(400);
+    expect((await call('/api/channels/import', 'POST', { channels: [{ name: 'First must not persist', endpoint: 'https://account.example', models: ['a'], tags: ['must-not-persist'] }, input] })).status).toBe(400);
+    expect(await new Store(testEnv).listChannels()).toEqual([]); expect(await new Store(testEnv).listTags()).toEqual([]);
+  });
+});
+
 describe('encrypted channel accounts and balance refresh', () => {
   it('encrypts NewAPI dashboard tokens, refreshes without login, and preserves authentication mode on edits', async () => {
     const token = 'private-dashboard-access-token';

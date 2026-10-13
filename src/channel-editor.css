@@ -197,11 +197,32 @@
     line-height: 1.7;
   }
   .ce-format {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     color: var(--muted);
     font-size: 12px;
     line-height: 20px;
     text-align: right;
-    max-width: 190px;
+    max-width: 230px;
+  }
+  .ce-format strong {
+    color: var(--foreground);
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .ce-format small {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .ce-section-heading > .switch {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .ce-balance-hint {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
   }
   .ce-field-caption {
     display: flex;
@@ -659,19 +680,15 @@
     }
     .ce-service-list {
       display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
     }
     .ce-service {
-      grid-column: span 2;
       flex-direction: column;
       justify-content: center;
       min-height: 58px;
       gap: 7px;
       padding: 9px 5px;
-    }
-    .ce-service:nth-child(n + 4) {
-      grid-column: span 3;
     }
     .ce-service-copy {
       align-items: center;

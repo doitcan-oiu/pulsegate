@@ -1255,8 +1255,9 @@ export default function App() {
               </Button>
             </div>
             <p>
-              兼容 OpenAI Chat Completions。使用 Authorization: Bearer
-              pg_live_…；完整 API Key 仅创建或轮换时显示一次。
+              OpenAI Chat Completions 使用 Authorization: Bearer pg_live_…；
+              Anthropic Messages 使用 /v1/messages 和 x-api-key: pg_live_…。
+              完整 API Key 仅创建或轮换时显示一次。
             </p>
             {session.devMode && (
               <p>

@@ -166,7 +166,7 @@ function finishReason(reason: string | null) { return reason === 'tool_use' ? 't
 function baseCompletion(model: string, id = `chatcmpl-${crypto.randomUUID()}`) { return { id, model, created: Math.floor(Date.now() / 1000), object: 'chat.completion' }; }
 function usage(prompt = 0, completion = 0) { return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion }; }
 function anthropicInputTokens(value: any) { return (value?.input_tokens || 0) + (value?.cache_creation_input_tokens || 0) + (value?.cache_read_input_tokens || 0); }
-export function normalizeJSON(value: any, channel: GatewayChannel, clientModel: string): Record<string, any> {
+export function normalizeJSON(value: any, channel: GatewayChannel, clientModel: string, preserveAnthropic = false): Record<string, any> {
   if (value.error) throw new StreamFailure(value.error.message || 'Upstream returned an error');
   if (channel.config.protocol === 'openai' || channel.config.protocol === 'mock') {
     if (!Array.isArray(value.choices) || value.choices.some((c: any) => !c || !c.message || typeof c.message !== 'object')) throw new StreamFailure('Upstream returned an invalid chat completion schema');
@@ -178,7 +178,7 @@ export function normalizeJSON(value: any, channel: GatewayChannel, clientModel: 
     const thinking = (value.content || []).filter((p: any) => p.type === 'thinking').map((p: any) => p.thinking).join(''); if (thinking) message.reasoning_content = thinking;
     const thinkingBlocks = (value.content || []).filter((p: any) => p.type === 'thinking' || p.type === 'redacted_thinking'); if (thinkingBlocks.length) message.extra_content = { anthropic: { thinking: thinkingBlocks } };
     const tools = (value.content || []).filter((p: any) => p.type === 'tool_use').map((p: any) => ({ id: p.id, type: 'function', function: { name: p.name, arguments: JSON.stringify(p.input) } })); if (tools.length) message.tool_calls = tools;
-    return { ...baseCompletion(clientModel, value.id), choices: [{ index: 0, message, finish_reason: finishReason(value.stop_reason) }], usage: usage(anthropicInputTokens(value.usage), value.usage?.output_tokens) };
+    return { ...baseCompletion(clientModel, value.id), choices: [{ index: 0, message, finish_reason: finishReason(value.stop_reason) }], usage: usage(anthropicInputTokens(value.usage), value.usage?.output_tokens), ...(preserveAnthropic ? { extra_content: { anthropic: { message: { id: value.id, type: 'message', role: 'assistant', model: clientModel, content: value.content, stop_reason: value.stop_reason ?? null, stop_sequence: value.stop_sequence ?? null, usage: value.usage } } } } : {}) };
   }
   const candidates = value.candidates || [];
   return { ...baseCompletion(clientModel), choices: candidates.map((c: any, index: number) => {
@@ -190,7 +190,7 @@ export function normalizeJSON(value: any, channel: GatewayChannel, clientModel: 
   }), usage: usage(value.usageMetadata?.promptTokenCount, (value.usageMetadata?.candidatesTokenCount || 0) + (value.usageMetadata?.thoughtsTokenCount || 0)) };
 }
 
-export async function* normalizedStream(body: ReadableStream<Uint8Array>, channel: GatewayChannel, clientModel: string, signal: AbortSignal): AsyncGenerator<Record<string, any> | '[DONE]'> {
+export async function* normalizedStream(body: ReadableStream<Uint8Array>, channel: GatewayChannel, clientModel: string, signal: AbortSignal, preserveAnthropic = false): AsyncGenerator<Record<string, any> | '[DONE]'> {
   const base = { ...baseCompletion(clientModel), object: 'chat.completion.chunk' }; let prompt = 0, completion = 0, finished = false; const tools = new Map<number, number>(), thinking = new Map<number, Record<string, any>>();
   for await (const event of parseSSE(body, signal)) {
     if (event.data === '[DONE]') { finished = true; yield '[DONE]'; break; }
@@ -201,6 +201,8 @@ export async function* normalizedStream(body: ReadableStream<Uint8Array>, channe
       yield { ...value, model: clientModel }; continue;
     }
     if (channel.config.protocol === 'anthropic') {
+      // Native ingress keeps original block ordering/signatures while normalized chunks still drive routing and usage logs.
+      if (preserveAnthropic) yield { ...base, choices: [], extra_content: { anthropic: { event: value.type === 'message_start' ? { ...value, message: { ...value.message, model: clientModel } } : value } } };
       if (value.type === 'message_start') { prompt = anthropicInputTokens(value.message?.usage); base.id = value.message?.id || base.id; yield { ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }], usage: usage(prompt, 0) }; }
       else if (value.type === 'content_block_start') {
         const block = value.content_block;

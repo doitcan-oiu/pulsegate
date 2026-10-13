@@ -100,6 +100,15 @@ function estimatedBudget(channel: GatewayChannel, body: ChatBody): number {
   return Math.ceil(JSON.stringify(effective).length / 3) + max;
 }
 
+async function* validatedResponseStream(source: AsyncGenerator<Record<string, any> | '[DONE]'>, validator: ReturnType<NonNullable<GatewayContext['responseValidator']>['stream']>): AsyncGenerator<Record<string, any> | '[DONE]'> {
+  let ended = false;
+  for await (const chunk of source) {
+    if (chunk === '[DONE]') { validator.end(); ended = true; yield chunk; return; }
+    validator.chunk(chunk); yield chunk;
+  }
+  if (!ended) validator.end();
+}
+
 export async function handleGateway(request: Request, context: GatewayContext, store: GatewayStore): Promise<Response> {
   const requestId = crypto.randomUUID(), requestStart = Date.now();
   let attempts = 0, lastCandidate: Candidate | null = null, lastFailure: Failure | null = null;
@@ -248,13 +257,15 @@ export async function handleGateway(request: Request, context: GatewayContext, s
         if (!original.stream) {
           const raw = await boundedText(response.body, MAX_RESPONSE, controller.signal, true); let value;
           try { value = JSON.parse(raw); } catch { throw new StreamFailure('Upstream returned malformed JSON'); }
-          const normalized = normalizeJSON(value, channel, original.model); currentUsage = usage(normalized);
+          const normalized = normalizeJSON(value, channel, original.model, context.responseProtocol === 'anthropic'); currentUsage = usage(normalized);
+          context.responseValidator?.json(normalized);
           if (context.settings.emptyResponseDetection && !meaningfulOpenAIChunk(normalized)) throw new StreamFailure('Upstream returned an empty completion', 502, 'empty');
           cleanup(); await record(seconds(attemptStart) > context.settings.responseThreshold ? 'slow' : 'success', 200, null); await remember(channel, candidateIndex); await recordLog(200, null, true);
           return Response.json(normalized, { headers: { 'x-pulsegate-request-id': requestId, 'x-pulsegate-channel-id': channel.id, 'x-pulsegate-attempts': String(attempts) } });
         }
         if (!response.body || !response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) throw new StreamFailure('Upstream did not return text/event-stream');
-        iterator = normalizedStream(response.body, channel, original.model, controller.signal);
+        const source = normalizedStream(response.body, channel, original.model, controller.signal, context.responseProtocol === 'anthropic');
+        iterator = context.responseValidator ? validatedResponseStream(source, context.responseValidator.stream()) : source;
         const prefix: Uint8Array[] = []; let size = 0, ended = false, meaningful = false;
         while (true) {
           const item = await iterator.next(); if (item.done) { ended = true; break; }

@@ -12,6 +12,20 @@ type AccountRow = { channel_id: string; credentials: string; auth_secret: string
 type Session = { token?: string; cookie?: string; userId?: string; expiresAt: number; base: string };
 export const BALANCE_REFRESH_MS = 5 * 60 * 1000;
 
+export function accountIntegration(channel: GatewayChannel): GatewayChannel['accountIntegration'] {
+  return channel.accountIntegration ?? (channel.hasAccountCredentials && ['newapi', 'sub2api'].includes(channel.config.integration ?? '') ? channel.config.integration as 'newapi' | 'sub2api' : undefined);
+}
+
+export function assertAccountReuse(channel: GatewayChannel, previous: GatewayChannel | null, account?: AccountCredentials): void {
+  const integration = channel.config.integration;
+  if (!['newapi', 'sub2api'].includes(integration ?? '')) return;
+  if (account) {
+    assert(!('accessToken' in account) || integration === 'newapi', '后台访问令牌仅支持 NewAPI 渠道');
+    return;
+  }
+  assert(previous?.hasAccountCredentials && accountIntegration(previous) === integration, '开启余额监控或切换后台类型时，请填写对应的后台凭据');
+}
+
 export function parseAccountCredentials(value: unknown): AccountCredentials | undefined {
   if (value === undefined) return undefined;
   const b = object(value);
@@ -139,6 +153,7 @@ export async function fetchAccountBalance(channel: GatewayChannel, credentials: 
 }
 
 export async function refreshAccountBalance(env: Env, channel: GatewayChannel, dev: boolean, force = false): Promise<void> {
+  if (!['newapi', 'sub2api'].includes(channel.config.integration ?? '')) return;
   const now = Date.now();
   // Capture the destination and credentials in one atomic read. A Cron snapshot can
   // outlive a channel edit; never pair a new password with that snapshot's old URL.
