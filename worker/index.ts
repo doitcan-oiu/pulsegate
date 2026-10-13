@@ -63,7 +63,7 @@ function importedCredentials(b: Record<string,unknown>): ImportedCredential[] {
 async function createChannel(store: Store,b: Record<string,unknown>,dev: boolean,fixture = false): Promise<GatewayChannel> {
   const c = channel(b,dev); const creds = importedCredentials(b);
   const account = parseAccountCredentials(b.accountCredentials);
-  assert(!['newapi','sub2api'].includes(c.config.integration ?? '') || account, 'NewAPI / Sub2API 需要填写后台账号和密码');
+  assert(!['newapi','sub2api'].includes(c.config.integration ?? '') || account, '请填写后台账号密码；NewAPI 也可使用后台访问令牌');
   await store.saveChannel(c,fixture,creds,account);
   return (await store.getChannel(c.id))!;
 }
@@ -99,7 +99,7 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
     const b = await body(request); assert(Array.isArray(b.channels) && b.channels.length > 0 && b.channels.length <= 200,'Import requires 1–200 channels');
     const entries = (b.channels as unknown[]).map(value => {
       const entry = object(value), c = channel(entry,dev), credentials = importedCredentials(entry), account = parseAccountCredentials(entry.accountCredentials);
-      assert(!['newapi','sub2api'].includes(c.config.integration ?? '') || account, 'NewAPI / Sub2API 需要填写后台账号和密码');
+      assert(!['newapi','sub2api'].includes(c.config.integration ?? '') || account, '请填写后台账号密码；NewAPI 也可使用后台访问令牌');
       return { channel:c, credentials, account };
     });
     return response({ channels:await store.importChannels(entries) },201);
@@ -134,8 +134,20 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
   const channelMatch = path.match(/^\/api\/channels\/([^/]+)(?:\/(.*))?$/);
   if (channelMatch) {
     const c = await needChannel(store,decodeURIComponent(channelMatch[1])); const tail = channelMatch[2];
-    if (!tail) { if (method === 'GET') return response({ channel:c }); if (method === 'PATCH') { const b = await body(request); const changed = channel(b,dev,c); const account = parseAccountCredentials(b.accountCredentials); assert(!['newapi','sub2api'].includes(changed.config.integration ?? '') || c.hasAccountCredentials || account, 'NewAPI / Sub2API 需要填写后台账号和密码'); await store.saveChannel(changed,false,importedCredentials(b),account); if (account || changed.endpoint !== c.endpoint || changed.config.integration !== c.config.integration) ctx.waitUntil(refreshAccountBalance(env,changed,dev,true)); return response({ channel:await store.getChannel(c.id) }); } if (method === 'DELETE') { await store.deleteChannel(c.id); return noContent(); } }
-    if (tail === 'clone' && method === 'POST') { const clone = { ...structuredClone(c),id:crypto.randomUUID(),name:c.name+' · 副本',enabled:false,credentialCount:0,hasAccountCredentials:false,accountBalance:undefined,createdAt:new Date().toISOString(),requests:0,ttft:0,successRate:0,history:[],health:{ averageTtft:null,averageDuration:null,samples:0,autoDisabled:false,cooldownUntil:null,recoveryCount:0,failureCount:0,reason:null },status:'healthy' as const }; await store.saveChannel(clone); return response({ channel:clone },201); }
+    if (!tail) {
+      if (method === 'GET') return response({ channel:c });
+      if (method === 'PATCH') {
+        const b = await body(request); const changed = channel(b,dev,c);
+        const account = parseAccountCredentials(b.accountCredentials);
+        assert(!['newapi','sub2api'].includes(changed.config.integration ?? '') || c.hasAccountCredentials || account, '请填写后台账号密码；NewAPI 也可使用后台访问令牌');
+        assert(changed.config.integration !== 'sub2api' || c.accountAuthMode !== 'token' || account, '切换服务商时请重新填写后台账号密码');
+        await store.saveChannel(changed,false,importedCredentials(b),account);
+        if (account || changed.endpoint !== c.endpoint || changed.config.integration !== c.config.integration) ctx.waitUntil(refreshAccountBalance(env,changed,dev,true));
+        return response({ channel:await store.getChannel(c.id) });
+      }
+      if (method === 'DELETE') { await store.deleteChannel(c.id); return noContent(); }
+    }
+    if (tail === 'clone' && method === 'POST') { const clone = { ...structuredClone(c),id:crypto.randomUUID(),name:c.name+' · 副本',enabled:false,credentialCount:0,hasAccountCredentials:false,accountAuthMode:undefined,accountBalance:undefined,createdAt:new Date().toISOString(),requests:0,ttft:0,successRate:0,history:[],health:{ averageTtft:null,averageDuration:null,samples:0,autoDisabled:false,cooldownUntil:null,recoveryCount:0,failureCount:0,reason:null },status:'healthy' as const }; await store.saveChannel(clone); return response({ channel:clone },201); }
     if (tail === 'test' && method === 'POST') return testChannel(request,env,ctx,store,c,await body(request));
     if (tail === 'balance' && method === 'POST') { await refreshAccountBalance(env,c,dev,true); return response({ channel:await store.getChannel(c.id) }); }
     if (tail === 'recover' && method === 'POST') return testChannel(request,env,ctx,store,c,{},true);

@@ -50,6 +50,84 @@ describe('scope and model selection', () => {
   });
 });
 
+describe('model alias response identity', () => {
+  type NativeProtocol = 'openai' | 'anthropic' | 'gemini';
+  function aliasRequest(stream: boolean) {
+    return new Request('https://gateway.test/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'client-alias', stream, messages: [{ role: 'user', content: 'hello' }] }) });
+  }
+  function upstreamReply(protocol: NativeProtocol, stream: boolean): Response {
+    const upstreamModel = 'provider-model-snapshot';
+    if (!stream) {
+      if (protocol === 'anthropic') return Response.json({ id: 'native-message', model: upstreamModel, content: [{ type: 'text', text: 'answer' }], stop_reason: 'end_turn', usage: { input_tokens: 2, output_tokens: 3 } });
+      if (protocol === 'gemini') return Response.json({ modelVersion: upstreamModel, candidates: [{ content: { parts: [{ text: 'answer' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 3 } });
+      return Response.json({ id: 'upstream-completion', model: upstreamModel, choices: [{ index: 0, message: { role: 'assistant', content: 'answer' }, finish_reason: 'stop' }], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } });
+    }
+    const chunks: unknown[] = protocol === 'anthropic' ? [
+      { type: 'message_start', message: { id: 'native-message', model: upstreamModel, usage: { input_tokens: 2 } } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'answer' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+      { type: 'message_stop' },
+    ] : protocol === 'gemini' ? [
+      { modelVersion: upstreamModel, candidates: [{ content: { parts: [{ text: 'answer' }] } }] },
+      { modelVersion: upstreamModel, candidates: [{ content: { parts: [] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 3 } },
+    ] : [
+      { model: upstreamModel, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] },
+      { model: upstreamModel, choices: [{ index: 0, delta: { content: 'answer' }, finish_reason: null }] },
+      { model: upstreamModel, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } }, '[DONE]',
+    ];
+    return new Response(chunks.map(chunk => new TextDecoder().decode(sseBytes(chunk))).join(''), { headers: { 'Content-Type': 'text/event-stream' } });
+  }
+  async function expectAliasResponse(response: Response, stream: boolean) {
+    expect(response.status).toBe(200);
+    if (!stream) {
+      const json = await response.json() as any;
+      expect(json.model).toBe('client-alias'); expect(json.choices[0].message.content).toBe('answer');
+      expect(json.usage).toMatchObject({ prompt_tokens: 2, completion_tokens: 3 });
+      return;
+    }
+    const data = (await response.text()).split('\n').filter(line => line.startsWith('data: ')).map(line => line.slice(6));
+    expect(data.pop()).toBe('[DONE]');
+    const chunks = data.map(line => JSON.parse(line));
+    expect(chunks.length).toBeGreaterThan(0); expect(chunks.every(chunk => chunk.model === 'client-alias')).toBe(true);
+    expect(chunks.flatMap(chunk => chunk.choices).map(choice => choice.delta.content || '').join('')).toBe('answer');
+    expect(chunks.at(-1).usage).toMatchObject({ prompt_tokens: 2, completion_tokens: 3 });
+  }
+  it.each([
+    ['openai', false], ['openai', true], ['anthropic', false], ['anthropic', true], ['gemini', false], ['gemini', true],
+  ] as const)('returns the requested alias in %s responses when stream=%s', async (protocol, stream) => {
+    const c = channel(); c.config.protocol = protocol; c.models = ['provider-model']; c.model = 'provider-model';
+    c.config.aliases = [{ from: 'client-alias', to: 'provider-model' }];
+    const { context, store, attempts, logs } = setup([c]);
+    const fetcher = vi.fn(async (target: RequestInfo | URL, options?: RequestInit) => {
+      if (protocol === 'gemini') expect(new URL(String(target)).pathname).toContain('/models/provider-model:');
+      else expect(JSON.parse(String(options?.body)).model).toBe('provider-model');
+      return upstreamReply(protocol, stream);
+    }); vi.stubGlobal('fetch', fetcher);
+    await expectAliasResponse(await handleGateway(aliasRequest(stream), context, store), stream);
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(attempts[0].model).toBe('provider-model'); expect(logs[0].model).toBe('client-alias');
+  });
+  it.each([false, true])('preserves the client alias through a Key profile mapping and failover when stream=%s', async stream => {
+    const primary = channel('a'), backup = channel('b');
+    for (const [c, alias, target] of [[primary, 'mapped-primary', 'provider-primary'], [backup, 'mapped-backup', 'provider-backup']] as const) {
+      c.config.protocol = 'openai'; c.models = [target]; c.model = target; c.config.aliases = [{ from: alias, to: target }];
+    }
+    const { context, store, attempts, logs } = setup([primary, backup]);
+    context.profile = { ...profile, modelMode: 'selected', models: ['mapped-primary', 'mapped-backup'], mappings: [{ from: 'client-alias', to: ['mapped-primary', 'mapped-backup'] }] };
+    context.key = { id: 'client-key', name: 'client', preview: 'pg_masked', status: 'active', createdAt: new Date().toISOString(), expires: '', note: '', used: 0, activeProfile: profile.id, profiles: [context.profile], tokenHash: 'hash' };
+    const dispatched: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_target: RequestInfo | URL, options?: RequestInit) => {
+      dispatched.push(JSON.parse(String(options?.body)).model);
+      return dispatched.length === 1 ? Response.json({ error: { message: 'try backup' } }, { status: 503 }) : upstreamReply('openai', stream);
+    }));
+    const response = await handleGateway(aliasRequest(stream), context, store);
+    expect(response.headers.get('x-pulsegate-channel-id')).toBe('b'); expect(response.headers.get('x-pulsegate-attempts')).toBe('2');
+    await expectAliasResponse(response, stream);
+    expect(dispatched).toEqual(['provider-primary', 'provider-backup']); expect(attempts.map(attempt => attempt.model)).toEqual(dispatched);
+    expect(logs[0]).toMatchObject({ model: 'client-alias', result: 'failover', apiKeyId: 'client-key' });
+  });
+});
+
 describe('gateway execution', () => {
   it('returns a traceable 503 with the configured error message when authorized channels are unavailable', async () => {
     for (const status of ['disabled', 'degraded', 'offline'] as const) {

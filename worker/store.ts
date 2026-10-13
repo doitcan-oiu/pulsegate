@@ -42,7 +42,10 @@ export class Store implements GatewayStore {
     // Prepare every encrypted insert before the transaction; edits append and never replace existing keys.
     const prepared = await Promise.all(credentials.map(credential => this.prepareCredential(channel.id,credential)));
     const accountStatement = await prepareAccountSave(this.env, channel, account);
-    const statements = [this.env.DB.prepare('INSERT INTO channels(id,data,fixture) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=json_set(excluded.data,\'$.health\',json_extract(channels.data,\'$.health\'),\'$.status\',json_extract(channels.data,\'$.status\'),\'$.requests\',json_extract(channels.data,\'$.requests\'),\'$.ttft\',json_extract(channels.data,\'$.ttft\'),\'$.successRate\',json_extract(channels.data,\'$.successRate\'),\'$.history\',json_extract(channels.data,\'$.history\')),health_version=channels.health_version+1').bind(channel.id, JSON.stringify(channel), fixture ? 1 : 0), ...channel.tags.map(tag => this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(tag))];
+    if (account) channel = { ...channel, accountAuthMode: 'accessToken' in account ? 'token' : 'password' };
+    // A stale metadata edit must not overwrite the mode of concurrently saved credentials.
+    const modeSource = account ? 'excluded' : 'channels';
+    const statements = [this.env.DB.prepare(`INSERT INTO channels(id,data,fixture) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=json_patch(json_set(excluded.data,'$.health',json_extract(channels.data,'$.health'),'$.status',json_extract(channels.data,'$.status'),'$.requests',json_extract(channels.data,'$.requests'),'$.ttft',json_extract(channels.data,'$.ttft'),'$.successRate',json_extract(channels.data,'$.successRate'),'$.history',json_extract(channels.data,'$.history')),json_object('accountAuthMode',json_extract(${modeSource}.data,'$.accountAuthMode'))),health_version=channels.health_version+1`).bind(channel.id, JSON.stringify(channel), fixture ? 1 : 0), ...channel.tags.map(tag => this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(tag))];
     statements.push(...prepared.map(entry => entry.statement));
     if (accountStatement) statements.push(accountStatement);
     else statements.unshift(this.env.DB.prepare("UPDATE channel_accounts SET auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE channel_id=? AND EXISTS (SELECT 1 FROM channels c WHERE c.id=? AND (json_extract(c.data,'$.endpoint')<>? OR COALESCE(json_extract(c.data,'$.config.integration'),'native')<>?))").bind(channel.id,channel.id,channel.endpoint,channel.config.integration ?? 'native'));
@@ -54,6 +57,8 @@ export class Store implements GatewayStore {
       if (entry.credentials.length > 100) throw new HttpError(400, 'Upstream API keys must be a bounded array');
       entry.credentials.forEach(validateCredential);
       if (entry.account && !['newapi', 'sub2api'].includes(entry.channel.config.integration ?? '')) throw new HttpError(400, 'Only NewAPI / Sub2API channels use management accounts');
+      if (entry.account && 'accessToken' in entry.account && entry.channel.config.integration !== 'newapi') throw new HttpError(400, '后台访问令牌仅支持 NewAPI 渠道');
+      if (entry.account) entry.channel = { ...entry.channel, accountAuthMode: 'accessToken' in entry.account ? 'token' : 'password' };
     }
     // Encrypt the complete import before the first write. JSON inserts keep even a
     // large import to four queries, and D1 batch rolls all of them back on failure.

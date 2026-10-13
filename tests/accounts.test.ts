@@ -69,6 +69,29 @@ describe("account input and management base URL", () => {
     });
   });
 
+  it("accepts a dashboard access token and normalizes an optional legacy User ID", () => {
+    expect(parseAccountCredentials({ accessToken: " private-dashboard-token " })).toEqual({ accessToken: "private-dashboard-token" });
+    expect(parseAccountCredentials({ accessToken: "private-dashboard-token", userId: " 0042 " })).toEqual({ accessToken: "private-dashboard-token", userId: "42" });
+  });
+
+  it.each([
+    { accessToken: "" }, { accessToken: "   " }, { accessToken: "x".repeat(4097) }, { accessToken: 123 },
+    { accessToken: "private-dashboard token" }, { accessToken: "private-dashboard\u0000token" },
+    { accessToken: "private-dashboard\r\ntoken" },
+    { accessToken: "private-dashboard-token", username: credentials.username, password: credentials.password },
+    { accessToken: "private-dashboard-token", password: credentials.password },
+    { accessToken: "private-dashboard-token", userId: "0" }, { accessToken: "private-dashboard-token", userId: "-1" },
+    { accessToken: "private-dashboard-token", userId: "1.5" }, { accessToken: "private-dashboard-token", userId: "1e3" },
+    { accessToken: "private-dashboard-token", userId: "9007199254740992" },
+    { accessToken: "private-dashboard-token", userId: 42 },
+    { ...credentials, userId: "42" },
+  ])("rejects ambiguous or invalid token credentials without returning input values", (input) => {
+    let error: unknown;
+    try { parseAccountCredentials(input); } catch (caught) { error = caught; }
+    expectPrivateError(error, 400);
+    expect((error as Error).message).not.toContain("private-dashboard");
+  });
+
   it.each([
     {},
     { username: "account" },
@@ -259,6 +282,102 @@ describe("Sub2API account balance adapter", () => {
 });
 
 describe("NewAPI account balance adapter", () => {
+  it.each([undefined, "42"])("reads account quota using an explicit dashboard token and optional User ID (%s) without logging in", async (userId) => {
+    const fetch = mockFetch(
+      Response.json({ success: true, data: { quota: 1_250_000 } }),
+      Response.json({ success: true, data: { quota_per_unit: 500000, turnstile_check: true } }),
+    );
+    const result = await fetchAccountBalance(makeChannel("newapi"), { accessToken: "private-dashboard-token", ...(userId ? { userId } : {}) }, false, {
+      cookie: "old-password-session", token: "old-password-token", userId: "7", base, expiresAt: Date.now() + 3600000,
+    });
+    expect(result.amount).toBe(2.5);
+    expect(result.unit).toBe("USD");
+    expect(result.session.token).toBe("private-dashboard-token");
+    expect(result.session.cookie).toBeUndefined();
+    expect(result.session.userId).toBe(userId);
+    const profile = requestAt(fetch, 0);
+    expect(profile.url).toBe(base + "/api/user/self");
+    expect(profile.headers.get("Authorization")).toBe("Bearer private-dashboard-token");
+    expect(profile.headers.get("New-Api-User")).toBe(userId ?? null);
+    expect(profile.headers.get("Cookie")).toBeNull();
+    expect(profile.init?.body).toBeUndefined();
+    expect(profile.init?.redirect).toBe("manual");
+    expect(requestAt(fetch, 1).url).toBe(base + "/api/status");
+    expect(requestAt(fetch, 1).headers.get("Authorization")).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects dashboard tokens on Sub2API before making any request", async () => {
+    const fetch = mockFetch();
+    expectPrivateError(await fetchAccountBalance(makeChannel(), { accessToken: "private-dashboard-token" }, false).catch(error => error), 400);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("renews a cached NewAPI session rejected through a legacy HTTP 200 response", async () => {
+    const fetch = mockFetch(
+      Response.json({ success: false, message: "无权进行此操作，access token 无效" }),
+      Response.json({ success: true, data: { access_token: "new-login-token", user: { id: 42 } } }),
+      Response.json({ success: true, data: { quota: 1000000 } }),
+      Response.json({ success: true, data: { quota_per_unit: 500000 } }),
+    );
+    const result = await fetchAccountBalance(makeChannel("newapi"), credentials, false, {
+      token: "revoked-cached-token", base, expiresAt: Date.now() + 3600000,
+    });
+    expect(result.amount).toBe(2);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([base + "/api/user/self", base + "/api/user/login", base + "/api/user/self", base + "/api/status"]);
+    expect(requestAt(fetch, 2).headers.get("Authorization")).toBe("Bearer new-login-token");
+  });
+
+  it("does not turn an unknown business rejection into session renewal", async () => {
+    const fetch = mockFetch(Response.json({ success: false, message: credentials.password }));
+    expectPrivateError(await fetchAccountBalance(makeChannel("newapi"), credentials, false, { token: "cached", base, expiresAt: Date.now() + 3600000 }).catch(error => error), 502);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [200, { success: false, message: "无权进行此操作，access token 无效" }, 401, "访问令牌失效"],
+    [401, { success: false, message: "无权进行此操作，未提供 New-Api-User" }, 401, "需要用户 ID"],
+    [401, { success: false, message: "无权进行此操作，New-Api-User 与登录用户不匹配" }, 401, "不匹配"],
+    [401, { success: false, message: "无权进行此操作，New-Api-User 格式错误" }, 401, "用户 ID 无效"],
+    [200, { success: false, message: "用户已被封禁" }, 403, "禁用"],
+    [403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: credentials.password }, 403, "权限不足"],
+    [200, { success: false, code: "ACCESS_TOKEN_EXPIRED", message: credentials.password }, 401, "访问令牌失效"],
+    [200, { success: false, message: credentials.password }, 502, "后台拒绝请求"],
+  ] as const)("diagnoses dashboard token failures safely (HTTP %s, %s)", async (status, body, expectedStatus, message) => {
+    const fetch = mockFetch(Response.json(body, { status }));
+    const error = await fetchAccountBalance(makeChannel("newapi"), { accessToken: "private-dashboard-token", userId: "42" }, false).catch(error => error);
+    expectPrivateError(error, expectedStatus);
+    expect(error.message).toContain(message);
+    expect(error.message).not.toContain("private-dashboard-token");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(requestAt(fetch, 0).url).toBe(base + "/api/user/self");
+  });
+
+  it("reports a Turnstile-protected password login and never retries with encrypted credentials", async () => {
+    const fetch = mockFetch(
+      Response.json({ success: false, message: "Turnstile token 为空" }),
+      Response.json({ success: true, data: { turnstile_check: true, password_login_enabled: true, password_login_encryption_enabled: true } }),
+    );
+    const error = await fetchAccountBalance(makeChannel("newapi"), credentials, false).catch(error => error);
+    expectPrivateError(error, 409);
+    expect(error.message).toContain("Turnstile");
+    expect(error.message).toContain("后台访问令牌");
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([base + "/api/user/login", base + "/api/status"]);
+  });
+
+  it.each([
+    { require_verification: true, flow_token: "private-flow-token", methods: [{ method: "two_fa", available: true }] },
+    { require_2fa: true, flow_token: "private-flow-token" },
+    { flow_token: "private-flow-token" },
+  ])("recognizes an unfinished modern NewAPI login verification flow", async (challenge) => {
+    const fetch = mockFetch(Response.json({ success: true, data: challenge }));
+    const error = await fetchAccountBalance(makeChannel("newapi"), credentials, false).catch(error => error);
+    expectPrivateError(error, 409);
+    expect(error.message).toContain("二次验证");
+    expect(error.message).not.toContain("private-flow-token");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("supports token login, User-ID authentication and the site-specific quota conversion", async () => {
     const expires = Math.floor(Date.now() / 1000) + 600;
     const fetch = mockFetch(

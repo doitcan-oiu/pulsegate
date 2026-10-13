@@ -27,7 +27,11 @@
 
 渠道和中继的 Base URL 可以只填域名（如 `https://api.anthropic.com`）：使用默认端点时，OpenAI / Anthropic 自动补 `/v1`，Gemini 自动补 `/v1beta`。已经填写的版本或部署子目录保持原样；自定义端点路径也按原配置拼接，不自动添加版本。
 
-NewAPI / Sub2API 的后台账号独立于推理 API Key。后台地址从 Base URL 去除末尾 `/v1` 或 `/v1beta` 推导，保留部署子目录；余额不经过 AI Gateway。NewAPI 按站点 `quota_per_unit` 将额度换算为 USD，无法取得比例时显示原始额度；Sub2API 显示后台 `balance`。支持 NewAPI 旧 Cookie、新 Token 与可选 RSA 密码加密登录，以及 Sub2API Token 登录。验证码、二次验证或站点自定义登录流程会显示刷新失败，保留上次成功余额及时间，不绕过登录验证。自动刷新采用 D1 租约、版本校验和有限批次，账户较多时分批处理；归档渠道不刷新。Cloudflare Cron 在页面关闭后继续运行，本地打开控制台时也会触发到期刷新。
+NewAPI / Sub2API 的后台凭据独立于推理 API Key。后台地址从 Base URL 去除末尾 `/v1` 或 `/v1beta` 推导，保留部署子目录；余额不经过 AI Gateway。NewAPI 使用 `/api/user/self` 的 `quota`，按站点 `/api/status` 的 `quota_per_unit` 换算为 USD，无法取得比例时显示原始额度；Sub2API 显示后台 `balance`。支持 NewAPI 旧 Cookie、新 Token 与可选 RSA 密码加密登录，以及 Sub2API Token 登录。NewAPI 还可选择后台访问令牌，在个人设置中生成并填写；旧版站点同时需要数字用户 ID，新版 PAT 可省略。令牌使用 `Authorization: Bearer`，旧版用户标识使用 `New-Api-User`，均加密保存、不回显。[NewAPI 官方后台鉴权说明](https://docs.newapi.pro/zh/docs/api/management/auth)。
+
+NewAPI 开启 Turnstile 人机验证时，账号密码登录会提示改用后台访问令牌。二次验证、禁用密码登录、令牌失效和用户 ID 错误也会给出具体提示，失败时保留上次成功余额及时间。自动刷新采用 D1 租约、版本校验和有限批次，账户较多时分批处理；归档渠道不刷新。Cloudflare Cron 在页面关闭后继续运行，本地打开控制台时也会触发到期刷新。
+
+模型别名采用可搜索的紧凑列表编辑；请求转发使用上游模型名称，JSON 响应及每个 SSE JSON 事件的 `model` 返回客户端原始请求的公开模型名，跨渠道切换后也保持一致。
 
 已有安装升级时需应用新的账户表迁移，账号和会话均不保存在渠道公开 JSON 中：
 

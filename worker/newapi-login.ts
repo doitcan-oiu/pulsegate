@@ -147,6 +147,10 @@ export async function newApiLoginPayload(
     signal,
     512 * 1024,
   );
+  if (status.password_login_enabled === false)
+    throw new HttpError(409, "此 NewAPI 后台已关闭密码登录，请改用后台访问令牌刷新余额");
+  if (status.turnstile_check === true)
+    throw new HttpError(409, "此 NewAPI 后台登录需要 Turnstile 人机验证，请改用后台访问令牌刷新余额");
   const enabled = status.password_login_encryption_enabled;
   if (enabled === undefined || enabled === false)
     return { username: credentials.username, password: credentials.password };

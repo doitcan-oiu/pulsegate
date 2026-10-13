@@ -22,6 +22,7 @@ export type ChannelConfig = {
 };
 export type GatewayChannel = {
   hasAccountCredentials?: boolean;
+  accountAuthMode?: 'password' | 'token';
   accountBalance?: { status: 'pending' | 'ok' | 'error'; amount: number | null; unit: string; updatedAt: string | null; checkedAt: string | null; error?: string };
   id: string; name: string; provider: string; model: string; models: string[];
   tags: string[]; weight: number; endpoint: string; status: ChannelStatus;

@@ -49,6 +49,9 @@ type ProviderDraft = {
   batchOpen: boolean;
   username: string;
   password: string;
+  accountAuth: "password" | "token";
+  accessToken: string;
+  accountUserId: string;
 };
 type Props = {
   channel?: GatewayChannel;
@@ -237,6 +240,11 @@ export default function ChannelEditor({
   const [secrets, setSecrets] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [accountAuth, setAccountAuth] = useState<"password" | "token">(
+    channel?.accountAuthMode ?? "password",
+  );
+  const [accessToken, setAccessToken] = useState("");
+  const [accountUserId, setAccountUserId] = useState("");
   const initialConnection: Connection =
     channel?.config.gatewayMode === "ai-gateway"
       ? "ai-gateway"
@@ -265,6 +273,12 @@ export default function ChannelEditor({
   const simulated = protocol === "mock";
   const service = services.find((item) => item.id === serviceId);
   const requiresAccount = serviceId === "newapi" || serviceId === "sub2api";
+  const useAccountToken = serviceId === "newapi" && accountAuth === "token";
+  const hasSavedAccount = Boolean(
+    channel?.hasAccountCredentials &&
+      (channel.accountAuthMode ?? "password") ===
+        (useAccountToken ? "token" : "password"),
+  );
   const availableTags = [...new Set([...tags, ...selectedTags])].sort();
   const enteredKeys = [
     ...new Set(
@@ -360,6 +374,9 @@ export default function ChannelEditor({
       batchOpen,
       username,
       password,
+      accountAuth,
+      accessToken,
+      accountUserId,
     };
     const draft = drafts.current[next];
     setServiceId(next);
@@ -377,6 +394,9 @@ export default function ChannelEditor({
     setBatchOpen(draft?.batchOpen ?? false);
     setUsername(draft?.username ?? "");
     setPassword(draft?.password ?? "");
+    setAccountAuth(draft?.accountAuth ?? "password");
+    setAccessToken(draft?.accessToken ?? "");
+    setAccountUserId(draft?.accountUserId ?? "");
     if (
       services.some((item) => item.name === provider) ||
       provider === "Google Gemini"
@@ -592,17 +612,41 @@ export default function ChannelEditor({
       return;
     }
     if (requiresAccount) {
-      const hasEnteredAccount = Boolean(username.trim() || password);
-      if (
-        (!channel?.hasAccountCredentials || hasEnteredAccount) &&
-        (!username.trim() || !password)
-      ) {
-        toast.error(`请填写完整的 ${service?.name} 账号和密码`);
-        return;
-      }
-      if (username.trim().length > 256 || password.length > 4096) {
-        toast.error("账号不超过 256 个字符，密码不超过 4,096 个字符");
-        return;
+      if (useAccountToken) {
+        const hasEnteredAccount = Boolean(
+          accessToken.trim() || accountUserId.trim(),
+        );
+        if ((!hasSavedAccount || hasEnteredAccount) && !accessToken.trim()) {
+          toast.error("请填写 NewAPI 后台访问令牌");
+          return;
+        }
+        if (accessToken.trim().length > 4096 || /\s/.test(accessToken.trim())) {
+          toast.error("后台访问令牌不超过 4,096 个字符，不能包含空格");
+          return;
+        }
+        const userId = accountUserId.trim();
+        if (
+          userId &&
+          (!/^\d+$/.test(userId) ||
+            !Number.isSafeInteger(Number(userId)) ||
+            Number(userId) <= 0)
+        ) {
+          toast.error("用户 ID 须为正整数");
+          return;
+        }
+      } else {
+        const hasEnteredAccount = Boolean(username.trim() || password);
+        if (
+          (!hasSavedAccount || hasEnteredAccount) &&
+          (!username.trim() || !password)
+        ) {
+          toast.error(`请填写完整的 ${service?.name} 账号和密码`);
+          return;
+        }
+        if (username.trim().length > 256 || password.length > 4096) {
+          toast.error("账号不超过 256 个字符，密码不超过 4,096 个字符");
+          return;
+        }
       }
     }
     if (
@@ -616,6 +660,16 @@ export default function ChannelEditor({
       toast.error("优先级需要为 -10,000 至 10,000 的整数，权重为 0 至 10,000");
       return;
     }
+    const accountCredentials = useAccountToken
+      ? accessToken.trim()
+        ? {
+            accessToken: accessToken.trim(),
+            ...(accountUserId.trim() ? { userId: accountUserId.trim() } : {}),
+          }
+        : undefined
+      : username.trim() && password
+        ? { username: username.trim(), password }
+        : undefined;
     setBusy(true);
     try {
       await api(channel ? `/api/channels/${channel.id}` : "/api/channels", {
@@ -635,13 +689,14 @@ export default function ChannelEditor({
           enabled,
           config: connectionConfig(),
           ...(enteredKeys.length ? { apiKeys: enteredKeys } : {}),
-          ...(requiresAccount && username.trim() && password
-            ? { accountCredentials: { username: username.trim(), password } }
+          ...(requiresAccount && accountCredentials
+            ? { accountCredentials }
             : {}),
         }),
       });
       setSecrets("");
       setPassword("");
+      setAccessToken("");
       toast.success(channel ? "渠道已保存" : "渠道已创建");
       await onSaved();
     } catch (error) {
@@ -821,51 +876,101 @@ export default function ChannelEditor({
                     <Chip size="sm">已保存</Chip>
                   )}
                 </div>
+                {serviceId === "newapi" && (
+                  <label className="ce-field">
+                    <span>余额刷新认证</span>
+                    <Select
+                      aria-label="NewAPI 余额刷新认证方式"
+                      value={accountAuth}
+                      onChange={(event) =>
+                        setAccountAuth(event.target.value as "password" | "token")
+                      }
+                    >
+                      <option value="password">账号密码</option>
+                      <option value="token">后台访问令牌</option>
+                    </Select>
+                  </label>
+                )}
                 <div className="ce-fields">
-                  <label className="ce-field">
-                    <span>
-                      {serviceId === "sub2api" ? "邮箱 / 账号" : "账号"}
-                      <em>{channel?.hasAccountCredentials ? "" : " *"}</em>
-                    </span>
-                    <Input
-                      aria-label={`${service?.name} 账号`}
-                      maxLength={256}
-                      autoComplete="off"
-                      value={username}
-                      onChange={(event) => setUsername(event.target.value)}
-                      placeholder={
-                        channel?.hasAccountCredentials
-                          ? "留空保留已保存账号"
-                          : serviceId === "sub2api"
-                            ? "name@example.com"
-                            : "用户名"
-                      }
-                    />
-                  </label>
-                  <label className="ce-field">
-                    <span>
-                      密码<em>{channel?.hasAccountCredentials ? "" : " *"}</em>
-                    </span>
-                    <Input
-                      aria-label={`${service?.name} 密码`}
-                      type="password"
-                      maxLength={4096}
-                      autoComplete="new-password"
-                      value={password}
-                      onChange={(event) => setPassword(event.target.value)}
-                      placeholder={
-                        channel?.hasAccountCredentials
-                          ? "留空保留已保存密码"
-                          : "输入账户密码"
-                      }
-                    />
-                  </label>
+                  {useAccountToken ? (
+                    <>
+                      <label className="ce-field ce-full">
+                        <span>
+                          后台访问令牌<em>{hasSavedAccount ? "" : " *"}</em>
+                        </span>
+                        <Input
+                          aria-label="NewAPI 后台访问令牌"
+                          type="password"
+                          maxLength={4096}
+                          autoComplete="new-password"
+                          value={accessToken}
+                          onChange={(event) => setAccessToken(event.target.value)}
+                          placeholder={hasSavedAccount ? "留空保留已保存令牌" : "填写后台个人访问令牌"}
+                        />
+                        <small>
+                          在 NewAPI 后台「个人设置 → 安全设置」中生成访问令牌，用于读取账户余额。
+                        </small>
+                      </label>
+                      <label className="ce-field ce-full">
+                        <span>用户 ID（旧版站点必填）</span>
+                        <Input
+                          aria-label="NewAPI 后台用户 ID"
+                          inputMode="numeric"
+                          maxLength={20}
+                          autoComplete="off"
+                          value={accountUserId}
+                          onChange={(event) => setAccountUserId(event.target.value)}
+                          placeholder={hasSavedAccount ? "留空保留；修改时请同时填写令牌" : "个人资料中的数字用户 ID；新版可留空"}
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <label className="ce-field">
+                        <span>
+                          {serviceId === "sub2api" ? "邮箱 / 账号" : "账号"}
+                          <em>{hasSavedAccount ? "" : " *"}</em>
+                        </span>
+                        <Input
+                          aria-label={`${service?.name} 账号`}
+                          maxLength={256}
+                          autoComplete="off"
+                          value={username}
+                          onChange={(event) => setUsername(event.target.value)}
+                          placeholder={
+                            hasSavedAccount
+                              ? "留空保留已保存账号"
+                              : serviceId === "sub2api"
+                                ? "name@example.com"
+                                : "用户名"
+                          }
+                        />
+                      </label>
+                      <label className="ce-field">
+                        <span>
+                          密码<em>{hasSavedAccount ? "" : " *"}</em>
+                        </span>
+                        <Input
+                          aria-label={`${service?.name} 密码`}
+                          type="password"
+                          maxLength={4096}
+                          autoComplete="new-password"
+                          value={password}
+                          onChange={(event) => setPassword(event.target.value)}
+                          placeholder={hasSavedAccount ? "留空保留已保存密码" : "输入账户密码"}
+                        />
+                      </label>
+                    </>
+                  )}
                 </div>
                 <small>
                   用于自动刷新后台余额；推理与模型获取使用 API Key。
-                  {channel?.hasAccountCredentials
+                  {hasSavedAccount
                     ? "留空保留原凭据，修改时请完整填写。"
-                    : "账号与密码加密保存，不回显。"}
+                    : "后台凭据加密保存，不回显。"}
+                  {serviceId === "newapi" &&
+                    !useAccountToken &&
+                    "开启人机验证的站点请使用后台访问令牌。"}
                 </small>
               </div>
             )}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Chip } from "@heroui/react";
 import {
@@ -8,6 +8,7 @@ import {
   CircleDollarSign,
   FileKey2,
   Plus,
+  Search,
   Settings2,
   Tags,
   Trash2,
@@ -24,11 +25,44 @@ type ModelProps = {
 };
 
 export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
-  const add = (to = "") =>
+  const [search, setSearch] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const revealAdded = useRef(false);
+  const errorId = useId();
+  const query = search.trim().toLowerCase();
+  const names = new Map<string, number>();
+  config.aliases.forEach(({ from }) => {
+    const name = from.trim();
+    if (name) names.set(name, (names.get(name) ?? 0) + 1);
+  });
+  const visibleAliases = config.aliases
+    .map((alias, index) => ({ alias, index }))
+    .filter(
+      ({ alias, index }) =>
+        !query ||
+        index === editingIndex ||
+        alias.from.toLowerCase().includes(query) ||
+        alias.to.toLowerCase().includes(query),
+    );
+  const add = (to = "") => {
+    revealAdded.current = true;
+    setSearch("");
     setConfig((old) => ({
       ...old,
       aliases: [...old.aliases, { from: "", to }],
     }));
+  };
+  useEffect(() => {
+    if (!revealAdded.current) return;
+    revealAdded.current = false;
+    const list = listRef.current;
+    const row = list?.querySelector<HTMLDivElement>(
+      ".cmp-alias-row:last-child",
+    );
+    if (list) list.scrollTop = list.scrollHeight;
+    row?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
+  }, [config.aliases.length]);
   const update = (index: number, key: "from" | "to", value: string) =>
     setConfig((old) => ({
       ...old,
@@ -39,7 +73,7 @@ export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
   return (
     <PanelSection
       title="模型名称映射"
-      description="客户端使用公开名称，网关转发时替换成上游模型名称。"
+      description="请求转发到上游模型，响应中的模型名仍使用公开名称。"
       icon={Tags}
       action={
         <Button onClick={() => add()}>
@@ -60,45 +94,64 @@ export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
           }
         />
       ) : (
-        <div className="cmp-list">
-          {config.aliases.map((alias, index) => {
-            const duplicate =
-              alias.from.trim() &&
-              config.aliases.some(
-                (other, i) =>
-                  i !== index && other.from.trim() === alias.from.trim(),
-              );
-            return (
-              <div className="cmp-entry" key={index}>
-                <div className="cmp-entry-heading">
-                  <span>映射 {String(index + 1).padStart(2, "0")}</span>
-                  <Button
-                    variant="ghost"
-                    isIconOnly
-                    aria-label={`删除映射 ${index + 1}`}
-                    onClick={() =>
-                      setConfig((old) => ({
-                        ...old,
-                        aliases: old.aliases.filter((_, i) => i !== index),
-                      }))
-                    }
-                  >
-                    <Trash2 size={15} />
-                  </Button>
-                </div>
-                <div className="cmp-alias-fields">
-                  <label className="cmp-field">
+        <div className="cmp-alias-editor">
+          <div className="cmp-alias-toolbar">
+            <span aria-live="polite">
+              {query
+                ? `显示 ${visibleAliases.length} / ${config.aliases.length} 条映射`
+                : `${config.aliases.length} 条映射`}
+            </span>
+            <div className="cmp-alias-search">
+              <Search size={15} aria-hidden="true" />
+              <Input
+                aria-label="搜索模型映射"
+                value={search}
+                placeholder="搜索公开或上游模型名"
+                onChange={(e) => {
+                  setEditingIndex(null);
+                  setSearch(e.target.value);
+                }}
+              />
+            </div>
+          </div>
+          <div className="cmp-alias-list" ref={listRef}>
+            <div className="cmp-alias-columns" aria-hidden="true">
+              <span>公开模型名</span>
+              <span />
+              <span>上游模型名</span>
+              <span />
+            </div>
+            {visibleAliases.map(({ alias, index }) => {
+              const duplicate = (names.get(alias.from.trim()) ?? 0) > 1;
+              return (
+                <div
+                  className="cmp-alias-row"
+                  key={index}
+                  onFocusCapture={() => setEditingIndex(index)}
+                  onBlurCapture={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget))
+                      setEditingIndex(null);
+                  }}
+                >
+                  <label className="cmp-field cmp-alias-from">
                     <span>公开模型名</span>
                     <Input
                       aria-label={`公开模型名 ${index + 1}`}
                       value={alias.from}
                       placeholder="例如 assistant"
                       onChange={(e) => update(index, "from", e.target.value)}
-                      aria-invalid={Boolean(duplicate)}
+                      aria-invalid={duplicate}
+                      aria-describedby={
+                        duplicate ? `${errorId}-${index}` : undefined
+                      }
                     />
                   </label>
-                  <ArrowRight className="cmp-map-arrow" size={18} />
-                  <label className="cmp-field">
+                  <ArrowRight
+                    className="cmp-alias-arrow"
+                    size={16}
+                    aria-hidden="true"
+                  />
+                  <label className="cmp-field cmp-alias-to">
                     <span>上游模型名</span>
                     <Input
                       aria-label={`上游模型名 ${index + 1}`}
@@ -107,21 +160,42 @@ export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
                       onChange={(e) => update(index, "to", e.target.value)}
                     />
                   </label>
+                  <Button
+                    className="cmp-alias-delete"
+                    variant="ghost"
+                    isIconOnly
+                    aria-label={`删除映射 ${index + 1}`}
+                    onClick={() => {
+                      setEditingIndex(null);
+                      setConfig((old) => ({
+                        ...old,
+                        aliases: old.aliases.filter((_, i) => i !== index),
+                      }));
+                    }}
+                  >
+                    <Trash2 size={15} />
+                  </Button>
+                  {duplicate && (
+                    <p
+                      className="cmp-error"
+                      id={`${errorId}-${index}`}
+                      role="alert"
+                    >
+                      公开模型名重复，请使用不同的名称。
+                    </p>
+                  )}
                 </div>
-                {duplicate ? (
-                  <p className="cmp-error" role="alert">
-                    公开模型名重复，请为每条映射使用不同的名称。
-                  </p>
-                ) : (
-                  <p className="cmp-row-note">
-                    请求 <code>{alias.from || "公开模型"}</code>
-                    <ArrowRight size={12} />
-                    转发 <code>{alias.to || "上游模型"}</code>
-                  </p>
-                )}
+              );
+            })}
+            {visibleAliases.length === 0 && (
+              <div className="cmp-alias-no-results">
+                <span>没有匹配的模型映射</span>
+                <Button variant="ghost" size="sm" onClick={() => setSearch("")}>
+                  清除搜索
+                </Button>
               </div>
-            );
-          })}
+            )}
+          </div>
         </div>
       )}
       {models.length > 0 && (

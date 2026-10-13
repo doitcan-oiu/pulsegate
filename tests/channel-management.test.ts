@@ -91,6 +91,66 @@ describe('model discovery management endpoint', () => {
 });
 
 describe('encrypted channel accounts and balance refresh', () => {
+  it('encrypts NewAPI dashboard tokens, refreshes without login, and preserves authentication mode on edits', async () => {
+    const token = 'private-dashboard-access-token';
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      expect(path).not.toContain('/login');
+      if (path === '/api/status') return Response.json({ success:true,data:{ turnstile_check:true,quota_per_unit:500000 } });
+      expect(path).toBe('/api/user/self');
+      expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer ' + token);
+      expect(new Headers(init?.headers).get('New-Api-User')).toBe('42');
+      return Response.json({ success:true,data:{ quota:2500000 } });
+    });
+    vi.stubGlobal('fetch',fetcher);
+    const created = await call('/api/channels','POST',{ name:'Token account',endpoint:'https://account.example',models:['a'],config:{ integration:'newapi' },accountCredentials:{ accessToken:token,userId:'42' } });
+    expect(created.status).toBe(201); expect(created.json.channel.accountAuthMode).toBe('token');
+    const id = created.json.channel.id;
+    const store = new Store(testEnv);
+    expect((await store.getChannel(id))?.accountBalance).toMatchObject({ status:'ok',amount:5,unit:'USD' });
+    const row = await testEnv.DB.prepare('SELECT credentials FROM channel_accounts WHERE channel_id=?').bind(id).first<{credentials:string}>();
+    expect(row!.credentials.startsWith('v1:')).toBe(true); expect(row!.credentials).not.toContain(token);
+    expect(JSON.parse(await decryptSecret(row!.credentials,testEnv))).toEqual({ accessToken:token,userId:'42' });
+    const edited = await call(`/api/channels/${id}`,'PATCH',{ name:'Kept token' });
+    expect(edited.json.channel.accountAuthMode).toBe('token');
+    expect((await testEnv.DB.prepare('SELECT credentials FROM channel_accounts WHERE channel_id=?').bind(id).first<{credentials:string}>())?.credentials).toBe(row!.credentials);
+    const clone = await call(`/api/channels/${id}/clone`,'POST',{});
+    expect(clone.json.channel.hasAccountCredentials).toBe(false); expect(clone.json.channel.accountAuthMode).toBeUndefined();
+    expect(created.content+edited.content+clone.content+(await call('/api/bootstrap')).content).not.toContain(token);
+    mockAccount();
+    const replaced = await call(`/api/channels/${id}`,'PATCH',{ accountCredentials:{ username:'updated-user',password:'updated-password' } });
+    expect(replaced.status).toBe(200); expect(replaced.json.channel.accountAuthMode).toBe('password');
+    const next = await testEnv.DB.prepare('SELECT credentials FROM channel_accounts WHERE channel_id=?').bind(id).first<{credentials:string}>();
+    expect(JSON.parse(await decryptSecret(next!.credentials,testEnv))).toEqual({ username:'updated-user',password:'updated-password' });
+  });
+  it('imports NewAPI token accounts with public mode metadata and encrypted credentials', async () => {
+    const token = 'private-imported-dashboard-token';
+    const result = await call('/api/channels/import','POST',{ channels:[{ name:'Imported token',endpoint:'https://account.example/v1',models:['a'],config:{ integration:'newapi' },accountCredentials:{ accessToken:token } }] });
+    expect(result.status).toBe(201); expect(result.json.channels[0].accountAuthMode).toBe('token');
+    expect(result.content).not.toContain(token);
+    const saved = await new Store(testEnv).getChannel(result.json.channels[0].id);
+    expect(saved?.accountAuthMode).toBe('token'); expect(saved?.hasAccountCredentials).toBe(true);
+    const row = await testEnv.DB.prepare('SELECT credentials FROM channel_accounts WHERE channel_id=?').bind(saved!.id).first<{credentials:string}>();
+    expect(JSON.parse(await decryptSecret(row!.credentials,testEnv))).toEqual({ accessToken:token });
+  });
+  it('preserves the current authentication mode when an older metadata snapshot is saved', async () => {
+    mockAccount();
+    const created = await accountChannel();
+    const store = new Store(testEnv);
+    const stale = (await store.getChannel(created.json.channel.id))!;
+    await store.saveChannel(stale,false,[],{ accessToken:'new-dashboard-token',userId:'42' });
+    await store.saveChannel({ ...stale,name:'Updated from old snapshot' });
+    expect((await store.getChannel(stale.id))?.accountAuthMode).toBe('token');
+    const row = await testEnv.DB.prepare('SELECT credentials FROM channel_accounts WHERE channel_id=?').bind(stale.id).first<{credentials:string}>();
+    expect(JSON.parse(await decryptSecret(row!.credentials,testEnv))).toEqual({ accessToken:'new-dashboard-token',userId:'42' });
+    expect((await call(`/api/channels/${stale.id}`,'PATCH',{ config:{ integration:'sub2api' } })).status).toBe(400);
+  });
+  it('rejects token accounts for Sub2API before writing channels or partial imports', async () => {
+    const input = { name:'Unsupported token',endpoint:'https://account.example/v1',models:['a'],config:{ integration:'sub2api' },accountCredentials:{ accessToken:'private-token' } };
+    expect((await call('/api/channels','POST',input)).status).toBe(400);
+    expect((await call('/api/channels/import','POST',{ channels:[{ ...input,name:'Valid token',config:{ integration:'newapi' } },input] })).status).toBe(400);
+    expect(await new Store(testEnv).listChannels()).toEqual([]);
+  });
   it('completes a NewAPI encrypted-password handshake after ordinary login is rejected', async () => {
     const pair = await crypto.subtle.generateKey({ name:'RSA-OAEP',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256' },true,['encrypt','decrypt']);
     const exported = new Uint8Array(await crypto.subtle.exportKey('spki',pair.publicKey));

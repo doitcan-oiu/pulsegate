@@ -225,6 +225,20 @@ describe("NewAPI optional password encryption handshake", () => {
 });
 
 describe("NewAPI encryption handshake failure boundaries", () => {
+  it.each([
+    [{ turnstile_check: true, password_login_encryption_enabled: true }, "Turnstile"],
+    [{ turnstile_check: true }, "Turnstile"],
+    [{ password_login_enabled: false, password_login_encryption_enabled: true }, "关闭密码登录"],
+  ])("reports required human verification or disabled password login before requesting encryption keys: %s", async (status, message) => {
+    const fetch = mockFetch(success({ ...status, message: credentials.password }));
+    const error = await newApiLoginPayload(base, credentials, new AbortController().signal).catch(error => error);
+    expectSafeFailure(error, 409);
+    expect(error.message).toContain(message);
+    expect(error.message).toContain("后台访问令牌");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toBe(base + "/api/status");
+  });
+
   it("rejects a non-boolean encryption flag instead of silently downgrading to plaintext", async () => {
     const fetch = mockFetch(
       success({
