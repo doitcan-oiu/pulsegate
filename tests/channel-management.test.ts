@@ -194,6 +194,7 @@ describe('account monitoring independent of the API protocol', () => {
     { original: 'newapi', next: 'sub2api', credentials: { username: 'fresh-sub-user', password: 'fresh-sub-password' }, mode: 'password' },
     { original: 'sub2api', next: 'newapi', credentials: { accessToken: 'fresh-newapi-token', userId: '42' }, mode: 'token' },
     { original: 'newapi', next: 'newapi', credentials: { accessToken: 'fresh-same-backend-token', userId: '42' }, mode: 'token' },
+    { original: 'sub2api', next: 'sub2api', credentials: { cookie: 'session=fresh-concurrent-cookie', accessToken: 'fresh-concurrent-token' }, mode: 'cookie' },
   ] as const)('keeps a concurrent $next account and destination when a $original metadata save reaches its final transaction', async ({ original, next, credentials, mode }) => {
     mockAccount(); const created = await accountChannel(original), id = created.json.channel.id;
     const store = new Store(testEnv), stale = (await store.getChannel(id))!;
@@ -261,6 +262,131 @@ describe('account monitoring independent of the API protocol', () => {
 });
 
 describe('encrypted channel accounts and balance refresh', () => {
+  const browserCredentials = { cookie: 'session=private-browser-cookie; clearance=private-clearance-cookie', accessToken: 'private-browser-token' };
+  async function cookieAccountRow(id: string) {
+    return (await testEnv.DB.prepare('SELECT credentials,auth_secret,balance,next_refresh_at,lease_until,version FROM channel_accounts WHERE channel_id=?').bind(id).first<{ credentials: string; auth_secret: string | null; balance: string | null; next_refresh_at: number; lease_until: number; version: number }>())!;
+  }
+  function mockCookieProfile(balance = 7.25, expected = browserCredentials) {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new URL(String(input)).pathname).toBe('/api/v1/user/profile');
+      const headers = new Headers(init?.headers);
+      expect(headers.get('Cookie')).toBe(expected.cookie); expect(headers.get('Authorization')).toBe('Bearer ' + expected.accessToken); expect(headers.get('New-Api-User')).toBeNull();
+      expect(init?.body).toBeUndefined();
+      return Response.json({ code: 0, data: { balance } });
+    }); vi.stubGlobal('fetch', fetcher); return fetcher;
+  }
+  async function cookieAccountChannel() {
+    const created = await call('/api/channels', 'POST', { name: 'Cookie account', endpoint: 'https://account.example', models: ['a'], config: { protocol: 'anthropic', integration: 'sub2api' }, accountCredentials: browserCredentials });
+    expect(created.status).toBe(201); return created;
+  }
+  it('persists a Sub2API browser JWT without a Cookie under encrypted browser-session mode', async () => {
+    const token = 'private-jwt-without-cookie';
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new URL(String(input)).pathname).toBe('/api/v1/user/profile');
+      const headers = new Headers(init?.headers); expect(headers.get('Cookie')).toBeNull(); expect(headers.get('Authorization')).toBe('Bearer ' + token); expect(headers.get('New-Api-User')).toBeNull();
+      return Response.json({ code: 0, data: { balance: 11.75 } });
+    }); vi.stubGlobal('fetch', fetcher);
+    const created = await call('/api/channels', 'POST', { name: 'JWT session account', endpoint: 'https://account.example', models: ['a'], config: { integration: 'sub2api' }, accountCredentials: { cookie: '', accessToken: 'Bearer ' + token } });
+    expect(created.status).toBe(201); expect(created.json.channel).toMatchObject({ accountAuthMode: 'cookie', accountIntegration: 'sub2api', hasAccountCredentials: true });
+    const id = created.json.channel.id, row = await cookieAccountRow(id);
+    expect(JSON.parse(await decryptSecret(row.credentials, testEnv))).toEqual({ cookie: '', accessToken: token });
+    expect(row.credentials).not.toContain(token); expect(row.auth_secret).not.toContain(token);
+    expect((await new Store(testEnv).getChannel(id))?.accountBalance).toMatchObject({ status: 'ok', amount: 11.75 });
+    const edited = await call(`/api/channels/${id}`, 'PATCH', { name: 'Kept JWT' });
+    expect(edited.status).toBe(200); expect(edited.json.channel.accountAuthMode).toBe('cookie'); expect(await cookieAccountRow(id)).toEqual(row);
+    expect(created.content + edited.content + (await call('/api/bootstrap')).content).not.toContain(token); expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('encrypts Sub2API Cookie and access-token credentials, preserves blank edits, and never copies them into clones', async () => {
+    const fetcher = mockCookieProfile(), created = await cookieAccountChannel(), id = created.json.channel.id, store = new Store(testEnv);
+    expect(created.json.channel).toMatchObject({ accountAuthMode: 'cookie', accountIntegration: 'sub2api', hasAccountCredentials: true });
+    expect((await store.getChannel(id))?.accountBalance).toMatchObject({ status: 'ok', amount: 7.25, unit: 'USD' });
+    const row = await cookieAccountRow(id); expect(row.credentials.startsWith('v1:')).toBe(true); expect(row.auth_secret?.startsWith('v1:')).toBe(true);
+    expect(JSON.parse(await decryptSecret(row.credentials, testEnv))).toEqual(browserCredentials);
+    expect(JSON.parse(await decryptSecret(row.auth_secret!, testEnv))).toMatchObject({ cookie: browserCredentials.cookie, token: browserCredentials.accessToken });
+    for (const value of Object.values(browserCredentials)) { expect(row.credentials).not.toContain(value); expect(row.auth_secret).not.toContain(value); }
+    const edited = await call(`/api/channels/${id}`, 'PATCH', { name: 'Kept Cookie', config: { protocol: 'gemini' } });
+    expect(edited.status).toBe(200); expect(edited.json.channel.accountAuthMode).toBe('cookie'); expect(await cookieAccountRow(id)).toEqual(row);
+    const clone = await call(`/api/channels/${id}/clone`, 'POST', {});
+    expect(clone.json.channel.hasAccountCredentials).toBe(false); expect(clone.json.channel.accountAuthMode).toBeUndefined();
+    expect(await testEnv.DB.prepare('SELECT channel_id FROM channel_accounts WHERE channel_id=?').bind(clone.json.channel.id).first()).toBeNull();
+    for (const value of Object.values(browserCredentials)) expect(created.content + edited.content + clone.content + (await call('/api/bootstrap')).content).not.toContain(value);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('imports Cookie accounts atomically with safe public metadata', async () => {
+    const result = await call('/api/channels/import', 'POST', { channels: [{ name: 'Imported Cookie', endpoint: 'https://account.example', models: ['a'], config: { integration: 'sub2api' }, accountCredentials: browserCredentials }] });
+    expect(result.status).toBe(201); expect(result.json.channels[0]).toMatchObject({ accountAuthMode: 'cookie', accountIntegration: 'sub2api', hasAccountCredentials: true, accountBalance: { status: 'pending' } });
+    const id = result.json.channels[0].id, row = await cookieAccountRow(id);
+    expect(JSON.parse(await decryptSecret(row.credentials, testEnv))).toEqual(browserCredentials);
+    expect((await new Store(testEnv).getChannel(id))?.accountAuthMode).toBe('cookie');
+    for (const value of Object.values(browserCredentials)) expect(result.content).not.toContain(value);
+  });
+  it('retains Cookie mode and credentials while monitoring is disabled and reenables without password login', async () => {
+    mockCookieProfile(); const created = await cookieAccountChannel(), id = created.json.channel.id;
+    const row = await cookieAccountRow(id), store = new Store(testEnv), fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    const off = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'native' } });
+    expect(off.status).toBe(200); expect(off.json.channel).toMatchObject({ accountAuthMode: 'cookie', accountIntegration: 'sub2api', hasAccountCredentials: true });
+    expect((await cookieAccountRow(id)).credentials).toBe(row.credentials);
+    expect((await call(`/api/channels/${id}/balance`, 'POST', {})).status).toBe(400); expect(fetcher).not.toHaveBeenCalled();
+    const profileFetch = mockCookieProfile(10.25);
+    const on = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'sub2api' } });
+    expect(on.status).toBe(200); expect(on.json.channel.accountAuthMode).toBe('cookie'); expect(profileFetch).toHaveBeenCalledTimes(1);
+    expect((await cookieAccountRow(id)).credentials).toBe(row.credentials); expect((await store.getChannel(id))?.accountBalance?.amount).toBe(10.25);
+  });
+  it.each(['newapi', 'native'] as const)('rejects Cookie credentials for %s before saving channels or partial imports', async integration => {
+    const input = { name: 'Wrong Cookie backend', endpoint: 'https://account.example', models: ['a'], tags: ['must-not-save'], config: { integration }, accountCredentials: browserCredentials };
+    expect((await call('/api/channels', 'POST', input)).status).toBe(400);
+    expect((await call('/api/channels/import', 'POST', { channels: [{ ...input, name: 'Valid first Cookie', config: { integration: 'sub2api' } }, input] })).status).toBe(400);
+    expect(await new Store(testEnv).listChannels()).toEqual([]); expect(await new Store(testEnv).listTags()).toEqual([]);
+  });
+  it('replaces password and Cookie authentication without retaining the previous mode session', async () => {
+    mockAccount(); const created = await accountChannel('sub2api'), id = created.json.channel.id, store = new Store(testEnv);
+    const old = await cookieAccountRow(id); expect((await store.getChannel(id))?.accountAuthMode).toBe('password');
+    mockCookieProfile(6.75);
+    const cookie = await call(`/api/channels/${id}`, 'PATCH', { accountCredentials: browserCredentials });
+    expect(cookie.status).toBe(200); expect(cookie.json.channel.accountAuthMode).toBe('cookie');
+    const cookieRow = await cookieAccountRow(id); expect(cookieRow.version).toBeGreaterThan(old.version); expect(JSON.parse(await decryptSecret(cookieRow.credentials, testEnv))).toEqual(browserCredentials);
+    expect(JSON.parse(await decryptSecret(cookieRow.auth_secret!, testEnv))).toMatchObject({ cookie: browserCredentials.cookie, token: browserCredentials.accessToken });
+    expect((await store.getChannel(id))?.accountBalance?.amount).toBe(6.75);
+    mockAccount(9.5);
+    const password = await call(`/api/channels/${id}`, 'PATCH', { accountCredentials: { username: 'new-private-user', password: 'new-private-password' } });
+    expect(password.status).toBe(200); expect(password.json.channel.accountAuthMode).toBe('password');
+    const passwordRow = await cookieAccountRow(id);
+    expect(JSON.parse(await decryptSecret(passwordRow.credentials, testEnv))).toEqual({ username: 'new-private-user', password: 'new-private-password' });
+    expect(JSON.parse(await decryptSecret(passwordRow.auth_secret!, testEnv))).not.toHaveProperty('cookie');
+    expect((await store.getChannel(id))?.accountBalance?.amount).toBe(9.5);
+  });
+  it('uses Cookie credentials for manual and scheduled refresh and safely preserves a balance on expiry', async () => {
+    mockCookieProfile(); const created = await cookieAccountChannel(), id = created.json.channel.id, store = new Store(testEnv);
+    const manualFetch = mockCookieProfile(8.5);
+    expect((await call(`/api/channels/${id}/balance`, 'POST', {})).status).toBe(200); expect(manualFetch).toHaveBeenCalledTimes(1);
+    expect((await store.getChannel(id))?.accountBalance?.amount).toBe(8.5);
+    await testEnv.DB.prepare('UPDATE channel_accounts SET next_refresh_at=0 WHERE channel_id=?').bind(id).run();
+    const cronFetch = mockCookieProfile(9.5); await refreshDueAccounts(testEnv, await store.listChannels(), true); expect(cronFetch).toHaveBeenCalledTimes(1);
+    const last = (await store.getChannel(id))!.accountBalance!;
+    const failedFetch = vi.fn(async () => Response.json({ message: JSON.stringify(browserCredentials) }, { status: 401 })); vi.stubGlobal('fetch', failedFetch);
+    const failure = await call(`/api/channels/${id}/balance`, 'POST', {});
+    const balance = (await store.getChannel(id))!.accountBalance!;
+    expect(balance).toMatchObject({ status: 'error', amount: last.amount, updatedAt: last.updatedAt }); expect(balance.error).toMatch(/Cookie|会话/);
+    for (const value of Object.values(browserCredentials)) expect(failure.content + JSON.stringify(balance)).not.toContain(value);
+    expect(failedFetch).toHaveBeenCalledTimes(1);
+  });
+  it('does not overwrite a newer Cookie credential replacement when an older balance refresh completes', async () => {
+    mockCookieProfile(); const created = await cookieAccountChannel(), id = created.json.channel.id, store = new Store(testEnv);
+    const staleChannel = (await store.getChannel(id))!, old = await cookieAccountRow(id);
+    let release!: (value: Response) => void, started!: () => void;
+    const began = new Promise<void>(resolve => { started = resolve; });
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get('Cookie')).toBe(browserCredentials.cookie); started();
+      return new Promise<Response>(resolve => { release = resolve; });
+    }); vi.stubGlobal('fetch', fetcher);
+    const refreshing = refreshAccountBalance(testEnv, staleChannel, true, true); await began;
+    const next = { cookie: 'session=fresh-private-browser-cookie', accessToken: 'fresh-private-browser-token' };
+    await store.saveChannel(staleChannel, false, [], next);
+    const replaced = await cookieAccountRow(id); expect(replaced.version).toBe(old.version + 1); expect(replaced.auth_secret).toBeNull(); expect(replaced.balance).toBeNull();
+    release(Response.json({ code: 0, data: { balance: 999 } })); await refreshing;
+    expect(await cookieAccountRow(id)).toEqual(replaced); expect(fetcher).toHaveBeenCalledTimes(1);
+    expect((await store.getChannel(id))?.accountBalance).toMatchObject({ status: 'pending', amount: null });
+  });
   it('encrypts NewAPI dashboard tokens, refreshes without login, and preserves authentication mode on edits', async () => {
     const token = 'private-dashboard-access-token';
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

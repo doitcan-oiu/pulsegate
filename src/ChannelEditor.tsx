@@ -52,9 +52,10 @@ type ProviderDraft = {
 type AccountDraft = {
   username: string;
   password: string;
-  accountAuth: "password" | "token";
+  accountAuth: "password" | "token" | "cookie";
   accessToken: string;
   accountUserId: string;
+  cookie: string;
 };
 const emptyAccountDraft = (): AccountDraft => ({
   username: "",
@@ -62,6 +63,7 @@ const emptyAccountDraft = (): AccountDraft => ({
   accountAuth: "password",
   accessToken: "",
   accountUserId: "",
+  cookie: "",
 });
 type Props = {
   channel?: GatewayChannel;
@@ -222,13 +224,19 @@ export default function ChannelEditor({
     newapi: {
       ...emptyAccountDraft(),
       accountAuth:
-        savedBalanceBackend === "newapi"
-          ? (channel?.accountAuthMode ?? "password")
+        savedBalanceBackend === "newapi" && channel?.accountAuthMode === "token"
+          ? "token"
           : "password",
     },
-    sub2api: emptyAccountDraft(),
+    sub2api: {
+      ...emptyAccountDraft(),
+      accountAuth:
+        savedBalanceBackend === "sub2api" && channel?.accountAuthMode === "cookie"
+          ? "cookie"
+          : "password",
+    },
   }));
-  const { username, password, accountAuth, accessToken, accountUserId } =
+  const { username, password, accountAuth, accessToken, accountUserId, cookie } =
     accountDrafts[balanceBackend];
   const [endpoint, setEndpoint] = useState(
     channel?.endpoint ?? services[0].endpoint,
@@ -279,11 +287,12 @@ export default function ChannelEditor({
   const requiresAccount = balanceEnabled && !simulated;
   const balanceBackendName = balanceBackend === "newapi" ? "NewAPI" : "Sub2API";
   const useAccountToken = balanceBackend === "newapi" && accountAuth === "token";
+  const useAccountCookie = balanceBackend === "sub2api" && accountAuth === "cookie";
   const hasSavedAccount = Boolean(
     channel?.hasAccountCredentials &&
       savedBalanceBackend === balanceBackend &&
       (channel.accountAuthMode ?? "password") ===
-        (useAccountToken ? "token" : "password"),
+        (useAccountToken ? "token" : useAccountCookie ? "cookie" : "password"),
   );
   const availableTags = [...new Set([...tags, ...selectedTags])].sort();
   const enteredKeys = [
@@ -620,7 +629,28 @@ export default function ChannelEditor({
       return;
     }
     if (requiresAccount) {
-      if (useAccountToken) {
+      if (useAccountCookie) {
+        const hasEnteredAccount = Boolean(cookie.trim() || accessToken.trim());
+        if (!hasSavedAccount && !hasEnteredAccount) {
+          toast.error("请填写 Sub2API 浏览器 Cookie 或后台登录 Token，至少一个");
+          return;
+        }
+        if (cookie.trim().length > 16000 || /[\x00-\x1f\x7f]/.test(cookie)) {
+          toast.error("Cookie 不超过 16,000 个字符，请粘贴单行请求头内容");
+          return;
+        }
+        const rawToken = accessToken.trim();
+        const token = rawToken.replace(/^Bearer(?:\s+|$)/i, "");
+        if (
+          (rawToken && !token) ||
+          rawToken.length > 4096 ||
+          /\s/.test(token) ||
+          /[\x00-\x1f\x7f]/.test(accessToken)
+        ) {
+          toast.error("请填写有效的后台登录 Token，不超过 4,096 个字符，不能包含空格（可带 Bearer 前缀）");
+          return;
+        }
+      } else if (useAccountToken) {
         const hasEnteredAccount = Boolean(
           accessToken.trim() || accountUserId.trim(),
         );
@@ -668,16 +698,23 @@ export default function ChannelEditor({
       toast.error("优先级需要为 -10,000 至 10,000 的整数，权重为 0 至 10,000");
       return;
     }
-    const accountCredentials = useAccountToken
-      ? accessToken.trim()
+    const accountCredentials = useAccountCookie
+      ? cookie.trim() || accessToken.trim()
         ? {
-            accessToken: accessToken.trim(),
-            ...(accountUserId.trim() ? { userId: accountUserId.trim() } : {}),
+            cookie: cookie.trim(),
+            ...(accessToken.trim() ? { accessToken: accessToken.trim() } : {}),
           }
         : undefined
-      : username.trim() && password
-        ? { username: username.trim(), password }
-        : undefined;
+      : useAccountToken
+        ? accessToken.trim()
+          ? {
+              accessToken: accessToken.trim(),
+              ...(accountUserId.trim() ? { userId: accountUserId.trim() } : {}),
+            }
+          : undefined
+        : username.trim() && password
+          ? { username: username.trim(), password }
+          : undefined;
     setBusy(true);
     try {
       await api(channel ? `/api/channels/${channel.id}` : "/api/channels", {
@@ -924,25 +961,66 @@ export default function ChannelEditor({
                     <Chip size="sm">已保存</Chip>
                   )}
                 </div>
-                {balanceBackend === "newapi" && (
-                  <label className="ce-field">
-                    <span>余额刷新认证</span>
-                    <Select
-                      aria-label="NewAPI 余额刷新认证方式"
-                      value={accountAuth}
-                      onChange={(event) =>
-                        updateAccount({
-                          accountAuth: event.target.value as "password" | "token",
-                        })
-                      }
-                    >
-                      <option value="password">账号密码</option>
+                <label className="ce-field">
+                  <span>余额刷新认证</span>
+                  <Select
+                    aria-label={`${balanceBackendName} 余额刷新认证方式`}
+                    value={accountAuth}
+                    onChange={(event) =>
+                      updateAccount({
+                        accountAuth: event.target.value as AccountDraft["accountAuth"],
+                      })
+                    }
+                  >
+                    <option value="password">账号密码</option>
+                    {balanceBackend === "newapi" ? (
                       <option value="token">后台访问令牌</option>
-                    </Select>
-                  </label>
-                )}
+                    ) : (
+                      <option value="cookie">Cookie / 浏览器会话</option>
+                    )}
+                  </Select>
+                </label>
                 <div className="ce-fields">
-                  {useAccountToken ? (
+                  {useAccountCookie ? (
+                    <>
+                      <label className="ce-field ce-full">
+                        <span>
+                          浏览器 Cookie（可选）
+                        </span>
+                        <Input
+                          aria-label="Sub2API 浏览器 Cookie"
+                          type="password"
+                          maxLength={16000}
+                          autoComplete="new-password"
+                          value={cookie}
+                          onChange={(event) =>
+                            updateAccount({ cookie: event.target.value })
+                          }
+                          placeholder={hasSavedAccount ? "全部留空保留会话；Cookie 与 Token 至少一个" : "name=value; name=value；也可只填后台登录 Token"}
+                        />
+                        <small>
+                          在浏览器登录 Sub2API 并完成人机验证，在开发者工具「网络」中找到个人信息或余额请求，复制请求头 Cookie 的值。
+                        </small>
+                      </label>
+                      <label className="ce-field ce-full">
+                        <span>后台登录 Token（可选）</span>
+                        <Input
+                          aria-label="Sub2API 后台登录 Token"
+                          type="password"
+                          maxLength={4096}
+                          autoComplete="new-password"
+                          value={accessToken}
+                          onChange={(event) =>
+                            updateAccount({ accessToken: event.target.value })
+                          }
+                          placeholder={hasSavedAccount ? "全部留空保留会话；填写新值替换已保存会话" : "登录后的 JWT，可带 Bearer 前缀"}
+                        />
+                        <small>
+                          标准 Sub2API 可只填登录后的 Bearer Token，从个人信息请求的 Authorization 或本地存储中的 auth_token 复制。若请求还需要人机验证 Cookie，请同时填写；使用 Cookie 登录的定制站点可不填 Token。
+                        </small>
+                      </label>
+                    </>
+                  ) : useAccountToken ? (
                     <>
                       <label className="ce-field ce-full">
                         <span>
@@ -1024,13 +1102,20 @@ export default function ChannelEditor({
                 <small>
                   用于自动刷新后台余额；推理与模型获取使用 API Key。
                   {hasSavedAccount
-                    ? "留空保留原凭据，修改时请完整填写。"
+                    ? useAccountCookie
+                      ? "全部留空保留已保存会话。"
+                      : "留空保留原凭据，修改时请完整填写。"
                     : "后台凭据加密保存，不回显。"}
                   {channel?.hasAccountCredentials && !hasSavedAccount &&
                     "切换后台类型或认证方式后，须填写对应的完整凭据。"}
                   {balanceBackend === "newapi" &&
                     !useAccountToken &&
                     "开启人机验证的站点请使用后台访问令牌。"}
+                  {balanceBackend === "sub2api" &&
+                    !useAccountCookie &&
+                    "开启人机验证的站点可切换到 Cookie / 浏览器会话。"}
+                  {useAccountCookie &&
+                    "Cookie 与后台登录 Token 至少填写一个；填写新会话会替换已保存 Cookie 和 Token，请提供所需的完整会话。会话过期或失效后，请重新登录并更新。"}
                 </small>
               </div>
             )}

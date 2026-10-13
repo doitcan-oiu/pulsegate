@@ -6,7 +6,7 @@ import { readUpstreamJSON } from './upstream-http';
 import { newApiLoginPayload } from './newapi-login';
 
 type PasswordCredentials = { username: string; password: string };
-export type AccountCredentials = PasswordCredentials | { accessToken: string; userId?: string };
+export type AccountCredentials = PasswordCredentials | { accessToken: string; userId?: string } | { cookie: string; accessToken?: string };
 type Balance = NonNullable<GatewayChannel['accountBalance']>;
 type AccountRow = { channel_id: string; credentials: string; auth_secret: string | null; balance: string | null; version: number; channel_data: string };
 type Session = { token?: string; cookie?: string; userId?: string; expiresAt: number; base: string };
@@ -16,11 +16,21 @@ export function accountIntegration(channel: GatewayChannel): GatewayChannel['acc
   return channel.accountIntegration ?? (channel.hasAccountCredentials && ['newapi', 'sub2api'].includes(channel.config.integration ?? '') ? channel.config.integration as 'newapi' | 'sub2api' : undefined);
 }
 
+export function accountAuthMode(account: AccountCredentials): NonNullable<GatewayChannel['accountAuthMode']> {
+  return 'cookie' in account ? 'cookie' : 'accessToken' in account ? 'token' : 'password';
+}
+
+export function assertAccountCredentials(channel: GatewayChannel, account: AccountCredentials): void {
+  assert(['newapi', 'sub2api'].includes(channel.config.integration ?? ''), '仅 NewAPI / Sub2API 渠道使用后台账号');
+  if ('cookie' in account) assert(channel.config.integration === 'sub2api', 'Cookie / 浏览器会话仅支持 Sub2API 后台');
+  else if ('accessToken' in account) assert(channel.config.integration === 'newapi', '后台访问令牌仅支持 NewAPI 渠道');
+}
+
 export function assertAccountReuse(channel: GatewayChannel, previous: GatewayChannel | null, account?: AccountCredentials): void {
   const integration = channel.config.integration;
   if (!['newapi', 'sub2api'].includes(integration ?? '')) return;
   if (account) {
-    assert(!('accessToken' in account) || integration === 'newapi', '后台访问令牌仅支持 NewAPI 渠道');
+    assertAccountCredentials(channel, account);
     return;
   }
   assert(previous?.hasAccountCredentials && accountIntegration(previous) === integration, '开启余额监控或切换后台类型时，请填写对应的后台凭据');
@@ -29,6 +39,24 @@ export function assertAccountReuse(channel: GatewayChannel, previous: GatewayCha
 export function parseAccountCredentials(value: unknown): AccountCredentials | undefined {
   if (value === undefined) return undefined;
   const b = object(value);
+  if (b.cookie !== undefined) {
+    const rawCookie = text(b.cookie, '', 16000);
+    assert(!/[^\x20-\x7e]/.test(rawCookie), 'Cookie 须为单行 ASCII 文本，不能包含控制字符');
+    const cookie = rawCookie.trim().replace(/^Cookie:\s*/i, '').trim();
+    assert(!cookie || cookie.split(';').every((part, index, parts) => {
+      const pair = part.trim();
+      if (!pair) return index === parts.length - 1;
+      const equals = pair.indexOf('=');
+      return equals > 0 && /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(pair.slice(0, equals));
+    }), 'Cookie 须使用请求头中的 name=value 格式');
+    assert(!text(b.username, '', 256).trim() && !text(b.password, '', 4096) && !text(b.userId, '', 20).trim(), 'Cookie / 浏览器会话与账号密码、用户 ID 不能同时填写');
+    const rawToken = text(b.accessToken, '', 4096);
+    assert(!/[\x00-\x1f\x7f]/.test(rawToken), '后台登录 Token 不能包含控制字符');
+    const accessToken = rawToken.trim().replace(/^Bearer(?:\s+|$)/i, '');
+    assert(!rawToken.trim() || accessToken && !/\s/.test(accessToken), '后台登录 Token 不能为空或包含空白字符');
+    assert(cookie || accessToken, 'Cookie / 浏览器会话须填写 Cookie 或后台登录 Token');
+    return { cookie, ...(accessToken ? { accessToken } : {}) };
+  }
   if (b.accessToken !== undefined) {
     const accessToken = text(b.accessToken, '', 4096).trim();
     assert(accessToken && !/[\s\x00-\x1f\x7f]/.test(accessToken), '后台访问令牌不能为空或包含空白、控制字符');
@@ -46,8 +74,7 @@ export function parseAccountCredentials(value: unknown): AccountCredentials | un
 
 export async function prepareAccountSave(env: Env, channel: GatewayChannel, account?: AccountCredentials): Promise<D1PreparedStatement | null> {
   if (!account) return null;
-  assert(['newapi', 'sub2api'].includes(channel.config.integration ?? ''), '仅 NewAPI / Sub2API 渠道使用后台账号');
-  assert(!('accessToken' in account) || channel.config.integration === 'newapi', '后台访问令牌仅支持 NewAPI 渠道');
+  assertAccountCredentials(channel, account);
   const encrypted = await encryptSecret(JSON.stringify(account), env);
   return env.DB.prepare('INSERT INTO channel_accounts(channel_id,credentials) VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET credentials=excluded.credentials,auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=channel_accounts.version+1').bind(channel.id, encrypted);
 }
@@ -100,7 +127,19 @@ async function loginAccount(channel: GatewayChannel, credentials: PasswordCreden
   let login;
   try { login = await sendLogin(sub ? { email:credentials.username,password:credentials.password } : credentials); }
   catch (error) {
-    if (sub || !(error instanceof HttpError) || ![400,401,403,502].includes(error.status)) throw error;
+    if (sub) {
+      if (error instanceof HttpError && [400,401,403,404,502].includes(error.status)) {
+        let humanVerification = false;
+        try {
+          const settings = (await accountRequest(base, '/api/v1/settings/public', signal)).json;
+          const data = settings.data ?? settings;
+          humanVerification = ['turnstile_enabled', 'tencent_captcha_enabled', 'aliyun_captcha_enabled'].some(key => data[key] === true);
+        } catch { /* Preserve the login error if public settings are unavailable. */ }
+        if (humanVerification) throw new HttpError(409, '后台开启了人机验证，请在浏览器登录后改用 Cookie / 浏览器会话，并填写后台登录 Token');
+      }
+      throw error;
+    }
+    if (!(error instanceof HttpError) || ![400,401,403,502].includes(error.status)) throw error;
     const encrypted = await newApiLoginPayload(base,credentials,signal);
     if (!encrypted.password_encrypted) throw error;
     login = await sendLogin(encrypted);
@@ -117,8 +156,8 @@ async function loginAccount(channel: GatewayChannel, credentials: PasswordCreden
   return { token, cookie: cookies || undefined, ...(Number.isSafeInteger(Number(userId)) && Number(userId) > 0 ? { userId: String(userId) } : {}), expiresAt, base };
 }
 
-function sessionHeaders(session: Session): Record<string, string> {
-  return { ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}), ...(session.cookie && !session.token ? { Cookie: session.cookie } : {}), ...(session.userId ? { 'New-Api-User': session.userId } : {}) };
+function sessionHeaders(session: Session, browserSession = false): Record<string, string> {
+  return { ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}), ...(session.cookie && (browserSession || !session.token) ? { Cookie: session.cookie } : {}), ...(session.userId ? { 'New-Api-User': session.userId } : {}) };
 }
 function finiteAmount(value: unknown): number {
   if (value === null || value === undefined || value === '' || !['string', 'number'].includes(typeof value) || !Number.isFinite(Number(value))) throw new HttpError(502, '后台未返回有效余额');
@@ -128,15 +167,29 @@ function finiteAmount(value: unknown): number {
 export async function fetchAccountBalance(channel: GatewayChannel, credentials: AccountCredentials, dev: boolean, cached?: Session): Promise<{ amount: number; unit: string; session: Session }> {
   const base = accountBase(channel, dev); const signal = AbortSignal.timeout(20000);
   const sub = channel.config.integration === 'sub2api';
-  const tokenMode = 'accessToken' in credentials;
-  assert(!tokenMode || channel.config.integration === 'newapi', '后台访问令牌仅支持 NewAPI 渠道');
-  const reusedSession = !tokenMode && !!cached && cached.base === base && cached.expiresAt > Date.now() + 10000;
-  let session: Session = tokenMode ? { token: credentials.accessToken, userId: credentials.userId, expiresAt: Date.now() + 3600000, base } : reusedSession ? cached! : await loginAccount(channel, credentials, base, signal);
-  const profile = async () => (await accountRequest(base, sub ? '/api/v1/user/profile' : '/api/user/self', signal, { headers: sessionHeaders(session) })).json;
+  assertAccountCredentials(channel, credentials);
+  const cookieMode = 'cookie' in credentials;
+  const directMode = cookieMode || 'accessToken' in credentials;
+  const reusedSession = !directMode && !!cached && cached.base === base && cached.expiresAt > Date.now() + 10000;
+  let session: Session;
+  if ('cookie' in credentials) session = { cookie: credentials.cookie, token: credentials.accessToken, expiresAt: Date.now() + 3600000, base };
+  else if ('accessToken' in credentials) session = { token: credentials.accessToken, userId: credentials.userId, expiresAt: Date.now() + 3600000, base };
+  else session = reusedSession ? cached! : await loginAccount(channel, credentials, base, signal);
+  const profile = async () => {
+    const init = { headers: sessionHeaders(session, cookieMode) };
+    try { return (await accountRequest(base, sub ? '/api/v1/user/profile' : '/api/user/self', signal, init)).json; }
+    catch (error) {
+      // Both official Sub2API routes return the user balance. Only a missing route
+      // warrants compatibility fallback; an authentication rejection must stop.
+      if (!sub || !(error instanceof HttpError) || error.status !== 404) throw error;
+      return (await accountRequest(base, '/api/v1/auth/me', signal, init)).json;
+    }
+  };
   let payload: Record<string, any>;
   try { payload = await profile(); }
   catch (error) {
-    if (tokenMode || !reusedSession || !(error instanceof HttpError) || ![401, 403].includes(error.status)) throw error;
+    if (cookieMode && error instanceof HttpError && [401, 403].includes(error.status)) throw new HttpError(error.status, 'Cookie / 浏览器会话已失效或被后台拒绝，请重新登录并更新 Cookie 与后台登录 Token；标准 Sub2API 需要后台登录 Token');
+    if (directMode || !reusedSession || !(error instanceof HttpError) || ![401, 403].includes(error.status) || 'cookie' in credentials || 'accessToken' in credentials) throw error;
     session = await loginAccount(channel, credentials, base, signal); payload = await profile();
   }
   const data = payload.data ?? payload;

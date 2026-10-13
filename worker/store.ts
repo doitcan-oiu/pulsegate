@@ -4,7 +4,7 @@ import type { Credential, Env, GatewayStore, KeyRecord } from './env';
 import { decryptSecret, encryptSecret, hashToken, previewToken, randomToken, redact } from './crypto';
 import { autoDisableDecision, credentialRecoveryAllowed, evaluateHealth } from './health';
 import { HttpError } from './validation';
-import { assertAccountReuse, prepareAccountSave, type AccountCredentials } from './accounts';
+import { accountAuthMode, assertAccountCredentials, assertAccountReuse, prepareAccountSave, type AccountCredentials } from './accounts';
 import { buildAnalytics, completed } from './analytics';
 
 type DataRow = { id: string; data: string; health_version?: number };
@@ -45,7 +45,7 @@ export class Store implements GatewayStore {
     // Prepare every encrypted insert before the transaction; edits append and never replace existing keys.
     const prepared = await Promise.all(credentials.map(credential => this.prepareCredential(channel.id,credential)));
     const accountStatement = await prepareAccountSave(this.env, channel, account);
-    if (account) channel = { ...channel, accountAuthMode: 'accessToken' in account ? 'token' : 'password', accountIntegration: channel.config.integration as 'newapi' | 'sub2api' };
+    if (account) channel = { ...channel, accountAuthMode: accountAuthMode(account), accountIntegration: channel.config.integration as 'newapi' | 'sub2api' };
     // Merge account metadata against the row inside the transaction. A newer account
     // must keep its backend and destination even if this edit passed an older check.
     const modeSource = account ? 'excluded' : 'channels';
@@ -66,9 +66,10 @@ export class Store implements GatewayStore {
     for (const entry of entries) {
       if (entry.credentials.length > 100) throw new HttpError(400, 'Upstream API keys must be a bounded array');
       entry.credentials.forEach(validateCredential);
-      if (entry.account && !['newapi', 'sub2api'].includes(entry.channel.config.integration ?? '')) throw new HttpError(400, 'Only NewAPI / Sub2API channels use management accounts');
-      if (entry.account && 'accessToken' in entry.account && entry.channel.config.integration !== 'newapi') throw new HttpError(400, '后台访问令牌仅支持 NewAPI 渠道');
-      if (entry.account) entry.channel = { ...entry.channel, accountAuthMode: 'accessToken' in entry.account ? 'token' : 'password', accountIntegration: entry.channel.config.integration as 'newapi' | 'sub2api' };
+      if (entry.account) {
+        assertAccountCredentials(entry.channel, entry.account);
+        entry.channel = { ...entry.channel, accountAuthMode: accountAuthMode(entry.account), accountIntegration: entry.channel.config.integration as 'newapi' | 'sub2api' };
+      }
     }
     // Encrypt the complete import before the first write. JSON inserts keep even a
     // large import to four queries, and D1 batch rolls all of them back on failure.
