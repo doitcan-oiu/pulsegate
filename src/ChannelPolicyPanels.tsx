@@ -2,7 +2,6 @@ import { useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { Card, Chip } from "@heroui/react";
 import {
-  ArrowLeftRight,
   ArrowRight,
   Check,
   CircleGauge,
@@ -11,7 +10,6 @@ import {
   Info,
   KeyRound,
   Link,
-  ListFilter,
   Network,
   Plus,
   RotateCcw,
@@ -30,7 +28,7 @@ import { PanelNumber, PanelSection, PanelToggle } from "./ChannelPanelUI";
 import "./channel-policy-panels.css";
 
 export type ChannelPolicyPanelName =
-  "relay" | "conversions" | "rateLimit" | "endpoints" | "autoDisable";
+  "relay" | "rateLimit" | "endpoints" | "autoDisable";
 
 type Props = {
   panel: ChannelPolicyPanelName;
@@ -59,8 +57,8 @@ const endpointGroups: {
 }[] = [
   {
     protocol: "openai",
-    title: "OpenAI 兼容协议",
-    description: "使用 Chat Completions 接口发送对话请求。",
+    title: "Chat Completions 端点",
+    description: "公开 /v1/chat/completions 使用对应路径，保留客户端请求格式。",
     items: [
       {
         key: "chat",
@@ -78,8 +76,8 @@ const endpointGroups: {
   },
   {
     protocol: "anthropic",
-    title: "Anthropic 原生协议",
-    description: "网关将 OpenAI 格式的对话转换为 Messages 请求。",
+    title: "Messages 端点",
+    description: "公开 /v1/messages 使用对应路径，保留客户端 Messages 请求格式。",
     items: [
       {
         key: "messages",
@@ -91,15 +89,15 @@ const endpointGroups: {
   },
   {
     protocol: "gemini",
-    title: "Gemini 原生协议",
-    description: "{model} 自动替换为上游模型名。",
+    title: "Gemini 渠道测试端点",
+    description: "用于 Gemini 渠道测试，{model} 替换为上游模型名。",
     items: [
       {
         key: "generate",
         title: "内容生成",
         method: "POST",
         description:
-          "流式请求自动切换为 streamGenerateContent 并添加 alt=sse。",
+          "流式渠道测试使用 streamGenerateContent 并添加 alt=sse。",
       },
     ],
   },
@@ -151,6 +149,13 @@ function addressPreview(
   key: EndpointKey,
 ) {
   const path = config.endpoints[key];
+  const protocol = key === "chat"
+    ? "openai"
+    : key === "messages"
+      ? "anthropic"
+      : key === "generate"
+        ? "gemini"
+        : config.protocol;
   const model =
     config.aliases.find((alias) => alias.from === channel.model)?.to ??
     channel.model;
@@ -161,7 +166,7 @@ function addressPreview(
     );
     try {
       upstreamPath = new URL(
-        joinAddress(channel.endpoint, path, config.protocol, model || "model-name"),
+        joinAddress(channel.endpoint, path, protocol, model || "model-name"),
       ).pathname;
     } catch {
       /* Show the configured path until the address is valid. */
@@ -173,7 +178,7 @@ function addressPreview(
   return joinAddress(
     config.relayUrl || channel.endpoint,
     path,
-    config.protocol,
+    protocol,
     model || "model-name",
   );
 }
@@ -247,7 +252,7 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
           />
           <ChoiceCard
             title="HTTPS API 中继"
-            description="使用兼容上游协议的中继服务"
+            description="使用支持客户端调用入口的中继服务"
             icon={Network}
             selected={relayMode}
             disabled={aiGateway || simulated}
@@ -265,7 +270,7 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
           </Notice>
         ) : simulated ? (
           <Notice>
-            当前渠道使用本地模拟协议，不发送真实上游请求。切换为真实上游协议后连接方式才会生效。
+            当前渠道使用本地模拟，不发送真实上游请求。
           </Notice>
         ) : relayMode ? (
           <label className="cpp-field">
@@ -282,9 +287,9 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
               }}
             />
             <small>
-              中继需提供 {protocolName[config.protocol]}{" "}
-              兼容接口，并接收渠道的上游认证头。仅支持 HTTPS API 中继。
-              只填域名时自动补 {config.protocol === "gemini" ? "/v1beta" : "/v1"}。
+              中继需支持客户端实际调用的入口和请求格式，并接收渠道认证头。
+              仅支持 HTTPS API 中继；模型获取与渠道测试只填域名时默认补
+              {config.protocol === "gemini" ? " /v1beta" : " /v1"}。
             </small>
           </label>
         ) : (
@@ -295,12 +300,12 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
         )}
       </PanelSection>
       <PanelSection
-        title="请求路径预览"
+        title="渠道测试路径预览"
         icon={Link}
         description={
           aiGateway
             ? "Account 与 Gateway 使用全局设置中的实际值。"
-            : "根据当前连接方式和协议端点生成，保存后生效。"
+            : "按当前接口类型预览渠道测试；公开请求保持客户端入口和格式。"
         }
       >
         <div className="cpp-route">
@@ -338,104 +343,6 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
                 : addressPreview(config, channel, activeKey)}
           </code>
         </div>
-      </PanelSection>
-    </div>
-  );
-}
-
-function ConversionsPanel({ config, setConfig }: Omit<Props, "panel">) {
-  const nativeProtocol =
-    config.protocol === "anthropic" || config.protocol === "gemini";
-  return (
-    <div className="cpp-root">
-      <PanelSection
-        title="可选参数兼容"
-        icon={ListFilter}
-        description="用于 Anthropic / Gemini 原生协议的参数转换。"
-        action={
-          <Chip size="sm">
-            {nativeProtocol
-              ? protocolName[config.protocol]
-              : "当前协议不应用此规则"}
-          </Chip>
-        }
-      >
-        <PanelToggle
-          title="移除不支持的可选参数"
-          description="开启后忽略原生适配器未支持的额外参数；关闭时会返回参数不支持错误。"
-          checked={config.conversions.stripUnsupported}
-          onChange={(checked) =>
-            setConfig((old) => ({
-              ...old,
-              conversions: { ...old.conversions, stripUnsupported: checked },
-            }))
-          }
-        />
-        <div className="cpp-example">
-          <div>
-            <small>客户端请求</small>
-            <code>{'{ "temperature": 0.7, "presence_penalty": 0.2 }'}</code>
-          </div>
-          <ArrowRight size={18} />
-          <div>
-            <small>
-              {!nativeProtocol
-                ? "当前协议：保持原样"
-                : config.conversions.stripUnsupported
-                  ? "原生转换：忽略额外参数"
-                  : "原生转换：拒绝额外参数"}
-            </small>
-            <code>
-              {!nativeProtocol
-                ? '{ "temperature": 0.7, "presence_penalty": 0.2 }'
-                : config.conversions.stripUnsupported
-                  ? '{ "temperature": 0.7 }'
-                  : "400 · 不支持 presence_penalty"}
-            </code>
-          </div>
-        </div>
-        <Notice>
-          temperature、top_p、token 上限和 function
-          工具等已支持参数会正常转换；OpenAI
-          兼容与本地模拟协议保持其参数处理方式。
-        </Notice>
-      </PanelSection>
-      <PanelSection
-        title="消息角色兼容"
-        icon={ArrowLeftRight}
-        description="适用于不接受系统角色消息的上游。"
-      >
-        <PanelToggle
-          title="将系统消息转换为用户消息"
-          description="system 和 developer 角色在发送给上游前替换为 user，消息内容保持一致。"
-          checked={config.conversions.systemToUser}
-          onChange={(checked) =>
-            setConfig((old) => ({
-              ...old,
-              conversions: { ...old.conversions, systemToUser: checked },
-            }))
-          }
-        />
-        <div className="cpp-example">
-          <div>
-            <small>转换前</small>
-            <Chip size="sm">system / developer</Chip>
-            <p>你是一个有用的助手。</p>
-          </div>
-          <ArrowRight size={18} />
-          <div>
-            <small>
-              {config.conversions.systemToUser ? "转换后" : "当前保持原角色"}
-            </small>
-            <Chip size="sm">
-              {config.conversions.systemToUser ? "user" : "system / developer"}
-            </Chip>
-            <p>你是一个有用的助手。</p>
-          </div>
-        </div>
-        <Notice>
-          角色转换可能改变模型对系统指令的优先级。原生协议的基础消息、工具调用和响应格式转换由网关自动完成。
-        </Notice>
       </PanelSection>
     </div>
   );
@@ -578,11 +485,11 @@ function EndpointsPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
       <Card className="cpp-protocol-summary">
         <Network size={20} />
         <div>
-          <strong>当前协议：{protocolName[config.protocol]}</strong>
+          <strong>接口类型：{protocolName[config.protocol]}</strong>
           <p>
             {simulated
-              ? "本地模拟不访问以下端点；切换为真实协议后使用对应配置。"
-              : `聊天请求使用${endpointGroups.flatMap((group) => group.items).find((item) => item.key === activeKey)?.title}端点，其他协议的路径会保留。`}
+              ? "本地模拟不访问以下外部端点。"
+              : "接口类型用于模型发现与渠道测试；公开请求按客户端入口使用对应路径，保持原始格式。"}
           </p>
         </div>
         <Chip size="sm">
@@ -601,7 +508,7 @@ function EndpointsPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
           icon={Network}
           action={
             <Chip size="sm">
-              {config.protocol === group.protocol ? "当前协议" : "备用配置"}
+              {config.protocol === group.protocol ? "当前测试接口" : "其他端点"}
             </Chip>
           }
         >
@@ -615,7 +522,7 @@ function EndpointsPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
                     <Chip size="sm">{item.method}</Chip>
                     {active && (
                       <Chip size="sm" color="accent">
-                        当前生效
+                        渠道测试
                       </Chip>
                     )}
                     <Button
@@ -929,7 +836,6 @@ function AutoDisablePanel({ config, setConfig }: Omit<Props, "panel">) {
 
 export function ChannelPolicyPanel({ panel, ...props }: Props) {
   if (panel === "relay") return <RelayPanel {...props} />;
-  if (panel === "conversions") return <ConversionsPanel {...props} />;
   if (panel === "rateLimit") return <RateLimitPanel {...props} />;
   if (panel === "endpoints") return <EndpointsPanel {...props} />;
   return <AutoDisablePanel {...props} />;

@@ -164,7 +164,7 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
   const logMatch = path.match(/^\/api\/logs\/([^/]+)$/); if (logMatch && method === 'GET') { const detail = await store.getLog(decodeURIComponent(logMatch[1])); if (!detail) throw new HttpError(404,'Request log not found'); return response(detail); }
   if (path === '/api/dashboard' && method === 'GET') return response(await store.dashboard(oneOf(url.searchParams.get('range') ?? undefined,['1h','24h','7d'] as const,'24h')));
   if (path === '/api/events' && method === 'GET') return response({ events:await store.listEvents() });
-  if (path === '/api/playground/chat' && method === 'POST') { const b = await body(request,4*1024*1024); const mode = oneOf(b.mode,['channel','gateway'] as const,'gateway'); const key = b.keyId ? await needKey(store,text(b.keyId)) : null; if (key && (key.status !== 'active' || expired(key))) throw new HttpError(403,'Selected API Key is unavailable'); const gw = await context(env,ctx,store,'playground',mode === 'gateway' ? key : null); if (mode === 'channel') gw.forceChannelId = (await needChannel(store,text(b.channelId))).id; const input = object(b.request); return handleGateway(new Request(new URL('/v1/chat/completions',request.url),{ method:'POST',headers:{ 'content-type':'application/json',...(request.headers.get('x-trace-id') ? { 'x-trace-id':request.headers.get('x-trace-id')! } : {}),...(request.headers.get('x-thread-id') ? { 'x-thread-id':request.headers.get('x-thread-id')! } : {}) },body:JSON.stringify(input),signal:request.signal }),gw,store); }
+  if (path === '/api/playground/chat' && method === 'POST') { const b = await body(request,4*1024*1024); const mode = oneOf(b.mode,['channel','gateway'] as const,'gateway'); const key = b.keyId ? await needKey(store,text(b.keyId)) : null; if (key && (key.status !== 'active' || expired(key))) throw new HttpError(403,'Selected API Key is unavailable'); const gw = await context(env,ctx,store,'playground',mode === 'gateway' ? key : null); gw.relayProtocol = 'openai'; if (mode === 'channel') gw.forceChannelId = (await needChannel(store,text(b.channelId))).id; const input = object(b.request); return handleGateway(new Request(new URL('/v1/chat/completions',request.url),{ method:'POST',headers:{ 'content-type':'application/json',...(request.headers.get('x-trace-id') ? { 'x-trace-id':request.headers.get('x-trace-id')! } : {}),...(request.headers.get('x-thread-id') ? { 'x-thread-id':request.headers.get('x-thread-id')! } : {}) },body:JSON.stringify(input),signal:request.signal }),gw,store); }
   if (path === '/api/dev/fixtures') {
     if (!dev) throw new HttpError(404,'Not found');
     if (method === 'DELETE') { await store.clearFixtures(); return response({ channels:await store.listChannels() }); }
@@ -181,11 +181,10 @@ export default {
       const store = new Store(env);
       if (path.startsWith('/api/')) return await admin(request,env,ctx,store);
       if (path === '/v1/models' && request.method === 'GET') { const key = await authorizeApi(request,store); const models = modelsFor(await store.listChannels(),currentProfile(key)); return response({ object:'list',data:models.map(id => ({ id,object:'model',created:0,owned_by:'pulsegate' })) }); }
-      if (path === '/v1/chat/completions' && request.method === 'POST') { const key = await authorizeApi(request,store); const input = await body(request,4*1024*1024); return await handleGateway(new Request(request.url,{ method:'POST',headers:request.headers,body:JSON.stringify(input),signal:request.signal }),await context(env,ctx,store,'api',key),store); }
+      if (path === '/v1/chat/completions' && request.method === 'POST') { const key = await authorizeApi(request,store); return await handleGateway(request,{ ...await context(env,ctx,store,'api',key),relayProtocol:'openai' },store); }
       if (path === '/v1/messages' && request.method === 'POST') {
         const key = await authorizeApi(request,store,true);
-        const input = await body(request,4*1024*1024);
-        return await handleAnthropicMessages(request,input,await context(env,ctx,store,'api',key),store);
+        return await handleAnthropicMessages(request,undefined,await context(env,ctx,store,'api',key),store);
       }
       if (path.startsWith('/v1/')) throw new HttpError(404,'API endpoint not found');
       return await env.ASSETS.fetch(request);

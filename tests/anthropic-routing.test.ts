@@ -19,9 +19,28 @@ async function call(path: string, method = 'POST', data?: unknown, headers: Reco
   return { response, content, json };
 }
 const admin = (path: string, method: string, data?: unknown) => call(path, method, data, { authorization: 'Bearer ' + testEnv.ADMIN_TOKEN });
-async function newChannel() {
-  const result = await admin('/api/channels', 'POST', { name: 'Native route mock', models: ['actual-upstream-model'], tags: ['production'], config: { protocol: 'mock', aliases: [{ from: 'client-claude', to: 'actual-upstream-model' }], mock: { delayMs: 1 } } });
+async function newChannel(alias = true) {
+  const result = await admin('/api/channels', 'POST', { name: 'Native route upstream', endpoint: 'https://native-upstream.example', apiKeys: ['synthetic-managed-key'], models: ['actual-upstream-model'], tags: ['production'], config: { protocol: 'gemini', aliases: alias ? [{ from: 'client-claude', to: 'actual-upstream-model' }] : [] } });
   expect(result.response.status).toBe(201); return result.json.channel;
+}
+function nativeReply() {
+  return { id: 'msg_upstream', type: 'message', role: 'assistant', model: 'actual-upstream-model', content: [{ type: 'text', text: 'Native route upstream' }], stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 2, output_tokens: 3 }, provider_extension: null };
+}
+function upstream(stream = false) {
+  const frames = [
+    { type: 'message_start', message: { ...nativeReply(), content: [], usage: { input_tokens: 2, output_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Native route upstream' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+    { type: 'message_stop' },
+  ];
+  vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    expect(String(url)).toBe('https://native-upstream.example/v1/messages');
+    expect(new Headers(init?.headers).get('x-api-key')).toBe('synthetic-managed-key');
+    expect(new Headers(init?.headers).get('authorization')).toBeNull();
+    return stream ? new Response(frames.map(value => `event: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } }) : Response.json(nativeReply());
+  }));
 }
 async function newKey(input: Record<string, unknown> = {}) {
   const result = await admin('/api/keys', 'POST', { name: 'Messages client', ...input });
@@ -48,27 +67,30 @@ afterEach(() => vi.unstubAllGlobals());
 describe('public Anthropic Messages route authentication and routing', () => {
   it.each(['x-api-key', 'authorization'] as const)('accepts a PulseGate client key in %s and returns the requested alias in native JSON', async header => {
     const channel = await newChannel(), key = await newKey();
+    upstream();
     const result = await call('/v1/messages', 'POST', message, { [header]: header === 'authorization' ? 'Bearer ' + key.token : key.token, 'anthropic-version': '2023-06-01' });
     expect(result.response.status).toBe(200); expect(result.json).toMatchObject({ type: 'message', role: 'assistant', model: 'client-claude', stop_reason: 'end_turn', stop_sequence: null });
-    expect(result.json.content).toEqual([{ type: 'text', text: expect.stringContaining('Native route mock') }]);
+    expect(result.json).toEqual({ ...nativeReply(), model: 'client-claude' });
+    expect(result.json.content).toEqual([{ type: 'text', text: 'Native route upstream' }]);
     expect(result.json.usage.input_tokens).toBeGreaterThan(0); expect(result.json.usage.output_tokens).toBeGreaterThan(0);
     expect(result.response.headers.get('x-pulsegate-channel-id')).toBe(channel.id);
     const attempt = await testEnv.DB.prepare('SELECT data FROM attempts').first<{ data: string }>(), log = await testEnv.DB.prepare('SELECT data FROM request_logs').first<{ data: string }>();
     expect(JSON.parse(attempt!.data).model).toBe('actual-upstream-model'); expect(JSON.parse(log!.data)).toMatchObject({ model: 'client-claude', apiKeyId: key.key.id });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
   it('frames native SSE events through the public route and preserves the client alias', async () => {
     await newChannel(); const key = await newKey();
+    upstream(true);
     const result = await call('/v1/messages', 'POST', { ...message, stream: true }, { 'x-api-key': key.token, 'anthropic-version': '2023-06-01' });
     expect(result.response.status).toBe(200); expect(result.response.headers.get('content-type')).toContain('text/event-stream');
     const events = [];
     for await (const event of parseSSE(new Response(result.content).body!)) events.push({ event: event.event, value: JSON.parse(event.data) });
     expect(events[0]).toMatchObject({ event: 'message_start', value: { type: 'message_start', message: { type: 'message', model: 'client-claude', role: 'assistant' } } });
     expect(events.some(event => event.event === 'content_block_start')).toBe(true); expect(events.some(event => event.event === 'content_block_stop')).toBe(true);
-    expect(events.filter(event => event.event === 'content_block_delta').map(event => event.value.delta.text || '').join('')).toContain('Native route mock');
+    expect(events.filter(event => event.event === 'content_block_delta').map(event => event.value.delta.text || '').join('')).toContain('Native route upstream');
     expect(events.find(event => event.event === 'message_delta')?.value).toMatchObject({ delta: { stop_reason: 'end_turn' }, usage: { output_tokens: expect.any(Number) } });
     expect(events.at(-1)).toMatchObject({ event: 'message_stop', value: { type: 'message_stop' } }); expect(result.content).not.toContain('[DONE]'); expect(result.content).not.toContain('actual-upstream-model');
-    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count: number }>())?.count).toBe(1); expect(fetch).not.toHaveBeenCalled();
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count: number }>())?.count).toBe(1); expect(fetch).toHaveBeenCalledTimes(1);
   });
   it.each(['missing', 'wrong', 'admin', 'expired', 'revoked', 'disabled'] as const)('returns a native authentication error for a %s client key before dispatch', async mode => {
     await newChannel(); let headers: Record<string, string> = {};
@@ -98,10 +120,42 @@ describe('public Anthropic Messages route authentication and routing', () => {
     expectNativeError(await call('/v1/messages', 'POST', message, { 'x-api-key': key.token }), 403, 'permission_error'); await expectNoGatewayDispatch();
   });
   it.each([
-    '{', [], { ...message, max_tokens: undefined }, { ...message, max_tokens: 0 }, { ...message, messages: [] }, { ...message, messages: [{ role: 'system', content: 'invalid role' }] },
-  ])('rejects invalid JSON or Messages input before quota and upstream work: %s', async input => {
+    '{', [], {}, { ...message, model: '' }, { ...message, model: 3 },
+  ])('rejects invalid JSON or basic Messages envelopes before quota and upstream work: %s', async input => {
     await newChannel(); const key = await newKey({ profiles: [{ id: 'limited', name: 'Limited', requestLimit: '1' }], activeProfile: 'limited' });
     expectNativeError(await call('/v1/messages', 'POST', input, { 'x-api-key': key.token }), 400, 'invalid_request_error'); await expectNoGatewayDispatch();
+  });
+  it.each(['/v1/messages', '/v1/chat/completions'])('keeps the exact HTTP request and JSON response through %s without aliases or body overrides', async path => {
+    const channel = await newChannel(false), key = await newKey({ profiles: [{ id: 'limited', name: 'Limited', requestLimit: '1' }], activeProfile: 'limited' });
+    const raw = '{\r\n "vendor" : {"custom":null}, "messages" : [],\r\n "model" : "actual-upstream-model", "max_tokens" : 0, "stream" : "provider-decides"\r\n}\n';
+    const provider = '{\r\n "vendor":null, "model" : "actual-upstream-model", "unexpected" : [1,2,3]\r\n}\n';
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('https://native-upstream.example' + path); expect(init?.body).toBe(raw);
+      const headers = new Headers(init?.headers);
+      expect(headers.get('x-api-key')).toBe(path === '/v1/messages' ? 'synthetic-managed-key' : null);
+      expect(headers.get('authorization')).toBe(path === '/v1/chat/completions' ? 'Bearer synthetic-managed-key' : null);
+      return new Response(provider, { headers: { 'content-type': 'application/json', 'x-provider-request-id': 'preserved' } });
+    }));
+    const authorization = path === '/v1/messages' ? { 'x-api-key': key.token } : { authorization: 'Bearer ' + key.token };
+    const result = await call(path, 'POST', raw, authorization);
+    expect(result.response.status).toBe(200); expect(result.content).toBe(provider); expect(result.response.headers.get('x-provider-request-id')).toBe('preserved'); expect(result.response.headers.get('x-pulsegate-channel-id')).toBe(channel.id);
+    expect((await testEnv.DB.prepare('SELECT used FROM api_keys WHERE id=?').bind(key.key.id).first<{ used: number }>())?.used).toBe(1);
+    expect((await testEnv.DB.prepare('SELECT used FROM profile_usage WHERE key_id=? AND profile_id=?').bind(key.key.id, 'limited').first<{ used: number }>())?.used).toBe(1);
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count: number }>())?.count).toBe(1); expect(fetch).toHaveBeenCalledTimes(1);
+    const exhausted = await call(path, 'POST', raw, authorization);
+    if (path === '/v1/messages') expectNativeError(exhausted, 429, 'rate_limit_error'); else expect(exhausted.response.status).toBe(429);
+    expect((await testEnv.DB.prepare('SELECT used FROM api_keys WHERE id=?').bind(key.key.id).first<{ used: number }>())?.used).toBe(1);
+    expect((await testEnv.DB.prepare('SELECT used FROM profile_usage WHERE key_id=? AND profile_id=?').bind(key.key.id, 'limited').first<{ used: number }>())?.used).toBe(1);
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count: number }>())?.count).toBe(1); expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it('does not replace an upstream error with a local Anthropic error envelope', async () => {
+    await newChannel(); const key = await newKey();
+    const raw = '{\r\n "error":{"type":"provider_specific","message":"bad vendor option"},"vendor":null\r\n}\n';
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, { status: 422, headers: { 'content-type': 'application/json', 'x-provider-error-id': 'original' } })));
+    const result = await call('/v1/messages', 'POST', { model: 'client-claude', arbitrary: { provider: 'validates' } }, { 'x-api-key': key.token });
+    expect(result.response.status).toBe(422); expect(result.content).toBe(raw); expect(result.response.headers.get('x-provider-error-id')).toBe('original');
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count: number }>())?.count).toBe(1);
+    const log = await testEnv.DB.prepare('SELECT data FROM request_logs').first<{ data: string }>(); expect(JSON.parse(log!.data)).toMatchObject({ result: 'error', status: 422, attempts: 1 });
   });
   it('returns native not-found errors for an unsupported method on the Messages route while existing routes keep their envelope', async () => {
     const key = await newKey();

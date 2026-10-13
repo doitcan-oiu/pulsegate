@@ -1238,7 +1238,7 @@ export default function App() {
           <div className="fn-guide">
             <ol>
               <li>
-                在渠道管理添加上游，填写协议、完整基础 URL、模型 ID 与上游密钥。
+                在渠道管理添加上游，选择模型获取与渠道测试的接口类型，填写基础 URL、模型 ID 与上游密钥。
               </li>
               <li>创建 API Key，通过标签、指定渠道和模型白名单限制访问。</li>
               <li>配置首字健康阈值、超时、重试次数和自动恢复。</li>
@@ -1258,6 +1258,10 @@ export default function App() {
               OpenAI Chat Completions 使用 Authorization: Bearer pg_live_…；
               Anthropic Messages 使用 /v1/messages 和 x-api-key: pg_live_…。
               完整 API Key 仅创建或轮换时显示一次。
+            </p>
+            <p>
+              公开调用保持客户端入口路径和请求格式，不按渠道接口类型转换参数；
+              NewAPI / Sub2API 余额监控独立开启。
             </p>
             {session.devMode && (
               <p>

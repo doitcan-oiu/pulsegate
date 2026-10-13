@@ -1,8 +1,9 @@
 import type { AttemptRecord, GatewayChannel, GatewayLog, KeyProfile } from '../shared/types';
 import type { Credential, GatewayContext, GatewayStore } from './env';
-import { type ChatBody, normalizeJSON, normalizedStream, prepareBody, RequestFailure, toAnthropic, toGemini, upstreamHeaders, upstreamUrl, validateChatRequest } from './protocols';
+import { type ChatBody, normalizeJSON, normalizedStream, prepareBody, prepareRelayBody, RequestFailure, toAnthropic, toGemini, upstreamHeaders, upstreamUrl, validateChatRequest } from './protocols';
 import { meaningfulOpenAIChunk, sseBytes, StreamFailure } from './sse';
 import { mockUpstream, sleep } from './mock';
+import { relayJSON, relayStream, type RelayFrame } from './relay';
 
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_RESPONSE = 8 * 1024 * 1024;
@@ -86,42 +87,49 @@ function redact(message: string, secrets: string[]): string {
   return result.replace(/(Bearer\s+)[^\s"',}]+/gi, '$1[REDACTED]').replace(/((?:api[_-]?key|token|authorization)["']?\s*[:=]\s*["']?)[^\s"',}&]+/gi, '$1[REDACTED]').slice(0, 4000);
 }
 
+function redactRelayBody(body: string, secrets: string[]): string {
+  for (const secret of secrets) if (secret.length > 3) body = body.split(secret).join('[REDACTED]');
+  return body;
+}
+
+const noResponseBody = (status: number) => status === 204 || status === 205 || status === 304;
+
 export function publicError(context: GatewayContext, message: string): string {
   return context.settings.errorMode === 'raw' ? message : context.settings.errorMode === 'custom' ? context.settings.customErrorMessage || '服务器错误，请重试' : '上游服务暂时不可用，请稍后重试';
 }
 function seconds(start: number): number { return (Date.now() - start) / 1000; }
 function timeLabel(date: Date) { return date.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }); }
 function usage(value: any) { return { inputTokens: Math.max(0, Number(value?.usage?.prompt_tokens) || 0), outputTokens: Math.max(0, Number(value?.usage?.completion_tokens) || 0) }; }
-function estimatedBudget(channel: GatewayChannel, body: ChatBody): number {
+function estimatedBudget(channel: GatewayChannel, body: ChatBody, passthrough = false): number {
   const effective = { ...body, ...channel.config.bodyOverrides };
   const max = effective.max_completion_tokens ?? effective.max_tokens ?? effective.generationConfig?.maxOutputTokens ?? 4096;
-  if (!Number.isSafeInteger(max) || max <= 0) throw new RequestFailure('最大输出 Token 数必须为正整数');
+  if (!passthrough && (!Number.isSafeInteger(max) || max <= 0)) throw new RequestFailure('最大输出 Token 数必须为正整数');
   // Reserve the full submitted payload, including tool schemas; output is a reservation, usage logs remain provider-reported.
-  return Math.ceil(JSON.stringify(effective).length / 3) + max;
+  return Math.ceil(JSON.stringify(effective).length / 3) + (Number.isSafeInteger(max) && max > 0 ? max : 4096);
 }
 
-async function* validatedResponseStream(source: AsyncGenerator<Record<string, any> | '[DONE]'>, validator: ReturnType<NonNullable<GatewayContext['responseValidator']>['stream']>): AsyncGenerator<Record<string, any> | '[DONE]'> {
-  let ended = false;
-  for await (const chunk of source) {
-    if (chunk === '[DONE]') { validator.end(); ended = true; yield chunk; return; }
-    validator.chunk(chunk); yield chunk;
-  }
-  if (!ended) validator.end();
+async function* completionFrames(source: AsyncGenerator<Record<string, any> | '[DONE]'>): AsyncGenerator<RelayFrame> {
+  for await (const value of source) yield { bytes: sseBytes(value), usage: value === '[DONE]' ? { inputTokens: 0, outputTokens: 0 } : usage(value), meaningful: value !== '[DONE]' && meaningfulOpenAIChunk(value), done: value === '[DONE]' };
 }
 
 export async function handleGateway(request: Request, context: GatewayContext, store: GatewayStore): Promise<Response> {
   const requestId = crypto.randomUUID(), requestStart = Date.now();
   let attempts = 0, lastCandidate: Candidate | null = null, lastFailure: Failure | null = null;
   let totalInput = 0, totalOutput = 0, lastTtft: number | null = null, latestDuration = 0;
-  let original: ChatBody;
+  let original: ChatBody, rawInput = '', streaming = false;
+  const passthrough = !!context.relayProtocol;
+  let lastProviderResponse: Response | null = null;
   const probeDeadlineExpired = () => context.source === 'probe' && request.signal.aborted && request.signal.reason?.name === 'TimeoutError';
   const cancelledFailure = (): Failure => ({ status: probeDeadlineExpired() ? 504 : 499, message: probeDeadlineExpired() ? '渠道探测整体响应超时' : '客户端取消了请求', kind: probeDeadlineExpired() ? 'error' : 'cancelled', retry: false });
   const errorResponse = (status: number, message: string) => Response.json({ error: { message, type: 'gateway_error', code: status === 403 ? 'scope_denied' : 'upstream_error', request_id: requestId } }, { status, headers: { 'x-pulsegate-request-id': requestId } });
   try {
-    if (Number(request.headers.get('content-length')) > MAX_BODY) throw new RequestFailure('请求体不能超过 2 MiB', 413);
-    const text = await boundedText(request.body, MAX_BODY, request.signal);
-    try { original = JSON.parse(text); } catch { throw new RequestFailure('请求体必须为有效 JSON'); }
-    validateChatRequest(original);
+    const bodyLimit = passthrough ? 4 * 1024 * 1024 : MAX_BODY;
+    if (Number(request.headers.get('content-length')) > bodyLimit) throw new RequestFailure(`请求体不能超过 ${bodyLimit / 1024 / 1024} MiB`, 413);
+    rawInput = await boundedText(request.body, bodyLimit, request.signal);
+    try { original = JSON.parse(rawInput); } catch { throw new RequestFailure('请求体必须为有效 JSON'); }
+    if (passthrough) { if (!original || typeof original !== 'object' || Array.isArray(original) || typeof original.model !== 'string' || !original.model.trim()) throw new RequestFailure('请求需要 model 供渠道路由'); }
+    else validateChatRequest(original);
+    streaming = passthrough ? original.stream === true : Boolean(original.stream);
     const expiry = context.key?.expires ? Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(context.key.expires) ? `${context.key.expires}T23:59:59.999+08:00` : context.key.expires) : null;
     if (context.key && (!context.profile || context.key.status !== 'active' || (expiry !== null && Number.isFinite(expiry) && expiry <= Date.now()))) throw new RequestFailure('API Key 未启用、已过期或策略无效', 401);
   } catch (error) { return errorResponse(error instanceof RequestFailure ? error.status : request.signal.aborted ? 499 : 400, error instanceof Error ? error.message : '无效请求'); }
@@ -134,7 +142,7 @@ export async function handleGateway(request: Request, context: GatewayContext, s
   const recordEarlyError = async (status: number, message: string) => {
     const date = new Date();
     await store.recordLog({ id: requestId, createdAt: date.toISOString(), time: timeLabel(date), model: original.model,
-      channel: '无可用渠道', channelId: null, apiKeyId: context.key?.id || null, stream: Boolean(original.stream),
+      channel: '无可用渠道', channelId: null, apiKeyId: context.key?.id || null, stream: streaming,
       ttft: 0, duration: seconds(requestStart), tokens: 0, status, result: 'error', attempts: 0, source: context.source, traceId, error: message });
   };
   // Authorization describes allowed resources independently of their health or activation state.
@@ -144,7 +152,7 @@ export async function handleGateway(request: Request, context: GatewayContext, s
   if (scope && context.settings.stickyMode === 'prefer' && traceScope && threadScope && !await store.getSticky(traceScope)) {
     const prior = await store.getSticky(threadScope); if (prior && candidates.some(c => c.channel.id === prior && c.channel.status === 'healthy')) await store.setSticky(traceScope, prior);
   }
-  candidates = await orderedCandidates(candidates, context, store, scope, identity, Boolean(original.stream));
+  candidates = await orderedCandidates(candidates, context, store, scope, identity, streaming);
   if (!candidates.length) {
     const message = '已授权模型的渠道均已停用、降级或暂时不可调度';
     await recordEarlyError(503, message); return errorResponse(503, publicError(context, message));
@@ -162,8 +170,8 @@ export async function handleGateway(request: Request, context: GatewayContext, s
     const date = new Date(); const log: GatewayLog = {
       id: requestId, createdAt: date.toISOString(), time: timeLabel(date), model: original.model,
       channel: lastCandidate?.channel.name || '无可用渠道', channelId: lastCandidate?.channel.id || null, apiKeyId: context.key?.id || null,
-      stream: Boolean(original.stream), ttft: lastTtft || 0, duration: seconds(requestStart), tokens: totalInput + totalOutput, status,
-      result: success ? candidates.findIndex(c => c.channel.id === lastCandidate?.channel.id) > 0 ? 'failover' : original.stream ? (lastTtft || 0) > context.settings.threshold ? 'slow' : 'success' : latestDuration > context.settings.responseThreshold ? 'slow' : 'success' : 'error',
+      stream: streaming, ttft: lastTtft || 0, duration: seconds(requestStart), tokens: totalInput + totalOutput, status,
+      result: success ? candidates.findIndex(c => c.channel.id === lastCandidate?.channel.id) > 0 ? 'failover' : streaming ? (lastTtft || 0) > context.settings.threshold ? 'slow' : 'success' : latestDuration > context.settings.responseThreshold ? 'slow' : 'success' : 'error',
       attempts, source: context.source, traceId, error: error ? redact(error, secrets) : null,
     }; await store.recordLog(log);
   };
@@ -215,10 +223,18 @@ export async function handleGateway(request: Request, context: GatewayContext, s
       try {
         // Local conversion/configuration failures are not upstream health samples. A different
         // authorized protocol can still support the same request within the channel budget.
-        body = prepareBody(channel, original, candidate.model); validateChatRequest(body);
-        const native = channel.config.protocol === 'anthropic' ? toAnthropic(body, channel) : channel.config.protocol === 'gemini' ? toGemini(body, channel) : body;
-        payload = JSON.stringify(native); estimatedTokens = estimatedBudget(channel, body);
-        if (channel.config.protocol !== 'mock') { target = upstreamUrl(channel, context.settings, candidate.model, Boolean(original.stream)); headers = upstreamHeaders(channel, credential!.secret, aigToken); }
+        body = passthrough ? prepareRelayBody(channel, original, candidate.model) : prepareBody(channel, original, candidate.model);
+        if (!passthrough) validateChatRequest(body);
+        const native = passthrough ? body : channel.config.protocol === 'anthropic' ? toAnthropic(body, channel) : channel.config.protocol === 'gemini' ? toGemini(body, channel) : body;
+        payload = passthrough && candidate.model === original.model && !Object.keys(channel.config.bodyOverrides).length ? rawInput : JSON.stringify(native); estimatedTokens = estimatedBudget(channel, body, passthrough);
+        if (channel.config.protocol !== 'mock') {
+          target = upstreamUrl(channel, context.settings, candidate.model, streaming, undefined, context.relayProtocol);
+          if (passthrough) {
+            const incomingSearch = new URL(request.url).search;
+            if (incomingSearch) { const url = new URL(target); url.search += `${url.search ? '&' : '?'}${incomingSearch.slice(1)}`; target = url.toString(); }
+          }
+          headers = upstreamHeaders(channel, credential!.secret, aigToken, passthrough ? request.headers : undefined, context.relayProtocol);
+        }
       } catch (error) {
         lastFailure = { status: error instanceof RequestFailure ? error.status : 400, message: redact(error instanceof Error ? error.message : '渠道请求配置无效', secrets), kind: 'error', retry: true };
         break;
@@ -230,20 +246,29 @@ export async function handleGateway(request: Request, context: GatewayContext, s
       const cancel = () => controller.abort(request.signal.reason);
       request.signal.addEventListener('abort', cancel, { once: true });
       if (request.signal.aborted) cancel();
-      const timeoutSec = original.stream ? context.settings.streamFirstTokenTimeout : context.settings.nonStreamTimeout;
+      const timeoutSec = streaming ? context.settings.streamFirstTokenTimeout : context.settings.nonStreamTimeout;
       if (timeoutSec > 0) timeout = setTimeout(() => { timedOut = true; controller.abort(new DOMException('Upstream timeout', 'TimeoutError')); }, timeoutSec * 1000);
       const cleanup = () => { if (timeout !== undefined) clearTimeout(timeout); request.signal.removeEventListener('abort', cancel); };
-      let iterator: AsyncGenerator<Record<string, any> | '[DONE]'> | null = null;
+      let iterator: AsyncGenerator<RelayFrame> | null = null;
       let response: Response | null = null, currentUsage = { inputTokens: 0, outputTokens: 0 }, ttft: number | null = null;
       let completed = false;
+      const downstreamHeaders = (stream: boolean): Headers => {
+        const result = new Headers(passthrough ? response?.headers : undefined);
+        for (const key of ['content-length', 'content-encoding', 'transfer-encoding', 'etag']) result.delete(key);
+        if (!result.has('content-type')) result.set('content-type', stream ? 'text/event-stream; charset=utf-8' : 'application/json');
+        result.set('x-pulsegate-request-id', requestId); result.set('x-pulsegate-channel-id', channel.id); result.set('x-pulsegate-attempts', String(attempts));
+        if (stream) { result.set('cache-control', 'no-cache, no-transform'); result.set('x-pulsegate-ttft-ms', String(Math.round((ttft || 0) * 1000))); }
+        return result;
+      };
       const record = async (result: AttemptRecord['result'], status: number, error: string | null) => {
         if (completed) return; completed = true;
         totalInput += currentUsage.inputTokens; totalOutput += currentUsage.outputTokens; lastTtft = ttft; latestDuration = seconds(attemptStart);
         await store.recordAttempt({ id: crypto.randomUUID(), requestId, channelId: channel.id, channelName: channel.name, credentialId: credential?.id || null,
-          model: candidate.model, stream: Boolean(original.stream), startedAt, ttft, duration: latestDuration, status, result,
+          model: candidate.model, stream: streaming, startedAt, ttft, duration: latestDuration, status, result,
           error: error ? redact(error, secrets) : null, ...currentUsage, attempt: attempts });
       };
       try {
+        lastProviderResponse = null;
         response = channel.config.protocol === 'mock' ? await mockUpstream(channel, body, attempts, controller.signal) : await fetch(target, {
           method: 'POST', headers, signal: controller.signal,
           body: payload, redirect: 'manual',
@@ -252,36 +277,52 @@ export async function handleGateway(request: Request, context: GatewayContext, s
           let raw;
           try { raw = await boundedText(response.body, 64 * 1024, controller.signal, true); }
           catch (error) { if (error instanceof StreamFailure) throw new StreamFailure(`HTTP ${response.status}: error body exceeded 64 KiB`, response.status); throw error; }
+          if (passthrough) lastProviderResponse = new Response(noResponseBody(response.status) ? null : redactRelayBody(raw, secrets), { status: response.status, statusText: response.statusText, headers: downstreamHeaders(false) });
           throw new StreamFailure(`HTTP ${response.status}: ${raw || response.statusText}`, response.status);
         }
-        if (!original.stream) {
-          const raw = await boundedText(response.body, MAX_RESPONSE, controller.signal, true); let value;
+        if (passthrough) streaming = response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') ?? false;
+        if (!streaming) {
+          const raw = await boundedText(response.body, MAX_RESPONSE, controller.signal, true);
+          if (passthrough) {
+            const observed = relayJSON(raw, original.model, candidate.model !== original.model); currentUsage = observed.usage;
+            if (!noResponseBody(response.status) && context.settings.emptyResponseDetection && !observed.meaningful && !observed.error) throw new StreamFailure('Upstream returned an empty completion', 502, 'empty');
+            cleanup(); await record(observed.error ? 'error' : seconds(attemptStart) > context.settings.responseThreshold ? 'slow' : 'success', response.status, observed.error);
+            if (!observed.error) await remember(channel, candidateIndex); await recordLog(response.status, observed.error, !observed.error);
+            return new Response(noResponseBody(response.status) ? null : observed.error ? redactRelayBody(observed.text, secrets) : observed.text, { status: response.status, statusText: response.statusText, headers: downstreamHeaders(false) });
+          }
+          let value;
           try { value = JSON.parse(raw); } catch { throw new StreamFailure('Upstream returned malformed JSON'); }
-          const normalized = normalizeJSON(value, channel, original.model, context.responseProtocol === 'anthropic'); currentUsage = usage(normalized);
-          context.responseValidator?.json(normalized);
+          const normalized = normalizeJSON(value, channel, original.model); currentUsage = usage(normalized);
           if (context.settings.emptyResponseDetection && !meaningfulOpenAIChunk(normalized)) throw new StreamFailure('Upstream returned an empty completion', 502, 'empty');
           cleanup(); await record(seconds(attemptStart) > context.settings.responseThreshold ? 'slow' : 'success', 200, null); await remember(channel, candidateIndex); await recordLog(200, null, true);
           return Response.json(normalized, { headers: { 'x-pulsegate-request-id': requestId, 'x-pulsegate-channel-id': channel.id, 'x-pulsegate-attempts': String(attempts) } });
         }
         if (!response.body || !response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) throw new StreamFailure('Upstream did not return text/event-stream');
-        const source = normalizedStream(response.body, channel, original.model, controller.signal, context.responseProtocol === 'anthropic');
-        iterator = context.responseValidator ? validatedResponseStream(source, context.responseValidator.stream()) : source;
-        const prefix: Uint8Array[] = []; let size = 0, ended = false, meaningful = false;
+        if (passthrough) iterator = relayStream(response.body, original.model, candidate.model !== original.model, controller.signal);
+        else iterator = completionFrames(normalizedStream(response.body, channel, original.model, controller.signal));
+        const safeFrameBytes = (frame: RelayFrame) => {
+          if (!passthrough || !frame.error) return frame.bytes;
+          const raw = new TextDecoder().decode(frame.bytes), safe = redactRelayBody(raw, secrets);
+          return safe === raw ? frame.bytes : new TextEncoder().encode(safe);
+        };
+        const prefix: Uint8Array[] = []; let size = 0, ended = false, terminalSeen = false, meaningful = false, streamError: string | null = null;
         while (true) {
           const item = await iterator.next(); if (item.done) { ended = true; break; }
-          const bytes = sseBytes(item.value); size += bytes.byteLength;
+          const bytes = safeFrameBytes(item.value); size += bytes.byteLength;
           if (size > MAX_PREREAD) throw new StreamFailure('Upstream produced more than 1 MiB before the first meaningful token');
           prefix.push(bytes);
-          if (item.value === '[DONE]') { ended = true; break; }
-          currentUsage = { inputTokens: Math.max(currentUsage.inputTokens, usage(item.value).inputTokens), outputTokens: Math.max(currentUsage.outputTokens, usage(item.value).outputTokens) };
-          if (meaningfulOpenAIChunk(item.value)) { ttft = seconds(attemptStart); meaningful = true; break; }
+          currentUsage = { inputTokens: Math.max(currentUsage.inputTokens, item.value.usage.inputTokens), outputTokens: Math.max(currentUsage.outputTokens, item.value.usage.outputTokens) };
+          if (item.value.error) streamError = redact(item.value.error, secrets);
+          if (item.value.done) { terminalSeen = true; ended = !passthrough; break; }
+          if (item.value.meaningful) { ttft = seconds(attemptStart); meaningful = true; break; }
+          if (streamError) break;
         }
-        if (!meaningful && context.settings.emptyResponseDetection) throw new StreamFailure('Upstream stream completed without content', 502, 'empty');
+        if (!meaningful && !streamError && context.settings.emptyResponseDetection) throw new StreamFailure('Upstream stream completed without content', 502, 'empty');
         if (timeout !== undefined) clearTimeout(timeout); // Only TTFT is bounded. An established stream stays attached to this upstream.
-        await remember(channel, candidateIndex);
+        if (!streamError) await remember(channel, candidateIndex);
         let finished = false, downstreamCancelled = false;
-        const finish = async (success: boolean, error: string | null, status = 200) => {
-          if (finished) return; finished = true; cleanup();
+        const finish = async (success: boolean, error: string | null, status = passthrough ? response!.status : 200) => {
+          if (finished) return; finished = true; if (!passthrough) cleanup();
           await record(success ? ttft !== null && ttft > context.settings.threshold ? 'slow' : 'success' : status === 499 ? 'cancelled' : 'error', status, error);
           await recordLog(status, error, success);
         };
@@ -290,28 +331,33 @@ export async function handleGateway(request: Request, context: GatewayContext, s
             try {
               if (prefix.length) {
                 const bytes = prefix.shift()!;
-                if (ended && !prefix.length) { await finish(true, null); output.enqueue(bytes); output.close(); await iterator?.return(undefined); return; }
+                if (!prefix.length && (ended || terminalSeen)) await finish(!streamError, streamError);
+                if (ended && !prefix.length) { cleanup(); output.enqueue(bytes); output.close(); await iterator?.return(undefined); return; }
                 output.enqueue(bytes); return;
               }
-              if (ended) { await finish(true, null); output.close(); await iterator?.return(undefined); return; }
+              if (ended) { await finish(!streamError, streamError); cleanup(); output.close(); await iterator?.return(undefined); return; }
               const item = await iterator!.next();
-              if (item.done) { ended = true; await finish(true, null); output.close(); return; }
-              if (item.value === '[DONE]') { ended = true; await finish(true, null); output.enqueue(sseBytes(item.value)); output.close(); await iterator?.return(undefined); return; }
-              else currentUsage = { inputTokens: Math.max(currentUsage.inputTokens, usage(item.value).inputTokens), outputTokens: Math.max(currentUsage.outputTokens, usage(item.value).outputTokens) };
-              output.enqueue(sseBytes(item.value));
+              if (item.done) { ended = true; await finish(!streamError, streamError); cleanup(); output.close(); return; }
+              currentUsage = { inputTokens: Math.max(currentUsage.inputTokens, item.value.usage.inputTokens), outputTokens: Math.max(currentUsage.outputTokens, item.value.usage.outputTokens) };
+              if (item.value.error) streamError = redact(item.value.error, secrets);
+              if (item.value.done) {
+                terminalSeen = true; await finish(!streamError, streamError);
+                if (!passthrough) { ended = true; cleanup(); output.enqueue(item.value.bytes); output.close(); await iterator?.return(undefined); return; }
+              }
+              output.enqueue(safeFrameBytes(item.value));
             } catch (error) {
               const message = redact(probeDeadlineExpired() ? '渠道探测整体响应超时' : error instanceof Error ? error.message : 'Upstream stream failed', secrets);
               await finish(false, message, probeDeadlineExpired() ? 504 : request.signal.aborted || downstreamCancelled ? 499 : 502);
               if (!downstreamCancelled) {
-                if (!request.signal.aborted) output.enqueue(sseBytes({ error: { message: publicError(context, message), type: 'upstream_stream_error', request_id: requestId } }));
-                output.close();
+                if (passthrough && !request.signal.aborted) output.error(new Error(publicError(context, message)));
+                else { if (!request.signal.aborted) output.enqueue(sseBytes({ error: { message: publicError(context, message), type: 'upstream_stream_error', request_id: requestId } })); output.close(); }
               }
-              controller.abort(); await iterator?.return(undefined).catch(() => {});
+              cleanup(); controller.abort(); await iterator?.return(undefined).catch(() => {});
             }
           },
-          async cancel() { downstreamCancelled = true; controller.abort(); await iterator?.return(undefined).catch(() => {}); await finish(false, '客户端取消流式响应', 499); },
+          async cancel() { downstreamCancelled = true; cleanup(); controller.abort(); await iterator?.return(undefined).catch(() => {}); await finish(false, '客户端取消流式响应', 499); },
         });
-        return new Response(downstream, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'x-pulsegate-request-id': requestId, 'x-pulsegate-channel-id': channel.id, 'x-pulsegate-attempts': String(attempts), 'x-pulsegate-ttft-ms': String(Math.round((ttft || 0) * 1000)) } });
+        return new Response(downstream, { status: response.status, statusText: response.statusText, headers: downstreamHeaders(true) });
       } catch (error) {
         cleanup(); controller.abort();
         await iterator?.return(undefined).catch(() => {});
@@ -328,6 +374,7 @@ export async function handleGateway(request: Request, context: GatewayContext, s
   }
   const failed = lastFailure || { status: 503, message: '无可用上游', kind: 'error', retry: false };
   await recordLog(failed.status, failed.message, false);
+  if (lastProviderResponse && lastProviderResponse.status === failed.status && lastProviderResponse.headers.get('x-pulsegate-channel-id') === lastCandidate?.channel.id) return lastProviderResponse;
   return errorResponse(failed.status, publicError(context, failed.message));
 }
 

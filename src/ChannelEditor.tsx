@@ -86,7 +86,7 @@ const services: {
     name: "OpenAI",
     format: "OpenAI (Chat Completions)",
     endpoint: "https://api.openai.com",
-    description: "兼容 OpenAI 协议",
+    description: "OpenAI 模型列表与测试",
   },
   {
     id: "anthropic",
@@ -94,7 +94,7 @@ const services: {
     name: "Anthropic",
     format: "Anthropic (Messages)",
     endpoint: "https://api.anthropic.com",
-    description: "Claude 原生接口",
+    description: "Anthropic 模型列表与测试",
   },
   {
     id: "gemini",
@@ -102,7 +102,7 @@ const services: {
     name: "Gemini",
     format: "Gemini (Contents)",
     endpoint: "https://generativelanguage.googleapis.com",
-    description: "Gemini 原生接口",
+    description: "Gemini 模型列表与测试",
   },
 ];
 
@@ -749,9 +749,9 @@ export default function ChannelEditor({
       }
     >
       <form id={formId} onSubmit={submit} className="ce-layout" noValidate>
-        <aside className="ce-services" aria-label="选择上游请求协议">
+        <aside className="ce-services" aria-label="选择上游接口类型">
           <div className="ce-services-heading">
-            <h3>API 协议</h3>
+            <h3>接口类型</h3>
           </div>
           <div className="ce-service-list">
             {services.map((item) => (
@@ -760,7 +760,7 @@ export default function ChannelEditor({
                 key={item.id}
                 variant="ghost"
                 className="ce-service"
-                aria-label={`选择 ${item.name} 协议`}
+                aria-label={`选择 ${item.name} 接口类型`}
                 aria-pressed={protocol === item.protocol && !simulated}
                 disabled={simulated || busy}
                 onClick={() => chooseService(item.id)}
@@ -787,11 +787,11 @@ export default function ChannelEditor({
           ) : (
             <Card className="ce-service-note">
               <Info size={18} />
-              <strong>上游请求格式</strong>
+              <strong>模型发现与渠道测试</strong>
               <p>
                 {channel
-                  ? "切换协议保留连接、模型与密钥；请确认上游支持所选格式。余额监控独立配置。"
-                  : "兼容接口可填写自定义 Base URL。每种协议保留连接与模型草稿，余额监控独立配置。"}
+                  ? "切换接口类型保留连接、模型与密钥。公开请求保持客户端格式，余额监控独立配置。"
+                  : "每种接口类型保留连接与模型草稿。公开请求保持客户端格式，余额监控独立配置。"}
               </p>
             </Card>
           )}
@@ -804,16 +804,16 @@ export default function ChannelEditor({
             icon={<Globe size={16} />}
             action={
               <div className="ce-format">
-                <span>上游请求协议</span>
+                <span>上游接口类型</span>
                 <strong>{format}</strong>
-                <small>网关转发到上游时使用的格式</small>
+                <small>用于模型发现与渠道测试</small>
               </div>
             }
           >
             {simulated && (
               <Notice>
-                此渠道使用本地故障模拟，不发送真实上游请求；API
-                协议保持原配置。
+                此渠道使用本地故障模拟，不发送真实上游请求；接口类型
+                保持原配置。
               </Notice>
             )}
             <div className="ce-fields">
@@ -848,7 +848,7 @@ export default function ChannelEditor({
                 <small>
                   {simulated
                     ? "路径在「端点配置」中调整。"
-                    : `只填域名即可，自动补 ${protocol === "gemini" ? "/v1beta" : "/v1"}；已有版本或自定义路径会保留。路径在「端点配置」中调整。`}
+                    : `Base URL 可只填域名；模型获取与渠道测试默认补 ${protocol === "gemini" ? "/v1beta" : "/v1"}，已有版本或自定义路径会保留。`}
                 </small>
               </label>
             </div>
@@ -1508,8 +1508,9 @@ export default function ChannelEditor({
                       placeholder="https://relay.example.com"
                     />
                     <small>
-                      中继需提供 {format} 兼容接口，并接收该渠道的认证头。
-                      只填域名时自动补 {protocol === "gemini" ? "/v1beta" : "/v1"}。
+                      中继需支持客户端实际调用的入口和请求格式，并接收渠道认证头。
+                      模型获取与渠道测试使用 {format}，只填域名时默认补
+                      {protocol === "gemini" ? " /v1beta" : " /v1"}。
                     </small>
                   </label>
                 )}

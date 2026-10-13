@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import { Chip, Dropdown } from "@heroui/react";
 import {
   Archive,
-  ArrowLeftRight,
   CircleGauge,
   Copy,
   Ellipsis,
@@ -82,7 +81,6 @@ type Panel =
   | "prices"
   | "overrides"
   | "relay"
-  | "conversions"
   | "rateLimit"
   | "endpoints"
   | "credentials"
@@ -96,7 +94,6 @@ const titles = {
   prices: "模型价格",
   overrides: "覆盖设置",
   relay: "代理配置",
-  conversions: "转换选项",
   rateLimit: "速率限制",
   endpoints: "端点配置",
   credentials: "上游密钥管理",
@@ -108,7 +105,6 @@ const configPanels = [
   "prices",
   "overrides",
   "relay",
-  "conversions",
   "rateLimit",
   "endpoints",
   "autoDisable",
@@ -369,7 +365,6 @@ export default function ChannelActions({
     { panel: "prices", label: "模型价格", icon: Wallet },
     { panel: "overrides", label: "覆盖设置", icon: Settings2 },
     { panel: "relay", label: "代理配置", icon: Network },
-    { panel: "conversions", label: "转换选项", icon: ArrowLeftRight },
     { panel: "rateLimit", label: "速率限制", icon: CircleGauge },
     { panel: "endpoints", label: "端点配置", icon: Network },
     { panel: "credentials", label: "密钥管理", icon: KeyRound },
@@ -563,7 +558,6 @@ export default function ChannelActions({
                 />
               )}
               {(panel === "relay" ||
-                panel === "conversions" ||
                 panel === "rateLimit" ||
                 panel === "endpoints" ||
                 panel === "autoDisable") && (

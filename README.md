@@ -2,13 +2,13 @@
 
 基于 **Cloudflare Workers + D1 + Durable Objects + React** 的大模型网关。结合 HTTP 状态、SSE 首字延迟（TTFT）、非流式完整响应耗时、空响应及流中断判断上游质量，在 API Key 授权范围内重试和切换渠道。
 
-已接入真实后端、D1 持久化、OpenAI 兼容及 Anthropic Messages 入口、Anthropic/Gemini 上游转换、Cloudflare AI Gateway 自定义服务商和交互式测试场。新安装的数据为空；本地测试渠道需要主动创建，生产不会安装演示数据。前端统一使用 HeroUI 3 的组件及默认配色；[DESIGN.md](DESIGN.md) 保留为早期设计参考。
+已接入真实后端、D1 持久化、Chat Completions 与 Anthropic Messages 原样转发入口、Cloudflare AI Gateway 自定义服务商和交互式测试场。新安装的数据为空；本地测试渠道需要主动创建，生产不会安装演示数据。前端统一使用 HeroUI 3 的组件及默认配色；[DESIGN.md](DESIGN.md) 保留为早期设计参考。
 
 ## 功能
 
 | 模块 | 当前实现 |
 | --- | --- |
-| 添加渠道 | OpenAI / Anthropic / Gemini 上游协议，独立的 NewAPI / Sub2API 余额监控选项、多密钥；从上游模型接口获取、搜索、多选加入，支持手动/批量模型、默认测试模型 |
+| 添加渠道 | OpenAI / Anthropic / Gemini 接口类型，用于模型获取和渠道测试；独立的 NewAPI / Sub2API 余额监控选项、多密钥；支持模型搜索、多选、手动/批量添加及默认测试模型 |
 | 后台余额 | NewAPI / Sub2API 账号密码与登录会话 AES-GCM 加密；每 5 分钟刷新，名称副标题展示余额与状态，可点击立即刷新 |
 | 渠道列表 | 搜索、服务商/状态/标签/模型筛选、分页、列设置、批量启停/标签/权重、JSON 导入 |
 | 渠道菜单 | HeroUI 可视化弹窗：模型映射行、价格与成本预览、类型化请求覆盖、连接与端点预览、限额卡片、状态码选择与恢复流程、密钥轮换、SSE/非流式测试及历史；支持复制、归档与删除 |
@@ -25,7 +25,7 @@
 
 获取模型由 Worker 请求上游，使用当前草稿的 Base URL、连接方式和密钥；编辑已有渠道可复用已保存密钥。默认 OpenAI 兼容地址为 `/v1/models`，Anthropic 和 Gemini 使用原生列表格式及分页，最多加载 1,000 个模型并提示截断。获取不会自动创建渠道或替用户开放全部模型。
 
-渠道和中继的 Base URL 可以只填域名（如 `https://api.anthropic.com`）：使用默认端点时，OpenAI / Anthropic 自动补 `/v1`，Gemini 自动补 `/v1beta`。已经填写的版本或部署子目录保持原样；自定义端点路径也按原配置拼接，不自动添加版本。
+渠道和中继的 Base URL 可以只填域名（如 `https://api.anthropic.com`）。模型获取与渠道测试按所选接口类型使用默认端点：OpenAI / Anthropic 自动补 `/v1`，Gemini 自动补 `/v1beta`；公开调用沿用客户端入口对应的路径。已经填写的版本或部署子目录保持原样；自定义端点路径也按原配置拼接，不自动添加版本。
 
 NewAPI / Sub2API 的后台凭据独立于推理 API Key。后台地址从 Base URL 去除末尾 `/v1` 或 `/v1beta` 推导，保留部署子目录；余额不经过 AI Gateway。NewAPI 使用 `/api/user/self` 的 `quota`，按站点 `/api/status` 的 `quota_per_unit` 换算为 USD，无法取得比例时显示原始额度；Sub2API 显示后台 `balance`。支持 NewAPI 旧 Cookie、新 Token 与可选 RSA 密码加密登录，以及 Sub2API Token 登录。NewAPI 还可选择后台访问令牌，在个人设置中生成并填写；旧版站点同时需要数字用户 ID，新版 PAT 可省略。令牌使用 `Authorization: Bearer`，旧版用户标识使用 `New-Api-User`，均加密保存、不回显。[NewAPI 官方后台鉴权说明](https://docs.newapi.pro/zh/docs/api/management/auth)。
 
@@ -33,7 +33,7 @@ NewAPI 开启 Turnstile 人机验证时，账号密码登录会提示改用后�
 
 模型别名采用可搜索的紧凑列表编辑；请求转发使用上游模型名称，JSON 响应及每个 SSE JSON 事件的 `model` 返回客户端原始请求的公开模型名，跨渠道切换后也保持一致。
 
-上游协议与余额后台分别配置：选择 OpenAI / Anthropic / Gemini 后，可独立打开「上游余额监控」并选择 NewAPI / Sub2API。它只决定后台余额的认证和读取方式，不改变推理或模型发现协议。已有渠道按原协议和监控类型加载，可直接切换真实上游协议；关闭监控保留已保存凭据、会话和最近余额，恢复同一后台可继续使用。切换后台类型须提供对应凭据，账户草稿按后台类型独立保留。历史数据无需数据库迁移。
+上游接口类型与余额后台分别配置：OpenAI / Anthropic / Gemini 接口类型用于模型发现与渠道测试，不决定公开请求的格式。可独立打开「上游余额监控」并选择 NewAPI / Sub2API，监控只决定后台余额的认证和读取方式。已有渠道按原接口类型和监控类型加载，可直接切换真实渠道的接口类型；关闭监控保留已保存凭据、会话和最近余额，恢复同一后台可继续使用。切换后台类型须提供对应凭据，账户草稿按后台类型独立保留。历史数据无需数据库迁移。
 
 已有安装升级时需应用新的账户表迁移，账号和会话均不保存在渠道公开 JSON 中：
 
@@ -109,7 +109,7 @@ npm run deploy:button -- https://github.com/your-name/pulsegate
 
 ## 连接上游与调用
 
-1. 添加渠道，选择 OpenAI 兼容、Anthropic 或 Gemini，填写 API **基础地址**及模型。例如 `https://api.example.com/v1` 加默认聊天后缀 `/chat/completions`，不要把完整聊天路径当基础地址。
+1. 添加渠道，选择用于模型发现与渠道测试的 OpenAI、Anthropic 或 Gemini 接口类型，填写 API **基础地址**及模型。例如 `https://api.example.com/v1` 加聊天后缀 `/chat/completions`，不要把完整聊天路径当基础地址。
 2. 用“密钥管理”添加上游 API Key，多密钥自动轮换；数据库 AES-GCM 加密，页面只返回遮罩。
 3. 配置渠道标签、权重、优先级、重试/健康参数。
 4. 创建调用方 API Key 并复制唯一一次展示的 `pg_live_...`，设置当前 Profile。
@@ -117,7 +117,7 @@ npm run deploy:button -- https://github.com/your-name/pulsegate
 
 复制只复制配置，默认停用，不复制凭据；归档不参与调度，删除会删除上游密钥。客户端修改渠道时不能覆盖健康状态、计数等服务端指标。批量导入先完成所有校验和凭据加密，再以 D1 事务统一写入；失败会整批回滚。
 
-OpenAI SDK 的 `base_url` 使用 `https://你的worker地址/v1`。公开入口：`GET /v1/models`、`POST /v1/chat/completions` 和 Anthropic 原生 `POST /v1/messages`。输入协议与上游协议独立，Messages 请求可经网关转换发往 OpenAI、Anthropic 或 Gemini 渠道，并复用 Key Profile、别名、重试、健康及用量记录。
+OpenAI SDK 的 `base_url` 使用 `https://你的worker地址/v1`。公开入口：`GET /v1/models`、`POST /v1/chat/completions` 和 `POST /v1/messages`。两种公开生成入口保持客户端请求路径与格式，不按渠道接口类型转换请求；调用方需使用上游支持的入口。Key Profile、别名、重试、健康及用量记录共用原有流程。
 
 ```bash
 curl https://你的worker地址/v1/chat/completions \
@@ -138,7 +138,9 @@ curl https://你的worker地址/v1/messages \
   -d '{"model":"你的模型或映射名","max_tokens":1024,"messages":[{"role":"user","content":"你好"}],"stream":true}'
 ```
 
-Messages 入口支持文本、system、图片、客户端工具调用、JSON 和原生 SSE 事件。当前无法跨协议完整保留的 thinking 控制/历史、缓存控制、服务端工具及其他高级参数会明确返回 400，避免静默丢弃。原生 Anthropic 上游的响应保留内容块、签名、缓存用量和停止信息；OpenAI/Gemini 上游返回内容转换为 Messages 响应。
+Chat Completions 与 Messages 请求均原样转发，渠道选择 OpenAI、Anthropic 或 Gemini 不会触发公开请求的协议转换或参数检测。完整请求参数、内容块和未知扩展字段交由上游处理，包括 thinking、metadata、缓存控制、文档、服务端工具及后续新增字段。响应 JSON 的未知字段、SSE 事件名及内容也保留原样。
+
+网关仍执行路由鉴权、重试与监控，使用渠道密钥替换上游认证，应用明确配置的请求覆盖，并按已配置别名替换请求及 JSON/SSE 响应中的 `model`。Messages 请求的 Anthropic 版本与 beta 协议头继续传给上游。NewAPI 提供 `/v1/messages` 时，可直接通过网关的同名入口调用；余额监控仍独立选择 NewAPI。
 
 ### Profile 权限
 
@@ -162,7 +164,7 @@ TTFT 从发起上游请求计时，直到首个有效文本、推理内容或工
 
 例如平均首字需在 10 秒内，可设置阈值 `10`、窗口 `20`、最小样本 `10`、首字超时 `20`。均值容许偶发慢请求，超时是单次硬截止；超时 `0` 关闭该截止。跨渠道次数是首次失败后最多额外尝试的不同渠道数，单渠道次数是该渠道首次尝试后的额外重试次数。
 
-**已向客户端输出生成内容后，不会拼接另一渠道回复。** 后续断流记录错误并发送 SSE 错误事件；客户端取消保留请求轨迹，但不进入渠道健康窗口、失败计数或健康历史。本地参数校验和协议转换失败也不计为上游健康样本。
+**已向客户端输出生成内容后，不会拼接另一渠道回复。** 后续网络断流会直接中断响应流并记录错误，不注入 SSE 错误事件；上游自行返回的错误帧原样保留。客户端取消保留请求轨迹，但不进入渠道健康窗口、失败计数或健康历史。鉴权、授权范围等未到达上游的失败也不计为上游健康样本。
 
 指定 HTTP 状态连续失败可自动禁用渠道或上游密钥。每分钟 Cron 最多探测 8 个渠道，冷却后达到连续健康次数才恢复；页面“恢复探测”同样真实发送请求，不直接宣称恢复。上游密钥仅在自动禁用、开启恢复且冷却已结束时参与恢复，手动停用的密钥需手动启用。单次恢复探测有最多 30 秒的整体截止，防止持续空事件或不结束的流阻塞定时任务。探测输出 Token 很少，但仍可能产生费用。日志、尝试及事件按保留天数自动清理。
 
@@ -184,7 +186,7 @@ https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/custom-{slug}/v1/
 
 D1 保存配置、加密凭据、Key SHA-256 哈希、Profile 计数、健康、尝试、日志、事件、短期路由状态；DO 串行协调健康/额度/轮询/限流。调用方 Token 明文不落库，日志不保存完整提示词或回复，错误写入前脱敏。
 
-已支持 Chat Completions 文本/图片/工具调用及 Anthropic/Gemini 转换；无法完整转换的原生参数显式报错，或按设置剥离。当前没有 Responses、embeddings、音视频、完整 Anthropic 原生入口、SMTP/Webhook；通知开关控制控制台提示。HTTP 中继是 HTTPS HTTP 转发地址，非 SOCKS/CONNECT。
+公开生成入口仅有 `/v1/chat/completions` 和 `/v1/messages`，按客户端格式转发参数与响应，不设置参数白名单或转换协议。上游是否支持具体字段和内容由该上游决定；渠道接口类型只用于模型获取与渠道测试。当前没有 Responses、embeddings、独立音视频入口或 SMTP/Webhook；通知开关控制控制台提示。HTTP 中继是 HTTPS HTTP 转发地址，非 SOCKS/CONNECT。
 
 已验证本地 Workers/D1/DO 和协议模拟。真实 Cloudflare 账户、Gateway 配置及真实上游凭据需部署后联调。生产不开放 Mock；费用按配置的每百万 Token 价格和上游 usage 计算，无 usage 时不推测准确费用。
 

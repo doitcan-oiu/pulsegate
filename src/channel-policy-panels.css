@@ -128,41 +128,6 @@
   .cpp-preview .chip {
     flex-shrink: 0;
   }
-  .cpp-example {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
-    gap: 13px;
-    align-items: center;
-    margin-top: 18px;
-  }
-  .cpp-example > div {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 16px;
-    min-width: 0;
-    height: 100%;
-  }
-  .cpp-example > div > small {
-    color: var(--muted);
-    font-size: 12px;
-  }
-  .cpp-example code {
-    font-size: 12px;
-    line-height: 1.9;
-    overflow-wrap: anywhere;
-  }
-  .cpp-example p {
-    font-size: 12px;
-    line-height: 1.7;
-    margin: 0;
-  }
-  .cpp-example > svg {
-    color: var(--muted);
-  }
   .cpp-presets {
     display: flex;
     gap: 7px;
@@ -369,13 +334,6 @@
     }
   }
   @media (max-width: 440px) {
-    .cpp-example {
-      grid-template-columns: 1fr;
-    }
-    .cpp-example > svg {
-      transform: rotate(90deg);
-      justify-self: center;
-    }
     .cpp-route {
       gap: 5px;
       grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);

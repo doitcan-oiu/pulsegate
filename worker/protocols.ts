@@ -34,6 +34,15 @@ export function prepareBody(channel: GatewayChannel, original: ChatBody, model: 
   return body;
 }
 
+export function prepareRelayBody(channel: GatewayChannel, original: ChatBody, model: string): ChatBody {
+  const body = structuredClone(original); body.model = model;
+  for (const [key, value] of Object.entries(channel.config.bodyOverrides)) {
+    if (protectedBody.has(key)) throw new RequestFailure(`渠道请求覆盖不允许修改 ${key}`);
+    body[key] = value;
+  }
+  return body;
+}
+
 function nativeInput(body: ChatBody, channel: GatewayChannel) {
   validateChatRequest(body);
   const common = new Set(['model', 'messages', 'stream', 'stream_options', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'stop', 'tools', 'tool_choice', 'n', 'user', ...(channel.config.protocol === 'anthropic' ? ['thinking', 'top_k', 'metadata', 'output_config'] : ['generationConfig', 'safetySettings', 'cachedContent'])]);
@@ -130,12 +139,13 @@ export function toGemini(original: ChatBody, channel: GatewayChannel): Record<st
 }
 
 /** A bare API origin may omit the default version; explicit paths are relative to the supplied base. */
-export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, model: string, stream: boolean, endpointPath?: string): string {
+export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, model: string, stream: boolean, endpointPath?: string, protocolOverride?: GatewayChannel['config']['protocol']): string {
   const config = channel.config;
-  const path = endpointPath ?? (config.protocol === 'anthropic' ? config.endpoints.messages : config.protocol === 'gemini' ? config.endpoints.generate : config.endpoints.chat);
+  const protocol = protocolOverride ?? config.protocol;
+  const path = endpointPath ?? (protocol === 'anthropic' ? config.endpoints.messages : protocol === 'gemini' ? config.endpoints.generate : config.endpoints.chat);
   const base = new URL(channel.endpoint);
   if (base.username || base.password) throw new RequestFailure('上游地址不能包含登录凭证；请使用渠道密钥管理');
-  const direct = resolveApiUrl(base, path, config.protocol, model, stream);
+  const direct = resolveApiUrl(base, path, protocol, model, stream);
   if (config.gatewayMode === 'ai-gateway') {
     if (!settings.aiGatewayEnabled || !settings.account || !settings.gateway || !config.customProviderSlug) throw new RequestFailure('请配置 Cloudflare Account、Gateway 和自定义服务商 slug', 503);
     return `https://gateway.ai.cloudflare.com/v1/${encodeURIComponent(settings.account)}/${encodeURIComponent(settings.gateway)}/custom-${encodeURIComponent(config.customProviderSlug.replace(/^custom-/, ''))}${direct.pathname}${direct.search}`;
@@ -143,20 +153,23 @@ export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, 
   if (config.relayUrl) {
     const relay = new URL(config.relayUrl); if (relay.protocol !== 'https:' && relay.protocol !== 'http:') throw new RequestFailure('中继 URL 无效');
     if (relay.username || relay.password) throw new RequestFailure('中继地址不能包含登录凭证');
-    return resolveApiUrl(relay, path, config.protocol, model, stream).toString();
+    return resolveApiUrl(relay, path, protocol, model, stream).toString();
   }
   if (!['http:', 'https:'].includes(direct.protocol)) throw new RequestFailure('上游 URL 仅支持 HTTP(S)');
   return direct.toString();
 }
 
-export function upstreamHeaders(channel: GatewayChannel, secret: string, aigToken: string | null): Headers {
+export function upstreamHeaders(channel: GatewayChannel, secret: string, aigToken: string | null, incoming?: Headers, protocolOverride?: GatewayChannel['config']['protocol']): Headers {
   const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' });
+  const excluded = new Set(['host', 'content-length', 'content-encoding', 'connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'authorization', 'x-api-key', 'x-goog-api-key', 'cf-aig-authorization', 'cookie']);
+  incoming?.forEach((value, key) => { if (!excluded.has(key) && !key.startsWith('x-pulsegate-')) headers.set(key, value); });
   for (const [key, value] of Object.entries(channel.config.headers)) {
     if (protectedHeaders.has(key.toLowerCase())) throw new RequestFailure(`渠道自定义 Header 不允许修改 ${key}`);
     headers.set(key, value);
   }
-  if (channel.config.protocol === 'anthropic') { headers.set('x-api-key', secret); if (!headers.has('anthropic-version')) headers.set('anthropic-version', '2023-06-01'); }
-  else if (channel.config.protocol === 'gemini') headers.set('x-goog-api-key', secret);
+  const protocol = protocolOverride ?? channel.config.protocol;
+  if (protocol === 'anthropic') { headers.set('x-api-key', secret); if (!headers.has('anthropic-version')) headers.set('anthropic-version', '2023-06-01'); }
+  else if (protocol === 'gemini') headers.set('x-goog-api-key', secret);
   else headers.set('Authorization', `Bearer ${secret}`);
   if (channel.config.gatewayMode === 'ai-gateway' && aigToken) headers.set('cf-aig-authorization', `Bearer ${aigToken}`);
   return headers;

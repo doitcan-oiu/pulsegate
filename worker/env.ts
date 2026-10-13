@@ -21,12 +21,7 @@ export type GatewayContext = {
   source: GatewayLog['source'];
   forceChannelId?: string;
   forceCredentialId?: string;
-  responseProtocol?: 'anthropic';
-  /** Validate downstream protocol compatibility before an attempt can be recorded as successful. */
-  responseValidator?: {
-    json(value: Record<string, any>): void;
-    stream(): { chunk(value: Record<string, any>): void; end(): void };
-  };
+  relayProtocol?: 'openai' | 'anthropic';
 };
 
 /** Implemented by store.ts; consumed by the routing engine. */
