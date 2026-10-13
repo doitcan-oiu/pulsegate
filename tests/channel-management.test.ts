@@ -34,6 +34,25 @@ async function accountChannel(kind: 'newapi' | 'sub2api' = 'newapi') {
 }
 
 describe('model discovery management endpoint', () => {
+  it.each([
+    ['openai', 'https://models.example', '/v1/models', 'authorization', 'Bearer fake-key', { data: [{ id: 'model-a' }] }, 'model-a'],
+    ['anthropic', 'https://models.example/', '/v1/models', 'x-api-key', 'fake-key', { data: [{ id: 'claude-a' }], has_more: false }, 'claude-a'],
+    ['gemini', 'https://models.example', '/v1beta/models', 'x-goog-api-key', 'fake-key', { models: [{ name: 'models/gemini-a' }] }, 'gemini-a'],
+  ] as const)('discovers %s models from a Base URL without a version suffix', async (protocol, endpoint, path, header, headerValue, response, model) => {
+    const fetcher = vi.fn(async () => Response.json(response)); vi.stubGlobal('fetch', fetcher);
+    const result = await call('/api/channels/discover-models', 'POST', { endpoint, config: { protocol }, apiKey: 'fake-key' });
+    expect(result.status).toBe(200); expect(result.json.models).toEqual([model]);
+    expect(result.json.endpoint).toBe('https://models.example' + path);
+    const [target, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new URL(target).pathname).toBe(path);
+    expect(new Headers(options.headers).get(header)).toBe(headerValue);
+  });
+  it('uses an explicitly versioned models path with a bare Base URL', async () => {
+    const fetcher = vi.fn(async () => Response.json({ data: [{ id: 'model-a' }] })); vi.stubGlobal('fetch', fetcher);
+    const result = await call('/api/channels/discover-models', 'POST', { endpoint: 'https://models.example', config: { protocol: 'openai', endpoints: { models: '/v2/models' } }, apiKey: 'fake-key' });
+    expect(result.status).toBe(200); expect(result.json.endpoint).toBe('https://models.example/v2/models');
+    expect(String((fetcher.mock.calls[0] as unknown as [string])[0])).toBe(result.json.endpoint);
+  });
   it('requires admin access and fetches the configured URL with its API key', async () => {
     const input = { endpoint: 'https://models.example/v1', config: { protocol: 'openai', endpoints: { models: '/v1/models' } }, apiKey: 'fake-discovery-key' };
     expect((await call('/api/channels/discover-models', 'POST', input, false)).status).toBe(401);

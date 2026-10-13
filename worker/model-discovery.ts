@@ -6,7 +6,7 @@ import { readUpstreamJSON } from './upstream-http';
 export async function discoverModels(channel: GatewayChannel, settings: GatewaySettings, secret: string, gatewayToken: string | null, signal?: AbortSignal): Promise<{ models: string[]; endpoint: string; truncated: boolean }> {
   if (channel.config.protocol === 'mock') return { models: channel.models, endpoint: '本地模拟', truncated: false };
   if (!secret) throw new HttpError(400, '获取模型前请填写 API Key，或为已有渠道添加密钥');
-  const target = new URL(upstreamUrl({ ...channel, config: { ...channel.config, protocol: 'openai', endpoints: { ...channel.config.endpoints, chat: channel.config.endpoints.models } } }, settings, '', false));
+  const target = new URL(upstreamUrl(channel, settings, '', false, channel.config.endpoints.models));
   const endpoint = target.toString();
   const headers = upstreamHeaders(channel, secret, gatewayToken); headers.set('Accept', 'application/json');
   const abort = signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000);

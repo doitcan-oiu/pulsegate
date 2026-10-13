@@ -25,6 +25,8 @@
 
 获取模型由 Worker 请求上游，使用当前草稿的 Base URL、连接方式和密钥；编辑已有渠道可复用已保存密钥。默认 OpenAI 兼容地址为 `/v1/models`，Anthropic 和 Gemini 使用原生列表格式及分页，最多加载 1,000 个模型并提示截断。获取不会自动创建渠道或替用户开放全部模型。
 
+渠道和中继的 Base URL 可以只填域名（如 `https://api.anthropic.com`）：使用默认端点时，OpenAI / Anthropic 自动补 `/v1`，Gemini 自动补 `/v1beta`。已经填写的版本或部署子目录保持原样；自定义端点路径也按原配置拼接，不自动添加版本。
+
 NewAPI / Sub2API 的后台账号独立于推理 API Key。后台地址从 Base URL 去除末尾 `/v1` 或 `/v1beta` 推导，保留部署子目录；余额不经过 AI Gateway。NewAPI 按站点 `quota_per_unit` 将额度换算为 USD，无法取得比例时显示原始额度；Sub2API 显示后台 `balance`。支持 NewAPI 旧 Cookie、新 Token 与可选 RSA 密码加密登录，以及 Sub2API Token 登录。验证码、二次验证或站点自定义登录流程会显示刷新失败，保留上次成功余额及时间，不绕过登录验证。自动刷新采用 D1 租约、版本校验和有限批次，账户较多时分批处理；归档渠道不刷新。Cloudflare Cron 在页面关闭后继续运行，本地打开控制台时也会触发到期刷新。
 
 已有安装升级时需应用新的账户表迁移，账号和会话均不保存在渠道公开 JSON 中：

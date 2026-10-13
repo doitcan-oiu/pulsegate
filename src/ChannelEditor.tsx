@@ -72,7 +72,7 @@ const services: {
     protocol: "openai",
     name: "OpenAI",
     format: "OpenAI (Chat Completions)",
-    endpoint: "https://api.openai.com/v1",
+    endpoint: "https://api.openai.com",
     description: "兼容 OpenAI 协议",
   },
   {
@@ -80,7 +80,7 @@ const services: {
     protocol: "anthropic",
     name: "Anthropic",
     format: "Anthropic (Messages)",
-    endpoint: "https://api.anthropic.com/v1",
+    endpoint: "https://api.anthropic.com",
     description: "Claude 原生接口",
   },
   {
@@ -88,7 +88,7 @@ const services: {
     protocol: "gemini",
     name: "Gemini",
     format: "Gemini (Contents)",
-    endpoint: "https://generativelanguage.googleapis.com/v1beta",
+    endpoint: "https://generativelanguage.googleapis.com",
     description: "Gemini 原生接口",
   },
   {
@@ -775,10 +775,14 @@ export default function ChannelEditor({
                   value={endpoint}
                   onChange={(event) => setEndpoint(event.target.value)}
                   placeholder={
-                    service?.endpoint || "https://your-gateway.example.com/v1"
+                    service?.endpoint || "https://your-gateway.example.com"
                   }
                 />
-                <small>包含 /v1 或 /v1beta；路径在「端点配置」中调整。</small>
+                <small>
+                  {simulated
+                    ? "路径在「端点配置」中调整。"
+                    : `只填域名即可，自动补 ${protocol === "gemini" ? "/v1beta" : "/v1"}；已有版本或自定义路径会保留。路径在「端点配置」中调整。`}
+                </small>
               </label>
             </div>
             <label className="ce-field">
@@ -1336,10 +1340,11 @@ export default function ChannelEditor({
                       maxLength={2048}
                       value={relayUrl}
                       onChange={(event) => setRelayUrl(event.target.value)}
-                      placeholder="https://relay.example.com/v1"
+                      placeholder="https://relay.example.com"
                     />
                     <small>
                       中继需提供 {format} 兼容接口，并接收该渠道的认证头。
+                      只填域名时自动补 {protocol === "gemini" ? "/v1beta" : "/v1"}。
                     </small>
                   </label>
                 )}

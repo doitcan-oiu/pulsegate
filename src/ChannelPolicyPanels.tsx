@@ -24,6 +24,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { ChannelConfig, GatewayChannel } from "../shared/types";
 import { defaultChannelConfig } from "../shared/types";
+import { resolveApiUrl } from "../shared/upstream-url";
 import { Button, Input } from "./ui";
 import { PanelNumber, PanelSection, PanelToggle } from "./ChannelPanelUI";
 import "./channel-policy-panels.css";
@@ -124,21 +125,12 @@ function activeEndpoint(config: ChannelConfig): EndpointKey {
       : "chat";
 }
 
-function resolvedPath(
-  config: ChannelConfig,
-  channel: GatewayChannel,
-  key: EndpointKey,
+function joinAddress(
+  baseText: string,
+  path: string,
+  protocol: ChannelConfig["protocol"],
+  model: string,
 ) {
-  const model =
-    config.aliases.find((alias) => alias.from === channel.model)?.to ??
-    channel.model;
-  return config.endpoints[key].replace(
-    "{model}",
-    encodeURIComponent(model || "model-name"),
-  );
-}
-
-function joinAddress(baseText: string, path: string) {
   try {
     const base = new URL(baseText);
     if (
@@ -147,12 +139,7 @@ function joinAddress(baseText: string, path: string) {
       !["http:", "https:"].includes(base.protocol)
     )
       return "请输入有效的 API 地址";
-    const prefix = base.pathname.replace(/\/$/, "");
-    const suffix =
-      prefix && path.startsWith(`${prefix}/`)
-        ? path
-        : `${prefix}/${path.replace(/^\//, "")}`;
-    return `${base.origin}${suffix}`;
+    return resolveApiUrl(base, path, protocol, model).toString();
   } catch {
     return "请输入有效的 API 地址";
   }
@@ -163,11 +150,19 @@ function addressPreview(
   channel: GatewayChannel,
   key: EndpointKey,
 ) {
-  const path = resolvedPath(config, channel, key);
+  const path = config.endpoints[key];
+  const model =
+    config.aliases.find((alias) => alias.from === channel.model)?.to ??
+    channel.model;
   if (config.gatewayMode === "ai-gateway") {
-    let upstreamPath = path;
+    let upstreamPath = path.replace(
+      "{model}",
+      encodeURIComponent(model || "model-name"),
+    );
     try {
-      upstreamPath = new URL(joinAddress(channel.endpoint, path)).pathname;
+      upstreamPath = new URL(
+        joinAddress(channel.endpoint, path, config.protocol, model || "model-name"),
+      ).pathname;
     } catch {
       /* Show the configured path until the address is valid. */
     }
@@ -175,7 +170,12 @@ function addressPreview(
       config.customProviderSlug.replace(/^custom-/, "") || "<服务商 slug>";
     return `https://gateway.ai.cloudflare.com/v1/<Account>/<Gateway>/custom-${slug}${upstreamPath}`;
   }
-  return joinAddress(config.relayUrl || channel.endpoint, path);
+  return joinAddress(
+    config.relayUrl || channel.endpoint,
+    path,
+    config.protocol,
+    model || "model-name",
+  );
 }
 
 function ChoiceCard({
@@ -275,7 +275,7 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
               type="url"
               required
               value={draftUrl}
-              placeholder="https://relay.example.com/v1"
+              placeholder="https://relay.example.com"
               onChange={(event) => {
                 setDraftUrl(event.target.value);
                 setConfig((old) => ({ ...old, relayUrl: event.target.value }));
@@ -284,6 +284,7 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
             <small>
               中继需提供 {protocolName[config.protocol]}{" "}
               兼容接口，并接收渠道的上游认证头。仅支持 HTTPS API 中继。
+              只填域名时自动补 {config.protocol === "gemini" ? "/v1beta" : "/v1"}。
             </small>
           </label>
         ) : (

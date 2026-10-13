@@ -1,4 +1,5 @@
 import type { GatewayChannel, GatewaySettings } from '../shared/types';
+import { resolveApiUrl } from '../shared/upstream-url';
 import { parseSSE, StreamFailure } from './sse';
 
 export type ChatBody = Record<string, any> & { model: string; messages: Record<string, any>[]; stream?: boolean };
@@ -128,18 +129,13 @@ export function toGemini(original: ChatBody, channel: GatewayChannel): Record<st
   return result;
 }
 
-/** endpoint is the API base URL, e.g. https://provider.example/v1; configured paths are relative to that base. */
-export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, model: string, stream: boolean): string {
+/** A bare API origin may omit the default version; explicit paths are relative to the supplied base. */
+export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, model: string, stream: boolean, endpointPath?: string): string {
   const config = channel.config;
-  let path = config.protocol === 'anthropic' ? config.endpoints.messages : config.protocol === 'gemini' ? config.endpoints.generate : config.endpoints.chat;
-  path = path.replace('{model}', encodeURIComponent(model));
-  if (config.protocol === 'gemini' && stream) { path = path.replace(':generateContent', ':streamGenerateContent'); path += path.includes('?') ? '&alt=sse' : '?alt=sse'; }
+  const path = endpointPath ?? (config.protocol === 'anthropic' ? config.endpoints.messages : config.protocol === 'gemini' ? config.endpoints.generate : config.endpoints.chat);
   const base = new URL(channel.endpoint);
   if (base.username || base.password) throw new RequestFailure('上游地址不能包含登录凭证；请使用渠道密钥管理');
-  const prefix = base.pathname.replace(/\/$/, '');
-  const suffix = path.startsWith(`${prefix}/`) && prefix ? path : `${prefix}/${path.replace(/^\//, '')}`;
-  const direct = new URL(`${base.origin}${suffix}`);
-  for (const [key, value] of base.searchParams) if (!direct.searchParams.has(key)) direct.searchParams.set(key, value);
+  const direct = resolveApiUrl(base, path, config.protocol, model, stream);
   if (config.gatewayMode === 'ai-gateway') {
     if (!settings.aiGatewayEnabled || !settings.account || !settings.gateway || !config.customProviderSlug) throw new RequestFailure('请配置 Cloudflare Account、Gateway 和自定义服务商 slug', 503);
     return `https://gateway.ai.cloudflare.com/v1/${encodeURIComponent(settings.account)}/${encodeURIComponent(settings.gateway)}/custom-${encodeURIComponent(config.customProviderSlug.replace(/^custom-/, ''))}${direct.pathname}${direct.search}`;
@@ -147,12 +143,7 @@ export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, 
   if (config.relayUrl) {
     const relay = new URL(config.relayUrl); if (relay.protocol !== 'https:' && relay.protocol !== 'http:') throw new RequestFailure('中继 URL 无效');
     if (relay.username || relay.password) throw new RequestFailure('中继地址不能包含登录凭证');
-    // Relay is an alternate API base, preserving configured protocol-specific endpoint paths.
-    const relayPrefix = relay.pathname.replace(/\/$/, '');
-    const relayPath = path.startsWith(`${relayPrefix}/`) && relayPrefix ? path : `${relayPrefix}/${path.replace(/^\//, '')}`;
-    const relayTarget = new URL(`${relay.origin}${relayPath}`);
-    for (const [key, value] of relay.searchParams) if (!relayTarget.searchParams.has(key)) relayTarget.searchParams.set(key, value);
-    return relayTarget.toString();
+    return resolveApiUrl(relay, path, config.protocol, model, stream).toString();
   }
   if (!['http:', 'https:'].includes(direct.protocol)) throw new RequestFailure('上游 URL 仅支持 HTTP(S)');
   return direct.toString();

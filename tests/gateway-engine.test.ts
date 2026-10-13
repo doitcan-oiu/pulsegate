@@ -245,6 +245,60 @@ describe('gateway execution', () => {
 });
 
 describe('protocol conversions and safety', () => {
+  it.each([
+    ['openai', '/v1/chat/completions'],
+    ['anthropic', '/v1/messages'],
+    ['gemini', '/v1beta/models/test:generateContent'],
+  ] as const)('infers the %s API version for a bare origin with or without a trailing slash', (protocol, path) => {
+    const c = channel(); c.config.protocol = protocol;
+    for (const endpoint of ['https://upstream.example', 'https://upstream.example/']) {
+      c.endpoint = endpoint;
+      expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example' + path);
+    }
+  });
+  it('uses the inferred Gemini API version for streaming and escapes the model name', () => {
+    const c = channel(); c.config.protocol = 'gemini'; c.endpoint = 'https://upstream.example';
+    expect(upstreamUrl(c, defaultSettings, 'model/name', true)).toBe('https://upstream.example/v1beta/models/model%2Fname:streamGenerateContent?alt=sse');
+  });
+  it.each(['/v1', '/v1beta', '/v2', '/deployment', '/deployment/v1/', '/json'])('preserves an explicitly supplied API base path %s', prefix => {
+    const c = channel(); c.config.protocol = 'openai'; c.endpoint = 'https://upstream.example' + prefix;
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example' + prefix.replace(/\/$/, '') + '/chat/completions');
+  });
+  it('preserves an explicit Gemini /v1 base instead of replacing it with /v1beta', () => {
+    const c = channel(); c.config.protocol = 'gemini';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example/v1/models/test:generateContent');
+  });
+  it('keeps versioned endpoint overrides and complete base prefixes exactly once', () => {
+    const c = channel(); c.config.protocol = 'openai'; c.endpoint = 'https://upstream.example';
+    c.config.endpoints.chat = '/v2/chat/completions';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example/v2/chat/completions');
+    c.endpoint += '/deployment/v1'; c.config.endpoints.chat = '/deployment/v1/custom/chat';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example/deployment/v1/custom/chat');
+  });
+  it('preserves custom unversioned endpoint overrides under a bare origin', () => {
+    const c = channel(); c.endpoint = 'https://upstream.example'; c.config.protocol = 'anthropic';
+    c.config.endpoints.messages = '/api/messages';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example/api/messages');
+    c.config.protocol = 'openai'; c.config.endpoints.chat = '/custom/chat';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example/custom/chat');
+  });
+  it('resolves a relay API base independently from the direct upstream base', () => {
+    const c = channel(); c.config.protocol = 'anthropic'; c.endpoint = 'https://upstream.example/custom';
+    c.config.relayUrl = 'https://relay.example/';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://relay.example/v1/messages');
+    c.config.relayUrl = 'https://relay.example/deployment';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://relay.example/deployment/messages');
+    c.config.relayUrl = 'https://relay.example'; c.config.endpoints.messages = '/v2/messages';
+    expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://relay.example/v2/messages');
+  });
+  it.each([
+    ['openai', '/v1/chat/completions'],
+    ['gemini', '/v1beta/models/test:generateContent'],
+  ] as const)('uses the resolved %s version in Cloudflare AI Gateway URLs', (protocol, path) => {
+    const c = channel(); c.config.protocol = protocol; c.endpoint = 'https://upstream.example';
+    c.config.gatewayMode = 'ai-gateway'; c.config.customProviderSlug = 'custom-example';
+    expect(upstreamUrl(c, { ...defaultSettings, aiGatewayEnabled: true, account: 'a', gateway: 'g' }, 'test', false)).toBe('https://gateway.ai.cloudflare.com/v1/a/g/custom-example' + path);
+  });
   it('keeps version prefixes exactly once for direct and custom provider URLs', () => {
     const c = channel(); c.config.protocol = 'openai'; expect(upstreamUrl(c, defaultSettings, 'test', false)).toBe('https://upstream.example/v1/chat/completions');
     c.config.gatewayMode = 'ai-gateway'; c.config.customProviderSlug = 'custom-example';
