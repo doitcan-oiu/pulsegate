@@ -4,6 +4,8 @@
   .ce-dialog.dialog-wide {
     width: min(1080px, calc(100vw - 40px));
     max-width: min(1080px, calc(100vw - 40px));
+    max-height: calc(100dvh - 32px);
+    overflow: hidden;
   }
   .ce-dialog .modal__header {
     padding-bottom: 18px;
@@ -15,7 +17,7 @@
   }
   .ce-dialog .dialog-description {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.6;
     margin-top: 5px;
   }
@@ -23,15 +25,19 @@
     overflow: hidden;
     padding-top: 0;
     padding-bottom: 0;
+    min-height: 0;
   }
   .ce-dialog .modal__footer {
     border-top: 1px solid var(--border);
-    margin-top: 12px;
+    margin-top: 0;
+    flex-shrink: 0;
+    background: var(--surface);
+    padding-block: var(--console-space-4, 16px);
   }
   .ce-layout {
     display: grid;
     grid-template-columns: 184px minmax(0, 1fr);
-    gap: 28px;
+    gap: var(--console-space-6, 24px);
     min-width: 0;
     height: min(70dvh, 680px);
     max-height: calc(100dvh - 230px);
@@ -122,7 +128,7 @@
   }
   .ce-service-copy small {
     display: none;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 18px;
     color: var(--muted);
   }
@@ -140,11 +146,11 @@
     color: var(--muted);
   }
   .ce-service-note strong {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
   }
   .ce-service-note p {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     line-height: 1.8;
   }
@@ -159,7 +165,7 @@
     flex-direction: column;
     gap: 12px;
     min-width: 0;
-    padding: 24px 0;
+    padding: var(--console-space-5, 20px) 0;
     border-top: 1px solid var(--border);
   }
   .ce-section:first-child {
@@ -186,13 +192,13 @@
     flex-shrink: 0;
   }
   .ce-section-title h3 {
-    font-size: 17px;
+    font-size: var(--console-text-md, 15px);
     font-weight: 600;
     line-height: 1.5;
   }
   .ce-section-title p {
     margin-top: 3px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     line-height: 1.7;
   }
@@ -201,18 +207,18 @@
     flex-direction: column;
     gap: 2px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 20px;
     text-align: right;
     max-width: 230px;
   }
   .ce-format strong {
     color: var(--foreground);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
   }
   .ce-format small {
-    font-size: 11px;
+    font-size: 12px;
     line-height: 1.5;
   }
   .ce-section-heading > .switch {
@@ -221,7 +227,7 @@
   }
   .ce-balance-hint {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
   }
   .ce-field-caption {
@@ -247,7 +253,7 @@
     gap: 8px;
   }
   .ce-account-heading strong {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
   }
   .ce-account-heading .chip {
@@ -255,7 +261,7 @@
   }
   .ce-account > small {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
   }
   .ce-model-actions {
@@ -265,7 +271,7 @@
   }
   .ce-model-actions > span {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     white-space: nowrap;
   }
   .ce-discovery-status {
@@ -274,7 +280,7 @@
     justify-content: space-between;
     gap: 8px;
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
   }
   .ce-discovery-error {
     padding: 12px 14px;
@@ -284,7 +290,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    font-size: 13px;
+    font-size: 14px;
   }
   .ce-discovery-error > svg {
     flex-shrink: 0;
@@ -295,7 +301,7 @@
   }
   .ce-discovery-error p {
     margin-top: 3px;
-    font-size: 12px;
+    font-size: 13px;
     overflow-wrap: anywhere;
   }
   .ce-discovery {
@@ -311,7 +317,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 13px;
+    font-size: 14px;
   }
   .ce-discovery-heading strong {
     font-weight: 600;
@@ -319,7 +325,7 @@
   .ce-discovery-heading > span {
     color: var(--muted);
     margin-right: auto;
-    font-size: 12px;
+    font-size: 13px;
   }
   .ce-model-search {
     position: relative;
@@ -343,7 +349,7 @@
   }
   .ce-discovery-selection > span,
   .ce-already-added {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .ce-discovery-list {
@@ -376,7 +382,7 @@
   }
   .ce-discovery-model .label > span {
     display: block;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 400;
     overflow-wrap: anywhere;
   }
@@ -393,7 +399,7 @@
   }
   .ce-discovery-footer > small {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.5;
     overflow-wrap: anywhere;
     min-width: 0;
@@ -404,12 +410,12 @@
   .ce-discovery-empty {
     padding: 16px 0;
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.8;
   }
   .ce-limit-warning {
     color: var(--danger);
-    font-size: 12px;
+    font-size: 13px;
   }
   .ce-fields {
     display: grid;
@@ -421,7 +427,7 @@
     flex-direction: column;
     gap: 6px;
     min-width: 0;
-    font-size: 13px;
+    font-size: 14px;
   }
   .ce-field > span {
     font-weight: 500;
@@ -429,7 +435,7 @@
   .ce-dialog input,
   .ce-dialog textarea,
   .ce-dialog .select__value {
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.5;
   }
   .ce-field em {
@@ -439,7 +445,7 @@
   .ce-field small,
   .ce-hint,
   .ce-suggestions small {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     line-height: 1.6;
     overflow-wrap: anywhere;
@@ -451,7 +457,7 @@
     display: flex;
     align-items: flex-start;
     gap: 9px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     line-height: 1.6;
   }
@@ -484,7 +490,7 @@
   }
   .ce-batch > div > span {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     margin-right: auto;
   }
   .ce-chips,
@@ -528,7 +534,7 @@
     border: 1px dashed var(--border);
     border-radius: 10px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
   }
   .ce-invalid {
@@ -541,17 +547,17 @@
     gap: 9px;
   }
   .ce-suggestions > span {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
   }
   .ce-suggestions-heading {
     justify-content: space-between;
     align-items: center;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
   }
   .ce-model-docs {
-    font-size: 12px;
+    font-size: 13px;
   }
   .ce-suggestions > div {
     display: flex;
@@ -570,12 +576,12 @@
     padding: 20px 0 12px;
   }
   .ce-advanced-heading h3 {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
   }
   .ce-advanced-heading p {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     margin-top: 3px;
   }
   .ce-advanced {
@@ -595,13 +601,13 @@
     flex-shrink: 0;
   }
   .ce-advanced-title {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
   }
   .ce-advanced-summary {
     margin-left: auto;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 400;
   }
   .ce-advanced-body {
@@ -611,11 +617,11 @@
     padding: 2px 0 16px;
   }
   .ce-enable strong {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
   }
   .ce-enable p {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     line-height: 1.8;
     margin-top: 5px;
@@ -635,12 +641,17 @@
     align-items: center;
     gap: 7px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
+    line-height: 1.6;
   }
   .ce-footer > div {
     display: flex;
     gap: 8px;
+    flex-shrink: 0;
   }
+  .ce-discard-actions { display: flex; justify-content: flex-end; gap: 8px; width: 100%; flex-wrap: wrap; }
+  .ce-discard-dialog .modal__footer { border-top: 1px solid var(--border); }
+  .ce-discard-description { color: var(--muted); font-size: 14px; line-height: 1.8; }
   .ce-spinning {
     animation: ce-spin 1s linear infinite;
   }
@@ -663,6 +674,7 @@
     .ce-dialog.dialog-wide {
       width: calc(100vw - 24px);
       max-width: calc(100vw - 24px);
+      max-height: calc(100dvh - 24px);
     }
     .ce-dialog .modal__body {
       overflow-y: auto;
@@ -673,6 +685,7 @@
       gap: 20px;
       height: auto;
       max-height: none;
+      padding-bottom: 16px;
     }
     .ce-services {
       overflow: visible;
@@ -694,7 +707,7 @@
       align-items: center;
     }
     .ce-service-copy strong {
-      font-size: 12px;
+      font-size: 13px;
     }
     .ce-service-copy small,
     .ce-service-radio,
@@ -718,6 +731,9 @@
     .ce-footer > span > svg {
       display: none;
     }
+    .ce-footer { align-items: center; gap: 8px; }
+    .ce-footer > span { max-width: 100px; }
+    .ce-discard-actions > .button { flex: 1; }
     .ce-section-heading {
       flex-wrap: wrap;
       gap: 10px;

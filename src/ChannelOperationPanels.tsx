@@ -451,7 +451,7 @@ export function TestHistory({
         />
       </div>
       {logs.length ? (
-        <Table>
+        <Table variant="secondary">
           <Table.ScrollContainer>
             <Table.Content
               className="cop-history-table"

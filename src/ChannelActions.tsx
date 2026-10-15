@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Chip, Dropdown } from "@heroui/react";
 import {
@@ -24,6 +24,8 @@ import type {
   GatewayChannel,
 } from "../shared/types";
 import { api } from "./api";
+import { channelConfigPatchForPanel } from "./channel-config-patch";
+import type { ChannelConfigPanel } from "./channel-config-patch";
 import { PanelSection } from "./ChannelPanelUI";
 import {
   ModelAliasesPanel,
@@ -228,6 +230,11 @@ export default function ChannelActions({
   const configFormId = useId();
   const [panel, setPanel] = useState<Panel>(null);
   const [busy, setBusy] = useState(false);
+  const operationPending = useRef(false);
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const discardContinuation = useRef<(() => void) | null>(null);
+  const configBaseline = useRef("");
+  const originalConfig = useRef(structuredClone(channel.config));
   const [config, setConfig] = useState(channel.config);
   const [headerRows, setHeaderRows] = useState<OverrideRow[]>([]);
   const [bodyRows, setBodyRows] = useState<OverrideRow[]>([]);
@@ -241,25 +248,54 @@ export default function ChannelActions({
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [pendingCredential, setPendingCredential] =
     useState<CredentialMeta | null>(null);
-  const close = () => {
+  const configSignature = JSON.stringify({ config, headerRows, bodyRows });
+  const panelDirty = panel && configPanels.includes(panel)
+    ? configSignature !== configBaseline.current
+    : panel === "credentials" && Boolean(secret || label !== (credentials.find((key) => key.id === rotating)?.label ?? ""));
+  useEffect(() => {
+    if (!panelDirty) return;
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [panelDirty]);
+  const close = (force = false) => {
+    if (busy || operationPending.current) return;
+    if (panelDirty && !force) { discardContinuation.current = null; setDiscardOpen(true); return; }
+    discardContinuation.current = null;
+    setDiscardOpen(false);
     setPanel(null);
     setSecret("");
     setLabel("");
     setRotating(null);
     setResult(null);
   };
+  function dismissDiscard() { discardContinuation.current = null; setDiscardOpen(false); }
+  function confirmDiscard() {
+    const continuation = discardContinuation.current;
+    if (!continuation) { close(true); return; }
+    discardContinuation.current = null; setDiscardOpen(false); continuation();
+  }
+  function beginRotation(key: CredentialMeta) {
+    const apply = () => { setRotating(key.id); setLabel(key.label); setSecret(""); };
+    if (panelDirty) { discardContinuation.current = apply; setDiscardOpen(true); }
+    else apply();
+  }
   const path = `/api/channels/${encodeURIComponent(channel.id)}`;
   async function operation(task: () => Promise<unknown>, success?: string) {
+    if (operationPending.current) throw new Error("操作正在处理中");
+    operationPending.current = true;
     setBusy(true);
     try {
       const data = await task();
-      await onRefresh();
+      try { await onRefresh(); }
+      catch { toast.error("操作已完成，但列表刷新失败。请刷新页面查看最新状态。"); }
       if (success) toast.success(success);
       return data;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "操作失败");
       throw error;
     } finally {
+      operationPending.current = false;
       setBusy(false);
     }
   }
@@ -270,11 +306,18 @@ export default function ChannelActions({
     setCredentials(Array.isArray(data) ? data : data.credentials);
   }
   async function open(next: Panel) {
+    if (busy || operationPending.current) return;
+    const nextConfig = structuredClone(channel.config);
+    originalConfig.current = structuredClone(nextConfig);
+    const nextHeaders = overridesToRows(channel.config.headers, true);
+    const nextBody = overridesToRows(channel.config.bodyOverrides);
+    configBaseline.current = JSON.stringify({ config: nextConfig, headerRows: nextHeaders, bodyRows: nextBody });
+    setDiscardOpen(false);
     setPanel(next);
     setResult(null);
-    setConfig(structuredClone(channel.config));
-    setHeaderRows(overridesToRows(channel.config.headers, true));
-    setBodyRows(overridesToRows(channel.config.bodyOverrides));
+    setConfig(nextConfig);
+    setHeaderRows(nextHeaders);
+    setBodyRows(nextBody);
     setDeleteConfirm("");
     setSecret("");
     setLabel("");
@@ -307,12 +350,15 @@ export default function ChannelActions({
       toast.error(error instanceof Error ? error.message : "请检查配置");
       return;
     }
+    if (!panel || !configPanels.includes(panel)) return;
+    const patch = channelConfigPatchForPanel(next, originalConfig.current, panel as ChannelConfigPanel);
+    if (Object.keys(patch).length === 0) { close(true); return; }
     await operation(
       () =>
-        api(path, { method: "PATCH", body: JSON.stringify({ config: next }) }),
+        api(path, { method: "PATCH", body: JSON.stringify({ config: patch }) }),
       "渠道配置已保存",
     )
-      .then(close)
+      .then(() => close(true))
       .catch(() => undefined);
   }
   function runTest(recover = false) {
@@ -396,6 +442,7 @@ export default function ChannelActions({
         isIconOnly
         aria-label={`编辑 ${channel.name}`}
         title="编辑"
+        disabled={busy}
         onClick={() => onEdit(channel)}
       >
         <Pencil size={15} />
@@ -404,6 +451,7 @@ export default function ChannelActions({
         variant="ghost"
         isIconOnly
         title="进入测试场"
+        disabled={busy}
         aria-label={`测试 ${channel.name}`}
         onClick={() =>
           onPlayground ? onPlayground(channel.id) : void open("test")
@@ -417,6 +465,7 @@ export default function ChannelActions({
           isIconOnly
           aria-label={`${channel.name} 更多操作`}
           title="更多操作"
+          disabled={busy}
         >
           <Ellipsis size={18} />
         </Button>
@@ -447,7 +496,7 @@ export default function ChannelActions({
         <Dialog
           title="删除上游密钥"
           subtitle={channel.name}
-          close={() => setPendingCredential(null)}
+          close={() => !busy && setPendingCredential(null)}
           className="cp-dialog"
           footer={
             <div className="cp-dialog-footer">
@@ -469,7 +518,8 @@ export default function ChannelActions({
                         `${path}/credentials/${encodeURIComponent(pendingCredential.id)}`,
                         { method: "DELETE" },
                       );
-                      await loadCredentials();
+                      setCredentials((old) => old.filter((key) => key.id !== pendingCredential.id));
+                      if (rotating === pendingCredential.id) { setRotating(null); setLabel(""); setSecret(""); }
                     }, "上游密钥已删除")
                       .then(() => setPendingCredential(null))
                       .catch(() => undefined);
@@ -508,9 +558,9 @@ export default function ChannelActions({
           footer={
             hasConfig ? (
               <div className="cp-dialog-footer">
-                <span>仅应用于当前渠道</span>
+                <span>{panelDirty ? "有未保存的更改" : "仅应用于当前渠道"}</span>
                 <div>
-                  <Button variant="secondary" disabled={busy} onClick={close}>
+                  <Button variant="secondary" disabled={busy} onClick={() => close()}>
                     取消
                   </Button>
                   <Button
@@ -615,21 +665,17 @@ export default function ChannelActions({
               secret={secret}
               onSecretChange={setSecret}
               rotating={rotating}
-              onRotate={(key) => {
-                setRotating(key.id);
-                setLabel(key.label);
-                setSecret("");
-              }}
+              onRotate={beginRotation}
               onToggle={(key) => {
                 void operation(async () => {
-                  await api(
+                  const result = await api<{ credential: CredentialMeta }>(
                     `${path}/credentials/${encodeURIComponent(key.id)}`,
                     {
                       method: "PATCH",
                       body: JSON.stringify({ enabled: !key.enabled }),
                     },
                   );
-                  await loadCredentials();
+                  setCredentials((old) => old.map((item) => item.id === result.credential.id ? result.credential : item));
                 }, "密钥状态已更新").catch(() => undefined);
               }}
               onDelete={setPendingCredential}
@@ -645,7 +691,7 @@ export default function ChannelActions({
                 }
                 void operation(
                   async () => {
-                    await api(
+                    const result = await api<{ credential: CredentialMeta }>(
                       rotating
                         ? `${path}/credentials/${encodeURIComponent(rotating)}`
                         : `${path}/credentials`,
@@ -660,7 +706,7 @@ export default function ChannelActions({
                     setSecret("");
                     setLabel("");
                     setRotating(null);
-                    await loadCredentials();
+                    setCredentials((old) => rotating ? old.map((item) => item.id === result.credential.id ? result.credential : item) : [...old, result.credential]);
                   },
                   rotating ? "上游密钥已轮换" : "上游密钥已添加",
                 ).catch(() => undefined);
@@ -701,13 +747,14 @@ export default function ChannelActions({
                   () => api(path, { method: "DELETE" }),
                   "渠道已删除",
                 )
-                  .then(close)
+                  .then(() => close(true))
                   .catch(() => undefined);
               }}
             />
           )}
         </ChannelDialog>
       )}
+      {discardOpen && <Dialog title="放弃未保存的配置？" subtitle={`${channel.name} · ${panel ? titles[panel] : "渠道配置"}`} close={dismissDiscard} className="cp-dialog" footer={<div className="cp-discard-actions"><Button variant="secondary" onClick={dismissDiscard}>继续编辑</Button><Button variant="danger" onClick={confirmDiscard}>{discardContinuation.current ? "放弃并切换" : "放弃并关闭"}</Button></div>}><p className="cx-hint">当前配置和凭据草稿尚未保存，关闭后需要重新填写。</p></Dialog>}
     </div>
   );
 }

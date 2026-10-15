@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Check,
@@ -22,7 +22,7 @@ import { Accordion, Alert, Card, Chip, Dropdown, Table, Tabs } from "@heroui/rea
 import { Button, Checkbox, Dialog, Input, Select, toast } from "./ui";
 import type { GatewayChannel as Channel, GatewayApiKey as ApiKey, KeyProfile as Profile } from "../shared/types";
 import { api } from "./api";
-import { editableRequestLimit, modelsForProfile, requestLimitLabel } from "./access-policy";
+import { apiKeyExpired, editableRequestLimit, modelsForProfile, requestLimitLabel } from "./access-policy";
 import "./api-keys.css";
 
 type Scope = "all" | "tags" | "channels";
@@ -94,9 +94,8 @@ function permittedModels(profile: Profile, channels: Channel[]) {
     : models.filter((model) => profile.models.includes(model));
 }
 function eligibleChannels(profile: Profile, channels: Channel[]) {
-  const models = permittedModels(profile, channels);
   return scopedChannels(profile, channels).filter((channel) =>
-    channelModels(channel).some((model) => models.includes(model)),
+    modelsForProfile([channel], profile, true).length > 0,
   );
 }
 function currentProfile(key: ApiKey) {
@@ -104,6 +103,13 @@ function currentProfile(key: ApiKey) {
     key.profiles.find((profile) => profile.id === key.activeProfile) ??
     key.profiles[0]
   );
+}
+function keyState(key: ApiKey) {
+  return key.status === "active" && apiKeyExpired(key) ? "expired" : key.status;
+}
+function availableChannel(channel: Channel) {
+  return channel.enabled && !channel.archived && !channel.health.autoDisabled && channel.status === "healthy"
+    && (channel.config.protocol === "mock" || channel.credentialCount !== 0);
 }
 function Modal({ title, subtitle, children, onClose, wide = false, footer }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean; footer?: ReactNode }) {
   return <Dialog title={title} subtitle={subtitle} close={onClose} wide={wide} footer={footer} className="ak-dialog">{children}</Dialog>;
@@ -118,7 +124,7 @@ function ScopePreview({
   const scope = scopedChannels(profile, channels);
   const eligible = eligibleChannels(profile, channels);
   const healthy = eligible.filter(
-    (channel) => channel.enabled && !channel.health.autoDisabled && channel.status === "healthy",
+    availableChannel,
   );
   const models = modelsForProfile(channels, profile, true);
   const label =
@@ -149,7 +155,7 @@ function ScopePreview({
         {scope.map((channel) => {
           const modelMatches = eligible.some((item) => item.id === channel.id);
           const available =
-            channel.enabled && !channel.health.autoDisabled && channel.status === "healthy" && modelMatches;
+            availableChannel(channel) && modelMatches;
           return (
             <div className="ak-preview-channel" key={channel.id}>
               <div>
@@ -161,6 +167,8 @@ function ScopePreview({
                   ? "已停用"
                   : channel.health.autoDisabled
                     ? "自动停用"
+                  : channel.config.protocol !== "mock" && channel.credentialCount === 0
+                    ? "未配置密钥"
                   : !modelMatches
                     ? "模型未授权"
                     : channel.status === "healthy"
@@ -179,7 +187,7 @@ function ScopePreview({
         <Alert status="warning" className="ak-preview-warning"><Alert.Content><Alert.Description>当前没有健康且可用的授权渠道；不会切换到范围外的渠道。</Alert.Description></Alert.Content></Alert>
       ) : null}
       <div className="ak-preview-models">
-        <span>可访问模型 · {models.length}</span>
+        <span>策略授权模型 · {models.length}</span>
         <div>
           {models.length ? (
             models.map((model) => (
@@ -206,11 +214,16 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
   const pending = useRef(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [formError, setFormError] = useState("");
   const [editor, setEditor] = useState<{
     id: string | null;
     draft: EditorDraft;
     editingProfile: string;
   } | null>(null);
+  const initialEditorDraft = useRef<string | null>(null);
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const editorOpen = Boolean(editor);
+  const hasEditorChanges = Boolean(editor && JSON.stringify(editor.draft) !== initialEditorDraft.current);
   const [secret, setSecret] = useState<{ name: string; value: string } | null>(
     null,
   );
@@ -224,9 +237,13 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
   );
   const visible = keys.filter(
     (key) =>
-      `${key.name} ${key.note}`.toLowerCase().includes(search.toLowerCase()) &&
-      (statusFilter === "all" || key.status === statusFilter),
+      `${key.name} ${key.note}`.toLowerCase().includes(search.trim().toLowerCase()) &&
+      (statusFilter === "all" || keyState(key) === statusFilter),
   );
+  const filtered = Boolean(search.trim() || statusFilter !== "all");
+  const stateCounts = keys.reduce<Record<string, number>>((counts, key) => {
+    const state = keyState(key); counts[state] = (counts[state] ?? 0) + 1; return counts;
+  }, { all: keys.length, active: 0, disabled: 0, expired: 0, revoked: 0 });
   const profile = editor?.draft.profiles.find(
     (item) => item.id === editor.editingProfile,
   );
@@ -239,39 +256,61 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
     profile?.models.filter((model) => !profileModels.includes(model)) ?? [];
   const preview = keys.find((key) => key.id === previewKey);
 
+  useEffect(() => {
+    if (!hasEditorChanges && !(editorOpen && busy)) return;
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [hasEditorChanges, editorOpen, busy]);
+
+  function clearEditor() {
+    initialEditorDraft.current = null;
+    setDiscardOpen(false);
+    setFormError("");
+    setEditor(null);
+  }
+  function closeEditor(discard = false) {
+    if (busy || pending.current) return;
+    if (hasEditorChanges && !discard) { setDiscardOpen(true); return; }
+    clearEditor();
+  }
   function startCreate() {
+    setFormError("");
+    setDiscardOpen(false);
     const initial = blankProfile();
+    const draft: EditorDraft = { name: "", expires: "", note: "", profiles: [initial], activeProfile: initial.id };
+    initialEditorDraft.current = JSON.stringify(draft);
     setEditor({
       id: null,
-      draft: {
-        name: "",
-        expires: "",
-        note: "",
-        profiles: [initial],
-        activeProfile: initial.id,
-      },
+      draft,
       editingProfile: initial.id,
     });
   }
   function startEdit(key: ApiKey) {
+    setFormError("");
+    setDiscardOpen(false);
+    const draft = structuredClone({
+      name: key.name,
+      expires: ['永不过期', 'never'].includes(key.expires) ? '' : key.expires,
+      note: key.note,
+      profiles: key.profiles.map(item => ({ ...item, requestLimit: editableRequestLimit(item.requestLimit) })),
+      activeProfile: key.activeProfile,
+    });
+    initialEditorDraft.current = JSON.stringify(draft);
     setEditor({
       id: key.id,
-      draft: structuredClone({
-        name: key.name,
-        expires: ['永不过期', 'never'].includes(key.expires) ? '' : key.expires,
-        note: key.note,
-        profiles: key.profiles.map(item => ({ ...item, requestLimit: editableRequestLimit(item.requestLimit) })),
-        activeProfile: key.activeProfile,
-      }),
+      draft,
       editingProfile: key.activeProfile,
     });
   }
   function updateDraft(update: Partial<EditorDraft>) {
+    setFormError("");
     setEditor((value) =>
       value ? { ...value, draft: { ...value.draft, ...update } } : value,
     );
   }
   function updateProfile(update: Partial<Profile>) {
+    setFormError("");
     setEditor((value) =>
       value
         ? {
@@ -334,41 +373,46 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!editor) return;
+    setFormError("");
+    const invalid = (message: string, profileId?: string) => {
+      setFormError(message);
+      if (profileId) setEditor(value => value ? { ...value, editingProfile: profileId } : value);
+    };
     const draft = editor.draft;
     if (!draft.name.trim()) {
-      toast.error("请填写 API Key 名称");
+      invalid("请填写 API Key 名称");
       return;
     }
     if (
       draft.expires &&
-      draft.expires <=
+      draft.expires <
         new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" })
     ) {
-      toast.error("到期时间必须晚于今天");
+      invalid("到期日期不能早于今天；当天到期的凭证可使用至北京时间 23:59:59。");
       return;
     }
     for (const item of draft.profiles) {
       if (!item.name.trim()) {
-        toast.error("请为每个策略填写名称");
+        invalid("请为每个策略填写名称", item.id);
         return;
       }
       if (item.scope === "tags" && !item.tags.length) {
-        toast.error(`「${item.name}」至少需要选择一个标签`);
+        invalid(`「${item.name}」至少需要选择一个标签`, item.id);
         return;
       }
       if (item.scope === "channels" && !item.channelIds.length) {
-        toast.error(`「${item.name}」至少需要选择一个渠道`);
+        invalid(`「${item.name}」至少需要选择一个渠道`, item.id);
         return;
       }
       if (item.modelMode === "selected" && !item.models.length) {
-        toast.error(`「${item.name}」至少需要选择一个模型`);
+        invalid(`「${item.name}」至少需要选择一个模型`, item.id);
         return;
       }
       if (
         item.requestLimit &&
         (!/^\d+$/.test(item.requestLimit) || !Number.isSafeInteger(Number(item.requestLimit)) || Number(item.requestLimit) <= 0)
       ) {
-        toast.error("请求额度需要填写大于 0 的整数");
+        invalid(`「${item.name}」的请求额度需要填写大于 0 的整数`, item.id);
         return;
       }
       if (
@@ -376,12 +420,12 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
           (mapping) => !mapping.from.trim() || !mapping.to.length,
         )
       ) {
-        toast.error("模型映射需要填写入口名称和至少一个目标模型");
+        invalid(`「${item.name}」的模型映射需要入口名称和至少一个目标模型`, item.id);
         return;
       }
       const aliases = item.mappings.map((mapping) => mapping.from.trim());
       if (new Set(aliases).size !== aliases.length) {
-        toast.error("同一策略内的模型映射入口名称不能重复");
+        invalid(`「${item.name}」的模型映射入口名称不能重复`, item.id);
         return;
       }
       const allowed = permittedModels(item, channels);
@@ -390,7 +434,7 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
           mapping.to.some((model) => !allowed.includes(model)),
         )
       ) {
-        toast.error(`「${item.name}」的映射目标必须属于可访问模型`);
+        invalid(`「${item.name}」的映射目标必须属于可访问模型`, item.id);
         return;
       }
     }
@@ -409,10 +453,10 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
     await runMutation(async () => {
       if (editor.id) {
         await api<{ key: ApiKey }>(`/api/keys/${encodeURIComponent(editor.id)}`, { method: "PATCH", body: JSON.stringify(normalized) });
-        setEditor(null); toast.success("API Key 配置已保存");
+        clearEditor(); toast.success("API Key 配置已保存");
       } else {
         const result = await api<{ key: ApiKey; token: string }>("/api/keys", { method: "POST", body: JSON.stringify(normalized) });
-        setEditor(null); setSecret({ name: result.key.name, value: result.token }); toast.success("API Key 已创建");
+        clearEditor(); setSecret({ name: result.key.name, value: result.token }); toast.success("API Key 已创建");
       }
       await refreshKeys();
     });
@@ -429,18 +473,13 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
 
   return (
     <div className="ak-page">
-      <div className="ak-page-tools">
-        <span>{keys.length} 个访问凭证</span>
-        <Button
-          type="button"
-          variant="primary" className="ak-button ak-primary"
-          onClick={startCreate}
-          disabled={busy}
-        >
-          <Plus size={17} /> 创建 API Key
-        </Button>
-      </div>
       <Card className="ak-panel">
+        <div className="ak-business-toolbar">
+          <div className="ak-status-tabs" role="group" aria-label="筛选凭证状态">
+            {([['all', '全部'], ['active', '已启用'], ['disabled', '已停用'], ['expired', '已过期'], ['revoked', '已撤销']] as const).map(([value, label]) => <Button key={value} type="button" variant="ghost" size="sm" className="ak-status-tab" aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}><span>{label}</span><span className="ak-tab-count">{stateCounts[value].toLocaleString("zh-CN")}</span></Button>)}
+          </div>
+          <Button type="button" variant="primary" size="sm" className="ak-create" onClick={startCreate} disabled={busy}><Plus size={15} />创建 API Key</Button>
+        </div>
         <div className="ak-filterbar">
           <div className="ak-search">
             <Search size={17} />
@@ -451,20 +490,10 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
               onChange={(event) => setSearch(event.target.value)}
             />
           </div>
-          <Select
-            className="ak-filter-select"
-            aria-label="筛选凭证状态"
-            value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
-          >
-            <option value="all">全部状态</option>
-            <option value="active">已启用</option>
-            <option value="disabled">已停用</option>
-            <option value="revoked">已撤销</option>
-          </Select>
-          <span className="ak-result-count">{visible.length} 个凭证</span>
+          <span className="ak-result-count">{filtered ? `${visible.length} / ${keys.length} 个凭证` : `共 ${keys.length} 个凭证`}</span>
+          {filtered && <Button className="ak-reset" size="sm" variant="ghost" onClick={() => { setSearch(""); setStatusFilter("all"); }}><X size={13} />重置</Button>}
         </div>
-        <Table className="ak-key-table">
+        <Table variant="secondary" className="ak-key-table">
           <Table.ScrollContainer>
           <Table.Content aria-label="API Key 访问凭证" className="ak-table">
             <Table.Header>
@@ -474,17 +503,15 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                 <Table.Column id="usage">用量 / 有效期</Table.Column>
                 <Table.Column id="actions" className="ak-actions-head">操作</Table.Column>
             </Table.Header>
-            <Table.Body renderEmptyState={() => <div className="ak-empty"><KeyRound size={30} /><strong>没有匹配的 API Key</strong><p>调整搜索条件，或创建新的应用访问凭证。</p></div>}>
+            <Table.Body renderEmptyState={() => <div className="ak-empty"><span className="ak-empty-icon"><KeyRound size={28} /></span><strong>{filtered ? "没有找到匹配的凭证" : "还没有应用访问凭证"}</strong><p>{filtered ? "调整名称、备注或状态条件，查看其他凭证。" : "为每个应用创建独立凭证，设置授权范围后即可调用网关。"}</p><Button size="sm" variant={filtered ? "secondary" : "primary"} disabled={busy} onClick={() => { if (filtered) { setSearch(""); setStatusFilter("all"); } else startCreate(); }}>{filtered ? "重置筛选" : "创建第一个 API Key"}</Button></div>}>
               {visible.map((key) => {
                 const active = currentProfile(key);
                 const scope = scopedChannels(active, channels);
+                const state = keyState(key);
                 return (
                   <Table.Row id={key.id} key={key.id}>
                     <Table.Cell>
                       <div className="ak-key-cell">
-                        <span className="ak-key-icon">
-                          <KeyRound size={19} />
-                        </span>
                         <div>
                           <strong title={key.note || undefined}>{key.name}</strong>
                           <code>{key.preview}</code>
@@ -492,13 +519,13 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                       </div>
                     </Table.Cell>
                     <Table.Cell>
-                      <Chip size="sm" color={key.status === "active" ? "success" : key.status === "revoked" ? "danger" : "default"}>
-                        {key.status === "active"
+                      <span className={`ak-key-state ak-key-state-${state}`}><i aria-hidden />
+                        {state === "expired" ? "已过期" : key.status === "active"
                           ? "已启用"
                           : key.status === "disabled"
                             ? "已停用"
                             : "已撤销"}
-                      </Chip>
+                      </span>
                     </Table.Cell>
                     <Table.Cell>
                       <div className="ak-scope-cell">
@@ -540,7 +567,7 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                     <Table.Cell>
                       <div className="ak-usage-cell">
                         <strong>{key.used.toLocaleString()} 次请求</strong>
-                        <span>{!key.expires || ['永不过期','never'].includes(key.expires) ? "永不过期" : `${key.expires} 到期`}</span>
+                        <span className={state === "expired" ? "ak-expired" : undefined}>{!key.expires || ['永不过期','never'].includes(key.expires) ? "永不过期" : `${key.expires} 到期`}</span>
                       </div>
                     </Table.Cell>
                     <Table.Cell>
@@ -587,10 +614,11 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
           wide
           title={editor.id ? "编辑 API Key" : "创建 API Key"}
           subtitle="设置名称与渠道权限，即可开始使用。"
-          onClose={() => setEditor(null)}
-          footer={<div className="ak-editor-footer"><Button variant="secondary" type="button" disabled={busy} onClick={() => setEditor(null)}>取消</Button><Button variant="primary" type="submit" form={editorFormId} disabled={busy}>{busy ? "正在保存…" : editor.id ? "保存配置" : "创建 API Key"}</Button></div>}
+          onClose={() => closeEditor()}
+          footer={<div className="ak-editor-footer"><span className={formError ? "ak-form-error" : "ak-footer-hint"} role={formError ? "alert" : undefined}>{formError || (hasEditorChanges ? "有未保存的更改" : "仅当前生效策略参与请求授权")}</span><div><Button variant="secondary" type="button" disabled={busy} onClick={() => closeEditor()}>取消</Button><Button variant="primary" type="submit" form={editorFormId} disabled={busy}>{busy ? "正在保存…" : editor.id ? "保存配置" : "创建 API Key"}</Button></div></div>}
         >
-          <form id={editorFormId} className="ak-editor-form" onSubmit={save}>
+          <form id={editorFormId} className="ak-editor-form" onSubmit={save} aria-busy={busy}>
+            <fieldset disabled={busy} style={{ margin: 0, padding: 0, border: 0, minWidth: 0 }}>
             <div className="ak-editor-layout">
               <div className="ak-editor-fields">
                 <section className="ak-form-section">
@@ -620,7 +648,7 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                           updateDraft({ expires: event.target.value })
                         }
                       />
-                      <small>留空表示永不到期</small>
+                      <small>留空永不过期；所选日期至北京时间 23:59:59 有效。</small>
                     </label>
                   </div>
                   <label className="ak-field">
@@ -749,6 +777,7 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                   )}
                   {profile.scope === "channels" && (
                     <div className="ak-channel-options">
+                      {!channels.length && <p className="ak-field-help">还没有渠道。请先添加上游渠道，再为凭证分配访问权限。</p>}
                       {channels.map((channel) => (
                           <Checkbox className="ak-channel-option" key={channel.id}
                             aria-label={`允许渠道 ${channel.name}`}
@@ -781,9 +810,9 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                       )}
                     </div>
                   )}
-                  <div className="ak-access-summary"><ShieldCheck size={16} /><span><strong>{scopedChannels(profile, channels).length}</strong> 个渠道 · <strong>{eligibleChannels(profile, channels).filter(channel => channel.enabled && !channel.health.autoDisabled && channel.status === "healthy").length}</strong> 个健康可用 · <strong>{permittedModels(profile, channels).length}</strong> 个模型</span></div>
+                  <div className="ak-access-summary"><ShieldCheck size={16} /><span><strong>{scopedChannels(profile, channels).length}</strong> 个授权渠道 · <strong>{eligibleChannels(profile, channels).filter(availableChannel).length}</strong> 个健康可用 · <strong>{permittedModels(profile, channels).length}</strong> 个授权模型</span></div>
                   {!scopedChannels(profile, channels).length && <p className="ak-access-warning">当前条件没有匹配渠道，请选择标签或渠道。</p>}
-                  {scopedChannels(profile, channels).length > 0 && !eligibleChannels(profile, channels).some(channel => channel.enabled && !channel.health.autoDisabled && channel.status === "healthy") && <p className="ak-access-warning">授权范围内暂无健康可用渠道，故障切换也会遵守此范围。</p>}
+                  {scopedChannels(profile, channels).length > 0 && !eligibleChannels(profile, channels).some(availableChannel) && <p className="ak-access-warning">授权范围内暂无健康可用渠道。请检查启用状态、健康状态和上游密钥。</p>}
                   </Tabs.Panel>
                   </Tabs>
                 </section>
@@ -1072,9 +1101,11 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                 </Accordion>
               </div>
             </div>
+            </fieldset>
           </form>
         </Modal>
       )}
+      {editor && discardOpen && <Dialog title="放弃凭证更改？" subtitle="当前修改尚未保存，关闭后需要重新填写。" close={() => { if (!busy) setDiscardOpen(false); }} className="ak-discard-dialog" footer={<div className="ak-discard-actions"><Button variant="secondary" disabled={busy} onClick={() => setDiscardOpen(false)}>继续编辑</Button><Button variant="danger" disabled={busy} onClick={() => closeEditor(true)}>放弃并关闭</Button></div>}><p className="ak-discard-description">凭证信息、授权范围和策略草稿将一并清除。</p></Dialog>}
       {secret && (
         <Modal
           title="请保存 API Key"
@@ -1160,8 +1191,8 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
               <div><dt>策略额度</dt><dd>{requestLimitLabel(currentProfile(preview).requestLimit)}</dd></div>
               {preview.note && <div className="ak-key-detail-note"><dt>备注</dt><dd>{preview.note}</dd></div>}
             </dl>
-            {preview.status !== "active" && (
-              <Alert status="warning" className="ak-preview-warning"><Alert.Content><Alert.Description>此凭证{preview.status === "revoked" ? "已撤销" : "已停用"}，不能发起请求。以下显示保存的策略范围。</Alert.Description></Alert.Content></Alert>
+            {(preview.status !== "active" || apiKeyExpired(preview)) && (
+              <Alert status="warning" className="ak-preview-warning"><Alert.Content><Alert.Description>此凭证{preview.status === "revoked" ? "已撤销" : preview.status === "disabled" ? "已停用" : "已过期"}，不能发起请求。以下显示保存的策略范围。</Alert.Description></Alert.Content></Alert>
             )}
             <ScopePreview
               profile={currentProfile(preview)}

@@ -45,14 +45,14 @@
   .fn-muted,
   .fn-footnote {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.7;
   }
   .fn-environment {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .fn-range {
@@ -79,7 +79,7 @@
     display: flex;
     align-items: center;
     gap: 20px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .fn-chart-legend span {
@@ -110,7 +110,7 @@
     display: grid;
     gap: 16px;
     margin: 0;
-    font-size: 13px;
+    font-size: 14px;
   }
   .fn-routing dl > div {
     display: flex;
@@ -136,7 +136,7 @@
   .fn-event {
     display: flex;
     gap: 12px;
-    font-size: 13px;
+    font-size: 14px;
   }
   .fn-event-symbol {
     width: 28px;
@@ -154,13 +154,13 @@
   }
   .fn-event p {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     margin: 5px 0;
     line-height: 1.7;
   }
   .fn-event small {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
   }
   .fn-analytics-grid {
     display: grid;
@@ -172,13 +172,13 @@
     gap: 18px;
     max-height: 380px;
     overflow: auto;
-    font-size: 13px;
+    font-size: 14px;
     padding: 8px 0;
   }
   .fn-usage span {
     float: right;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
   }
   .fn-usage-bar {
     height: 5px;
@@ -207,7 +207,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    font-size: 13px;
+    font-size: 14px;
   }
   .fn-settings-form {
     display: grid;
@@ -224,7 +224,7 @@
   }
   .fn-connection-title small {
     display: block;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     margin-top: 4px;
   }
@@ -251,7 +251,7 @@
   }
   .fn-runtime span {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
   }
   .fn-code {
     display: flex;
@@ -260,7 +260,7 @@
     padding: 16px;
     background: var(--surface-secondary);
     border-radius: 12px;
-    font-size: 13px;
+    font-size: 14px;
     overflow-wrap: anywhere;
   }
   .fn-code > .button {
@@ -300,13 +300,13 @@
   .fn-attempts p,
   .fn-attempts small {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
   }
   .fn-attempts pre,
   .fn-error-pre {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: 12px;
+    font-size: 13px;
     padding: 16px;
     background: var(--surface-secondary);
     color: var(--danger);
@@ -324,7 +324,7 @@
   }
   .fn-guide p {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
     margin-top: 20px;
   }
   @media (max-width: 950px) {

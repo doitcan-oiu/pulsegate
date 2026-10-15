@@ -1,7 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+// Establish cascade layer order before components load their own stylesheets.
 import "./heroui.css";
+import App from "./App";
 import "./styles.css";
 import "./design-system.css";
 

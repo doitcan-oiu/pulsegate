@@ -114,6 +114,12 @@ async function* completionFrames(source: AsyncGenerator<Record<string, any> | '[
 
 export async function handleGateway(request: Request, context: GatewayContext, store: GatewayStore): Promise<Response> {
   const requestId = crypto.randomUUID(), requestStart = Date.now();
+  // A completed upstream generation must never be repeated because telemetry or
+  // affinity storage is unavailable. Authorization and reservations stay fail-closed.
+  const persist = async (operation: string, action: () => Promise<unknown>): Promise<void> => {
+    try { await action(); }
+    catch { console.error(JSON.stringify({ event: 'gateway_state_write_failed', operation, requestId })); }
+  };
   let attempts = 0, lastCandidate: Candidate | null = null, lastFailure: Failure | null = null;
   let totalInput = 0, totalOutput = 0, lastTtft: number | null = null, latestDuration = 0;
   let original: ChatBody, rawInput = '', streaming = false;
@@ -141,9 +147,9 @@ export async function handleGateway(request: Request, context: GatewayContext, s
   const scope = traceScope || threadScope || '';
   const recordEarlyError = async (status: number, message: string) => {
     const date = new Date();
-    await store.recordLog({ id: requestId, createdAt: date.toISOString(), time: timeLabel(date), model: original.model,
+    await persist('request-log', () => store.recordLog({ id: requestId, createdAt: date.toISOString(), time: timeLabel(date), model: original.model,
       channel: '无可用渠道', channelId: null, apiKeyId: context.key?.id || null, stream: streaming,
-      ttft: 0, duration: seconds(requestStart), tokens: 0, status, result: 'error', attempts: 0, source: context.source, traceId, error: message });
+      ttft: 0, duration: seconds(requestStart), tokens: 0, status, result: 'error', attempts: 0, source: context.source, traceId, error: message }));
   };
   // Authorization describes allowed resources independently of their health or activation state.
   if (!gatewayCandidates(context, original.model, true).length) return errorResponse(403, '当前策略范围内没有支持该模型的授权渠道');
@@ -173,11 +179,11 @@ export async function handleGateway(request: Request, context: GatewayContext, s
       stream: streaming, ttft: lastTtft || 0, duration: seconds(requestStart), tokens: totalInput + totalOutput, status,
       result: success ? candidates.findIndex(c => c.channel.id === lastCandidate?.channel.id) > 0 ? 'failover' : streaming ? (lastTtft || 0) > context.settings.threshold ? 'slow' : 'success' : latestDuration > context.settings.responseThreshold ? 'slow' : 'success' : 'error',
       attempts, source: context.source, traceId, error: error ? redact(error, secrets) : null,
-    }; await store.recordLog(log);
+    }; await persist('request-log', () => store.recordLog(log));
   };
   const remember = async (channel: GatewayChannel, candidateIndex: number) => {
-    if (context.settings.stickyMode === 'prefer') { if (traceScope) await store.setSticky(traceScope, channel.id); if (threadScope) await store.setSticky(threadScope, channel.id); }
-    if (candidateIndex > 0) { const date = new Date(); await store.recordEvent({ id: crypto.randomUUID(), createdAt: date.toISOString(), time: timeLabel(date), title: '已切换备用渠道', description: `${channel.name} 已接管 ${original.model} 请求`, type: 'switch', channelId: channel.id }); }
+    if (context.settings.stickyMode === 'prefer') { if (traceScope) await persist('trace-affinity', () => store.setSticky(traceScope, channel.id)); if (threadScope) await persist('thread-affinity', () => store.setSticky(threadScope, channel.id)); }
+    if (candidateIndex > 0) { const date = new Date(); await persist('failover-event', () => store.recordEvent({ id: crypto.randomUUID(), createdAt: date.toISOString(), time: timeLabel(date), title: '已切换备用渠道', description: `${channel.name} 已接管 ${original.model} 请求`, type: 'switch', channelId: channel.id })); }
   };
   const allowedChannels = context.settings.retryEnabled ? Math.min(candidates.length, 1 + Math.max(0, Math.min(10, context.settings.maxChannelRetries))) : 1;
   for (let candidateIndex = 0; candidateIndex < allowedChannels; candidateIndex++) {
@@ -263,9 +269,9 @@ export async function handleGateway(request: Request, context: GatewayContext, s
       const record = async (result: AttemptRecord['result'], status: number, error: string | null) => {
         if (completed) return; completed = true;
         totalInput += currentUsage.inputTokens; totalOutput += currentUsage.outputTokens; lastTtft = ttft; latestDuration = seconds(attemptStart);
-        await store.recordAttempt({ id: crypto.randomUUID(), requestId, channelId: channel.id, channelName: channel.name, credentialId: credential?.id || null,
+        await persist('attempt', () => store.recordAttempt({ id: crypto.randomUUID(), requestId, channelId: channel.id, channelName: channel.name, credentialId: credential?.id || null,
           model: candidate.model, stream: streaming, startedAt, ttft, duration: latestDuration, status, result,
-          error: error ? redact(error, secrets) : null, ...currentUsage, attempt: attempts });
+          error: error ? redact(error, secrets) : null, ...currentUsage, attempt: attempts }));
       };
       try {
         lastProviderResponse = null;

@@ -37,13 +37,12 @@
     flex: 1;
   }
   .cpp-choice strong {
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.5;
   }
   .cpp-choice small {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.65;
-    opacity: 0.82;
   }
   .cpp-choice .cpp-choice-check {
     margin-left: auto;
@@ -53,11 +52,11 @@
     flex-direction: column;
     gap: 9px;
     margin-top: 20px;
-    font-size: 13px;
+    font-size: 14px;
   }
   .cpp-field small,
   .cpp-helper {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
     color: var(--muted);
   }
@@ -66,7 +65,7 @@
     flex-direction: column;
     gap: 8px;
     margin-top: 18px;
-    font-size: 12px;
+    font-size: 13px;
   }
   .cpp-address > span {
     color: var(--muted);
@@ -79,7 +78,7 @@
     align-items: flex-start;
     gap: 9px;
     margin-top: 16px;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
     color: var(--muted);
   }
@@ -104,10 +103,10 @@
     box-shadow: none;
   }
   .cpp-route-node strong {
-    font-size: 13px;
+    font-size: 14px;
   }
   .cpp-route-node small {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .cpp-route-arrow {
@@ -119,7 +118,7 @@
     align-items: flex-start;
     gap: 10px;
     padding: 16px 0 0;
-    font-size: 12px;
+    font-size: 13px;
   }
   .cpp-preview code {
     overflow-wrap: anywhere;
@@ -158,11 +157,11 @@
   }
   .cpp-limit-summary strong,
   .cpp-protocol-summary strong {
-    font-size: 13px;
+    font-size: 14px;
   }
   .cpp-limit-summary p,
   .cpp-protocol-summary p {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     line-height: 1.7;
     margin: 7px 0 0;
@@ -193,14 +192,14 @@
     flex-wrap: wrap;
   }
   .cpp-endpoint-title > strong {
-    font-size: 13px;
+    font-size: 14px;
     margin-right: 2px;
   }
   .cpp-endpoint-title > button {
     margin-left: auto;
   }
   .cpp-endpoint > small {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
     color: var(--muted);
   }
@@ -213,11 +212,11 @@
     border-radius: var(--radius-lg);
   }
   .cpp-endpoint-preview > span {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .cpp-endpoint-preview code {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.8;
     overflow-wrap: anywhere;
   }
@@ -241,9 +240,8 @@
     font-variant-numeric: tabular-nums;
   }
   .cpp-status-choice span {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.5;
-    opacity: 0.85;
   }
   .cpp-status-choice > svg {
     position: absolute;
@@ -259,7 +257,7 @@
   }
   .cpp-custom-statuses > small {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     width: 100%;
   }
   .cpp-add-status {
@@ -276,7 +274,7 @@
     flex-shrink: 0;
   }
   .cpp-error {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--danger);
     margin: 8px 0 0;
   }
@@ -302,15 +300,15 @@
     right: 11px;
     top: 11px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
   }
   .cpp-policy-step > strong {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.6;
   }
   .cpp-policy-step > small {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
   }
   @media (max-width: 700px) {

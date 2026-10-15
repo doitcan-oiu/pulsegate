@@ -31,6 +31,16 @@ beforeEach(async () => {
 });
 
 describe('admin authentication and encryption', () => {
+  it('rejects oversized UTF-8 log searches before D1 while accepting the exact supported boundaries', async () => {
+    const store = new Store(testEnv);
+    await store.recordLog({ id:'search-limit-fixture',createdAt:new Date().toISOString(),time:'12:00:00',model:'search-model',channel:'search-channel',channelId:null,apiKeyId:null,stream:false,ttft:0,duration:1,tokens:0,status:200,result:'success',attempts:1,source:'api',traceId:null,error:null });
+    for (const query of ['a'.repeat(48),'中'.repeat(16),'😀'.repeat(12)]) {
+      const result = await call('/api/logs?q='+encodeURIComponent(query)); expect(result.response.status).toBe(200); expect(result.json.logs).toEqual([]);
+    }
+    for (const query of ['a'.repeat(49),'中'.repeat(17),'😀'.repeat(13)]) {
+      const result = await call('/api/logs?q='+encodeURIComponent(query)); expect(result.response.status).toBe(400); expect(result.json.error.message).toContain('搜索');
+    }
+  });
   it('requires authentication and denies CSRF from foreign origins',async () => {
     expect((await call('/api/bootstrap','GET',undefined,{ cookie:'' })).response.status).toBe(401);
     expect((await call('/api/channels','POST',{ name:'blocked' },{ origin:'https://evil.example' })).response.status).toBe(403);
@@ -140,6 +150,19 @@ describe('API keys and profiles', () => {
     await call(`/api/keys/${k.key.id}`,'PATCH',{ activeProfile:'b' });
     expect(await store.incrementKeyUsage(k.key.id,'b',1)).toBe(true); expect(await store.incrementKeyUsage(k.key.id,'b',1)).toBe(false);
     const usage = await store.getKey(k.key.id); expect(usage!.used).toBe(4);
+  });
+  it('rolls back the profile reservation when the key total update fails and keeps the quota queue usable', async () => {
+    const created = await newKey({ profiles:[{ id:'quota-rollback',name:'Rollback',requestLimit:'1' }],activeProfile:'quota-rollback' });
+    const store = new Store(testEnv);
+    const profileUsed = async () => (await testEnv.DB.prepare('SELECT used FROM profile_usage WHERE key_id=? AND profile_id=?').bind(created.key.id,'quota-rollback').first<{ used:number }>())!.used;
+    await testEnv.DB.prepare("CREATE TRIGGER reject_key_usage BEFORE UPDATE OF used ON api_keys BEGIN SELECT RAISE(ABORT,'synthetic key usage failure'); END").run();
+    try {
+      await expect(store.incrementKeyUsage(created.key.id,'quota-rollback',1)).rejects.toThrow('State mutation failed');
+      expect(await profileUsed()).toBe(0); expect((await store.getKey(created.key.id))!.used).toBe(0);
+    } finally { await testEnv.DB.prepare('DROP TRIGGER reject_key_usage').run(); }
+    expect(await store.incrementKeyUsage(created.key.id,'quota-rollback',1)).toBe(true);
+    expect(await store.incrementKeyUsage(created.key.id,'quota-rollback',1)).toBe(false);
+    expect(await profileUsed()).toBe(1); expect((await store.getKey(created.key.id))!.used).toBe(1);
   });
   it('renames tags across every profile and blocks deletion for NONE exclusions',async () => {
     await newChannel('Prod',['prod']);

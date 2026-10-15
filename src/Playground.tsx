@@ -2,24 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Alert,
-  Avatar,
-  Card,
-  Chip,
   Disclosure,
   Slider,
   Spinner,
-  Tabs,
 } from "@heroui/react";
 import {
   Check,
+  ChevronDown,
   Copy,
   Download,
   FlaskConical,
   ImagePlus,
-  MessageSquare,
   RotateCcw,
   Send,
   Square,
+  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
@@ -32,7 +29,8 @@ import type {
   MockScenario,
 } from "../shared/types";
 import { api } from "./api";
-import { modelsForProfile } from "./access-policy";
+import { modelsForProfile, usableApiKey } from "./access-policy";
+import { splitSSEFrames } from "./playground-stream";
 import "./playground.css";
 
 type Props = {
@@ -97,8 +95,12 @@ const scenarioNames: Record<MockScenario, string> = {
 };
 const readableError = (error: unknown) =>
   error instanceof Error ? error.message : "请求失败";
+const MAX_MODEL_REQUEST_BYTES = 2 * 1024 * 1024;
+const MAX_PLAYGROUND_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const requestBytes = (value: string) => new TextEncoder().encode(value).byteLength;
+const requestSize = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
 function modelsForKey(channels: GatewayChannel[], key?: GatewayApiKey) {
-  if (!key) return [];
+  if (!key || !usableApiKey(key)) return [];
   const profile = key.profiles.find((item) => item.id === key.activeProfile);
   if (!profile) return [];
   return modelsForProfile(channels, profile);
@@ -117,7 +119,7 @@ export default function Playground({
     initialChannelId || channels.find((channel) => !channel.archived)?.id || "",
   );
   const [keyId, setKeyId] = useState(
-    keys.find((key) => key.status === "active")?.id || "",
+    keys.find((key) => usableApiKey(key))?.id || "",
   );
   const [model, setModel] = useState("");
   const [temperature, setTemperature] = useState(1);
@@ -130,13 +132,16 @@ export default function Playground({
   const [running, setRunning] = useState(false);
   const [fixtureBusy, setFixtureBusy] = useState(false);
   const [curlOpen, setCurlOpen] = useState(false);
+  const [controlsExpanded, setControlsExpanded] = useState(false);
+  const [budgetError, setBudgetError] = useState<string | null>(null);
   const [scenario, setScenario] = useState<MockScenario>("healthy");
   const [delay, setDelay] = useState(50);
   const [httpStatus, setHttpStatus] = useState(503);
   const [failures, setFailures] = useState(1);
   const controller = useRef<AbortController | null>(null);
   const threadId = useRef(crypto.randomUUID());
-  const bottom = useRef<HTMLDivElement>(null);
+  const messageList = useRef<HTMLDivElement>(null);
+  const followOutput = useRef(true);
   const imageInput = useRef<HTMLInputElement>(null);
   const channel = channels.find((item) => item.id === channelId);
   const key = keys.find((item) => item.id === keyId);
@@ -149,7 +154,7 @@ export default function Playground({
           ]),
         ]
       : modelsForKey(channels, key);
-  const modelsSignature = models.join("|");
+  const modelsSignature = JSON.stringify(models);
   useEffect(() => {
     if (initialChannelId) {
       setChannelId(initialChannelId);
@@ -157,16 +162,16 @@ export default function Playground({
     }
   }, [initialChannelId]);
   useEffect(() => {
-    if (!channelId || !channels.some((item) => item.id === channelId))
+    if (!running && (!channelId || !channels.some((item) => item.id === channelId && !item.archived)))
       setChannelId(channels.find((item) => !item.archived)?.id || "");
-  }, [channels, channelId]);
+  }, [channels, channelId, running]);
   useEffect(() => {
-    if (!keyId || !keys.some((item) => item.id === keyId))
-      setKeyId(keys.find((item) => item.status === "active")?.id || "");
-  }, [keys, keyId]);
+    if (!running && (!keyId || !keys.some((item) => item.id === keyId && usableApiKey(item))))
+      setKeyId(keys.find((item) => usableApiKey(item))?.id || "");
+  }, [keys, keyId, running]);
   useEffect(() => {
-    if (!models.includes(model)) setModel(models[0] || "");
-  }, [modelsSignature, model]);
+    if (!running && !models.includes(model)) setModel(models[0] || "");
+  }, [modelsSignature, model, running]);
   useEffect(() => {
     if (channel?.config.protocol === "mock") {
       setScenario(channel.config.mock.scenario);
@@ -182,7 +187,8 @@ export default function Playground({
     channel?.config.mock.failuresBeforeSuccess,
   ]);
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (followOutput.current && messageList.current)
+      messageList.current.scrollTop = messageList.current.scrollHeight;
   }, [messages]);
   useEffect(() => () => controller.current?.abort(), []);
   const editMessage = (id: string, update: Partial<Message>) =>
@@ -231,8 +237,8 @@ export default function Playground({
     }
   }
   async function send(history?: Message[]) {
-    if (running) return;
-    if (!model || (mode === "channel" ? !channelId : !keyId)) {
+    if (running || controller.current) return;
+    if (!model || !models.includes(model) || (mode === "channel" ? !channel || channel.archived : !key || !usableApiKey(key))) {
       toast.error(
         mode === "channel"
           ? "请选择渠道和模型"
@@ -252,9 +258,24 @@ export default function Playground({
     };
     const historyToSend = history || [...messages, user];
     if (!history && !user.content && !user.image) return;
+    const request = requestBody(historyToSend);
+    const modelBytes = requestBytes(JSON.stringify(request));
+    const payload = JSON.stringify({
+      mode,
+      channelId: mode === "channel" ? channelId : undefined,
+      keyId: mode === "gateway" ? keyId : undefined,
+      request,
+    });
+    if (modelBytes > MAX_MODEL_REQUEST_BYTES || requestBytes(payload) > MAX_PLAYGROUND_PAYLOAD_BYTES) {
+      setBudgetError(`当前会话请求为 ${requestSize(modelBytes)}，超过单次 2 MiB 上限。历史回复、系统提示和图片编码均计入大小；请开启新会话或缩小图片后发送，待发内容会保留。`);
+      return;
+    }
+    setBudgetError(null);
     const assistantId = crypto.randomUUID();
     const abort = new AbortController();
     controller.current = abort;
+    followOutput.current = true;
+    setControlsExpanded(false);
     setMessages([
       ...historyToSend,
       { id: assistantId, role: "assistant", content: "", pending: true },
@@ -308,8 +329,8 @@ export default function Playground({
       }
       if (payload.usage)
         usage = {
-          input: payload.usage.prompt_tokens || 0,
-          output: payload.usage.completion_tokens || 0,
+          input: Math.max(usage?.input ?? 0, payload.usage.prompt_tokens ?? 0),
+          output: Math.max(usage?.output ?? 0, payload.usage.completion_tokens ?? 0),
         };
       editMessage(assistantId, {
         content,
@@ -326,17 +347,21 @@ export default function Playground({
           "Content-Type": "application/json",
           "X-Thread-Id": threadId.current,
         },
-        body: JSON.stringify({
-          mode,
-          channelId: mode === "channel" ? channelId : undefined,
-          keyId: mode === "gateway" ? keyId : undefined,
-          request: requestBody(historyToSend),
-        }),
+        body: payload,
         signal: abort.signal,
       });
       requestId = response.headers.get("x-pulsegate-request-id");
       if (requestId) editMessage(assistantId, { requestId });
       if (!response.ok) {
+        if (response.status === 413) {
+          setMessages(messages);
+          if (!history) {
+            setInput(user.content);
+            setImage(user.image ?? null);
+          }
+          setBudgetError("请求内容超过服务端大小上限，待发内容已保留。请开启新会话或缩小图片后重试。");
+          return;
+        }
         const data = (await response.json().catch(() => ({}))) as SSEPayload;
         const error = data.error;
         throw new Error(
@@ -358,7 +383,7 @@ export default function Playground({
         const consume = (frame: string) => {
           let event = "message";
           const data: string[] = [];
-          for (const line of frame.split(/\r?\n/)) {
+          for (const line of frame.split(/\r\n|\r|\n/)) {
             if (line.startsWith("event:")) event = line.slice(6).trim();
             if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
           }
@@ -387,22 +412,19 @@ export default function Playground({
           while (!finished) {
             const chunk = await reader.read();
             buffer += decoder.decode(chunk.value, { stream: !chunk.done });
-            let boundary: RegExpExecArray | null;
-            while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
-              consume(buffer.slice(0, boundary.index));
-              buffer = buffer.slice(boundary.index + boundary[0].length);
+            const parsed = splitSSEFrames(buffer, chunk.done);
+            buffer = parsed.remainder;
+            for (const frame of parsed.frames) {
+              consume(frame);
               if (finished) break;
             }
-            if (chunk.done) {
-              if (buffer.trim()) consume(buffer);
-              break;
-            }
+            if (chunk.done) break;
           }
         } finally {
           await reader.cancel().catch(() => undefined);
         }
-        if (!finished) throw new Error("流式响应提前结束，未收到完成标记");
       }
+      if (abort.signal.aborted) throw new DOMException("Request cancelled", "AbortError");
       if (!content && !reasoning && !tools.size)
         throw new Error("上游返回了空响应");
       editMessage(assistantId, { pending: false });
@@ -417,7 +439,8 @@ export default function Playground({
       setRunning(false);
       controller.current = null;
       if (requestId) void loadTrace(requestId, assistantId);
-      onRefresh?.();
+      try { await onRefresh?.(); }
+      catch { toast.error("请求已结束，状态刷新失败。请手动刷新控制台。"); }
     }
   }
   function retry() {
@@ -425,6 +448,19 @@ export default function Playground({
       .map((message) => message.role)
       .lastIndexOf("user");
     if (lastUser >= 0) void send(messages.slice(0, lastUser + 1));
+  }
+  function newConversation() {
+    if (budgetError && !input.trim() && !image) {
+      const lastUser = [...messages].reverse().find(message => message.role === "user");
+      if (lastUser) {
+        setInput(lastUser.content);
+        setImage(lastUser.image ?? null);
+      }
+    }
+    setMessages([]);
+    setBudgetError(null);
+    threadId.current = crypto.randomUUID();
+    followOutput.current = true;
   }
   async function attach(file?: File) {
     if (!file) return;
@@ -441,7 +477,7 @@ export default function Playground({
       return;
     }
     const reader = new FileReader();
-    reader.onload = () => setImage(String(reader.result));
+    reader.onload = () => { setImage(String(reader.result)); setBudgetError(null); };
     reader.onerror = () => toast.error("图片读取失败");
     reader.readAsDataURL(file);
   }
@@ -488,160 +524,34 @@ export default function Playground({
       setFixtureBusy(false);
     }
   }
-  const curl = `curl '${window.location.origin}/v1/chat/completions' \\\n  -H 'Authorization: Bearer $PULSEGATE_API_KEY' \\\n  -H 'Content-Type: application/json' \\\n  --data '${JSON.stringify(requestBody(messages.filter((message) => message.role === "user").slice(-1))).replace(/'/g, "'\\''")}'${stream ? " \\\n  --no-buffer" : ""}`;
+  const curl = curlOpen ? `curl '${window.location.origin}/v1/chat/completions' \\\n  -H 'Authorization: Bearer $PULSEGATE_API_KEY' \\\n  -H 'Content-Type: application/json' \\\n  --data '${JSON.stringify(requestBody(messages.filter((message) => message.role === "user").slice(-1))).replace(/'/g, "'\\''")}'${stream ? " \\\n  --no-buffer" : ""}` : "";
   return (
-    <div className="pg-layout">
-      <Card className="pg-controls">
-        <header>
-          <span className="pg-eyebrow">PLAYGROUND</span>
-          <h3>测试场</h3>
-          <p>验证模型响应、首字延迟与渠道切换。</p>
-        </header>
-        <div className="pg-control-body">
-          <span className="pg-label">测试模式</span>
-          <Tabs
-            className="pg-segment"
-            selectedKey={mode}
-            onSelectionChange={(value) =>
-              setMode(String(value) as "channel" | "gateway")
-            }
-            disabledKeys={running ? ["channel", "gateway"] : []}
-          >
-            <Tabs.List aria-label="测试模式">
-              <Tabs.Tab id="channel">
-                渠道直测
-                <Tabs.Indicator />
-              </Tabs.Tab>
-              <Tabs.Tab id="gateway">
-                模型网关
-                <Tabs.Indicator />
-              </Tabs.Tab>
-            </Tabs.List>
-            <Tabs.Panel id="channel" className="pg-mode-description">
-              诊断指定上游的响应质量
-            </Tabs.Panel>
-            <Tabs.Panel id="gateway" className="pg-mode-description">
-              验证当前 Key 的实际路由策略
-            </Tabs.Panel>
-          </Tabs>
-          {mode === "channel" ? (
-            <div className="pg-field">
-              <span>渠道</span>
-              <Select
-                disabled={running}
-                aria-label="渠道"
-                value={channelId}
-                onChange={(e) => setChannelId(e.target.value)}
-              >
-                <option value="">请选择渠道</option>
-                {channels
-                  .filter((item) => !item.archived)
-                  .map((item) => (
-                    <option value={item.id} key={item.id}>
-                      {item.name}
-                      {!item.enabled ? "（已停用）" : ""}
-                    </option>
-                  ))}
-              </Select>
-              <small>直测指定渠道，用于诊断上游；不会跨渠道重试。</small>
-            </div>
-          ) : (
-            <div className="pg-field">
-              <span>网关 API Key</span>
-              <Select
-                disabled={running}
-                aria-label="网关 API Key"
-                value={keyId}
-                onChange={(e) => setKeyId(e.target.value)}
-              >
-                <option value="">请选择 API Key</option>
-                {keys
-                  .filter((item) => item.status === "active")
-                  .map((item) => (
-                    <option value={item.id} key={item.id}>
-                      {item.name} · {item.preview}
-                    </option>
-                  ))}
-              </Select>
-              <small>使用此 Key 的实际标签权限、模型白名单与映射。</small>
-            </div>
-          )}
-          <div className="pg-field">
-            <span>模型</span>
-            <Select
-              disabled={running}
-              aria-label="模型"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-            >
-              <option value="">
-                {models.length ? "请选择模型" : "暂无可用模型"}
-              </option>
-              {models.map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </Select>
-            <small>{models.length} 个模型可用</small>
-          </div>
-          <div className="pg-field">
-            <span>
-              温度 <b>{temperature.toFixed(1)}</b>
-            </span>
-            <Slider
-              aria-label="温度"
-              minValue={0}
-              maxValue={2}
-              step={0.1}
-              value={temperature}
-              isDisabled={running}
-              onChange={(value) =>
-                setTemperature(Array.isArray(value) ? value[0] : value)
-              }
-            >
-              <Slider.Track>
-                <Slider.Fill />
-                <Slider.Thumb />
-              </Slider.Track>
-            </Slider>
-            <div className="pg-range-values">
-              <small>0</small>
-              <small>1</small>
-              <small>2</small>
-            </div>
-          </div>
-          <div className="pg-field">
-            <span>最大 token 数</span>
-            <Input
-              disabled={running}
-              type="number"
-              min="1"
-              max="1000000"
-              aria-label="最大 token 数"
-              value={maxTokens}
-              onChange={(e) => setMaxTokens(Number(e.target.value))}
-            />
-          </div>
-          <div className="pg-field">
-            <span>系统提示</span>
-            <TextArea
-              disabled={running}
-              aria-label="系统提示"
-              value={system}
-              rows={4}
-              onChange={(e) => setSystem(e.target.value)}
-            />
-          </div>
-          <div className="pg-stream">
-            <span>
-              流式响应 <small>SSE</small>
-            </span>
-            <Switch
-              aria-label="流式响应"
-              disabled={running}
-              checked={stream}
-              onChange={(e) => setStream(e.target.checked)}
-            />
-          </div>
+    <div className={`pg-layout${controlsExpanded ? " pg-controls-expanded" : ""}`}>
+      <div className="pg-requestbar">
+        <div className="pg-route-selects">
+          <Select aria-label="测试模式" value={mode} disabled={running} onChange={event => setMode(event.target.value as "channel" | "gateway")}>
+            <option value="gateway">网关路由</option><option value="channel">渠道直测</option>
+          </Select>
+          {mode === "channel" ? <Select aria-label="渠道" value={channelId} disabled={running} onChange={event => setChannelId(event.target.value)}>
+            <option value="">选择渠道</option>{channels.filter(item => !item.archived).map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
+          </Select> : <Select aria-label="网关 API Key" value={keyId} disabled={running} onChange={event => setKeyId(event.target.value)}>
+            <option value="">选择 API Key</option>{keys.filter(item => usableApiKey(item)).map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
+          </Select>}
+          <Select aria-label="模型" value={model} disabled={running} onChange={event => setModel(event.target.value)}>
+            <option value="">{models.length ? "选择模型" : "暂无模型"}</option>{models.map(item => <option key={item}>{item}</option>)}
+          </Select>
+        </div>
+        <Button className="pg-control-toggle" variant="tertiary" size="sm" aria-label={controlsExpanded ? "收起请求参数" : "展开请求参数"} aria-expanded={controlsExpanded} aria-controls="pg-control-body" onClick={() => setControlsExpanded(old => !old)}><SlidersHorizontal size={15} /><span>参数</span><ChevronDown size={13} /></Button>
+      </div>
+      {mode === "channel" && channel && ["anthropic", "gemini"].includes(channel.config.protocol) && <div className="pg-protocol-warning" role="note">当前测试场发送 OpenAI Chat Completions 请求。{channel.config.protocol === "anthropic" ? "Anthropic" : "Gemini"} 原生接口请使用对应客户端；此处仅适用于兼容入口。</div>}
+      <div className="pg-workspace">
+        <aside className="pg-controls" id="pg-control-body" aria-label="请求参数">
+          <div className="pg-control-heading">请求参数</div>
+          <div className="pg-control-body">
+            <div className="pg-field"><span>温度 <b>{temperature.toFixed(1)}</b></span><Slider aria-label="温度" minValue={0} maxValue={2} step={0.1} value={temperature} isDisabled={running} onChange={value => setTemperature(Array.isArray(value) ? value[0] : value)}><Slider.Track><Slider.Fill /><Slider.Thumb /></Slider.Track></Slider><div className="pg-range-values"><small>0</small><small>2</small></div></div>
+            <div className="pg-field"><span>最大输出 Tokens</span><Input disabled={running} type="number" min="1" max="1000000" aria-label="最大 token 数" value={maxTokens} onChange={event => setMaxTokens(Number(event.target.value))} /></div>
+            <div className="pg-stream"><span>流式输出 <small>SSE</small></span><Switch aria-label="流式响应" disabled={running} checked={stream} onChange={event => setStream(event.target.checked)} /></div>
+            <div className="pg-field"><span>系统提示</span><TextArea disabled={running} aria-label="系统提示" value={system} rows={5} onChange={event => setSystem(event.target.value)} /></div>
           {devMode && (
             <Collapsible
               className="pg-fixture"
@@ -759,91 +669,21 @@ export default function Playground({
               )}
             </Collapsible>
           )}
-        </div>
-        <footer>
-          <Button
-            className="pg-outline"
-            variant="secondary"
-            onClick={retry}
-            disabled={
-              running || !messages.some((message) => message.role === "user")
-            }
-          >
-            <RotateCcw size={14} />
-            重试最后一条
-          </Button>
-          <Button
-            className="pg-outline"
-            variant="secondary"
-            disabled={running || !messages.length}
-            onClick={() => {
-              setMessages([]);
-              threadId.current = crypto.randomUUID();
-            }}
-          >
-            <Trash2 size={14} />
-            清除聊天
-          </Button>
-          <Button
-            className="pg-outline"
-            variant="secondary"
-            onClick={() => setCurlOpen(true)}
-          >
-            <Download size={14} />
-            导出 cURL
-          </Button>
-        </footer>
-      </Card>
-      <Card className="pg-chat">
-        <div className="pg-chat-head">
-          <Chip size="sm" color="accent" className="pg-chat-model">
-            <Chip.Label>
-              {mode === "channel" ? "渠道直测" : "网关路由"}
-              {model ? ` / ${model}` : ""}
-            </Chip.Label>
-          </Chip>
-          <span>
-            {running ? (
-              <>
-                <Spinner size="sm" />
-                请求进行中
-              </>
-            ) : (
-              "准备就绪"
-            )}
-          </span>
-        </div>
-        <div className="pg-messages">
-          {!messages.length && (
-            <div className="pg-welcome">
-              <div>
-                <MessageSquare size={31} />
-              </div>
-              <h3>从一次真实请求开始</h3>
-              <p>
-                选择渠道或网关 API Key，在下方输入消息。
-                <br />
-                请求结束后可查看每次尝试、首字延迟与切换路径。
-              </p>
-              <div>
-                <Button
-                  onClick={() => setInput("你好，请简短介绍一下你自己。")}
-                >
-                  测试简短响应
-                </Button>
-                <Button
-                  onClick={() => setInput("请用三个要点解释 SSE 流式输出。")}
-                >
-                  测试流式输出
-                </Button>
-              </div>
+          </div>
+        </aside>
+        <section className="pg-chat" aria-label="响应与对话">
+          <header className="pg-chat-head">
+            <code><b>POST</b> /v1/chat/completions</code>
+            <div className="pg-chat-tools"><span>{running ? <><Spinner size="sm" />处理中</> : messages.length ? `${messages.filter(message => message.role === "user").length} 次对话` : ""}</span>
+              <Button type="button" size="sm" variant="tertiary" isIconOnly title="重试最后一条" aria-label="重试最后一条" disabled={running || !messages.some(message => message.role === "user")} onClick={retry}><RotateCcw size={15} /></Button>
+              <Button type="button" size="sm" variant="tertiary" isIconOnly title="新会话，保留输入草稿" aria-label="开启新会话" disabled={running || !messages.length} onClick={newConversation}><Trash2 size={15} /></Button>
+              <Button type="button" size="sm" variant="tertiary" isIconOnly title="导出 cURL" aria-label="导出 cURL" onClick={() => setCurlOpen(true)}><Download size={15} /></Button>
             </div>
-          )}
-          {messages.map((message) => (
-            <MessageView key={message.id} message={message} />
-          ))}
-          <div ref={bottom} />
-        </div>
+          </header>
+          <div className="pg-messages" ref={messageList} role="log" aria-label="测试对话" onScroll={event => { const node = event.currentTarget; followOutput.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96; }}>
+            {!messages.length && <div className="pg-welcome"><h3>发送请求</h3><p>选择模型，在下方输入消息。</p><div><Button variant="tertiary" size="sm" onClick={() => setInput("你好，请简短介绍一下你自己。")}>简短问答</Button><Button variant="tertiary" size="sm" onClick={() => setInput("请用三个要点解释 SSE 流式输出。")}>流式输出</Button></div></div>}
+            {messages.map(message => <MessageView key={message.id} message={message} />)}
+          </div>
         <form
           className="pg-composer"
           onSubmit={(e) => {
@@ -851,13 +691,14 @@ export default function Playground({
             void send();
           }}
         >
+          {budgetError && <div className="pg-budget-error" role="alert"><p>{budgetError}</p>{messages.length > 0 && <Button type="button" size="sm" variant="secondary" onClick={newConversation}>开启新会话，保留待发内容</Button>}</div>}
           {image && (
             <div className="pg-attachment">
               <img src={image} alt="待发送附件" />
               <span>图片已附加</span>
               <Button
                 type="button"
-                onClick={() => setImage(null)}
+                onClick={() => { setImage(null); setBudgetError(null); }}
                 variant="tertiary"
                 size="sm"
                 isIconOnly
@@ -871,7 +712,7 @@ export default function Playground({
             aria-label="消息"
             placeholder="输入消息… Enter 发送，Shift + Enter 换行"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => { setInput(e.target.value); setBudgetError(null); }}
             disabled={running}
             rows={2}
             onKeyDown={(e) => {
@@ -909,7 +750,7 @@ export default function Playground({
                 e.target.value = "";
               }}
             />
-            <small>图片内容只发送给所选上游</small>
+            <small>单图 ≤ 1 MiB · 会话请求 ≤ 2 MiB</small>
             {running ? (
               <Button
                 className="pg-send pg-stop"
@@ -935,7 +776,8 @@ export default function Playground({
             )}
           </div>
         </form>
-      </Card>
+        </section>
+      </div>
       {curlOpen && (
         <Dialog title="导出网关 cURL" close={() => setCurlOpen(false)}>
           <p className="pg-curl-hint">
@@ -966,15 +808,7 @@ function MessageView({ message }: { message: Message }) {
   const [copied, setCopied] = useState(false);
   return (
     <article className={`pg-message pg-${message.role}`}>
-      <Avatar
-        className="pg-avatar"
-        size="sm"
-        color={message.role === "user" ? "default" : "accent"}
-      >
-        <Avatar.Fallback>
-          {message.role === "user" ? "你" : "AI"}
-        </Avatar.Fallback>
-      </Avatar>
+
       <div className="pg-message-body">
         <header>
           <strong>{message.role === "user" ? "你" : "模型"}</strong>

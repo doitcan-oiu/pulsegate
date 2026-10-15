@@ -1,3 +1,5 @@
+import { StreamFailure } from './sse';
+
 export type RelayUsage = { inputTokens: number; outputTokens: number };
 export type RelayFrame = { bytes: Uint8Array; usage: RelayUsage; meaningful: boolean; done: boolean; error?: string };
 type ObjectValue = Record<string, any>;
@@ -157,10 +159,12 @@ function observeFrame(bytes: Uint8Array, clientModel: string, rewriteModel: bool
  */
 export async function* relayStream(body: ReadableStream<Uint8Array>, clientModel: string, rewriteModel: boolean, signal: AbortSignal): AsyncGenerator<RelayFrame> {
   const reader = body.getReader(), state = initialUsage(); let parts: Uint8Array[] = [], lineLength = 0, pendingCR = false, blankCR = false;
+  let frameSize = 0;
+  const countByte = () => { if (++frameSize > 1024 * 1024) throw new StreamFailure('Upstream SSE event exceeded 1 MiB'); };
   let aborted: Promise<void> | undefined;
   const abort = () => { aborted = reader.cancel(signal.reason).catch(() => {}); };
   signal.addEventListener('abort', abort, { once: true });
-  const frame = () => { const result = observeFrame(concatenate(parts), clientModel, rewriteModel, state); parts = []; return result; };
+  const frame = () => { const result = observeFrame(concatenate(parts), clientModel, rewriteModel, state); parts = []; frameSize = 0; return result; };
   try {
     while (true) {
       if (signal.aborted) throw new DOMException('Request cancelled', 'AbortError');
@@ -174,12 +178,14 @@ export async function* relayStream(body: ReadableStream<Uint8Array>, clientModel
         if (pendingCR) {
           pendingCR = false; lineLength = 0;
           if (byte === 10) {
+            countByte();
             parts.push(value.subarray(offset, i + 1)); offset = i + 1;
             if (blankCR) yield frame();
             continue;
           }
           if (blankCR) yield frame();
         }
+        countByte();
         if (byte === 13) { parts.push(value.subarray(offset, i + 1)); offset = i + 1; pendingCR = true; blankCR = lineLength === 0; }
         else if (byte === 10) {
           if (lineLength === 0) { parts.push(value.subarray(offset, i + 1)); offset = i + 1; yield frame(); }

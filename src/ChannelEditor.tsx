@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api";
+import { changedChannelConfig } from "./channel-config-patch";
 import ProviderIcon from "./ProviderIcon";
 import {
   Button,
@@ -267,6 +268,9 @@ export default function ChannelEditor({
   const [relayUrl, setRelayUrl] = useState(channel?.config.relayUrl ?? "");
   const [slug, setSlug] = useState(channel?.config.customProviderSlug ?? "");
   const [busy, setBusy] = useState(false);
+  const savePending = useRef(false);
+  const configBaseline = useRef(structuredClone(channel?.config ?? defaultChannelConfig));
+  const [discardOpen, setDiscardOpen] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [discoveredModels, setDiscoveredModels] = useState<string[] | null>(
@@ -320,6 +324,16 @@ export default function ChannelEditor({
   const allFilteredSelected =
     selectableDiscovered.length > 0 &&
     selectableDiscovered.every((model) => selectedDiscovered.includes(model));
+  const draftSignature = JSON.stringify({ name, provider, protocol, endpoint, models, defaultModel, selectedTags, priority, weight, enabled, secrets, connection, relayUrl, slug, balanceEnabled, balanceBackend, accountDrafts, modelInput, batchInput, tagInput });
+  const initialDraftSignature = useRef(draftSignature);
+  const hasChanges = draftSignature !== initialDraftSignature.current;
+
+  useEffect(() => {
+    if (!hasChanges) return;
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [hasChanges]);
 
   useEffect(() => {
     const request = discoveryRequest.current;
@@ -338,16 +352,17 @@ export default function ChannelEditor({
     };
   }, [endpoint, protocol, connection, relayUrl, slug, secrets]);
 
-  function closeEditor() {
-    if (busy) return;
+  function closeEditor(force = false) {
+    if (busy || savePending.current) return;
+    if (hasChanges && !force) { setDiscardOpen(true); return; }
+    setDiscardOpen(false);
     discoveryRequest.current.sequence += 1;
     discoveryRequest.current.controller?.abort();
     close();
   }
 
   function connectionConfig() {
-    return {
-      ...(channel?.config ?? defaultChannelConfig),
+    return changedChannelConfig({
       protocol,
       integration: simulated
         ? (channel?.config.integration ?? "native")
@@ -370,7 +385,7 @@ export default function ChannelEditor({
         connection === "ai-gateway"
           ? slug.trim()
           : (channel?.config.customProviderSlug ?? ""),
-    };
+    }, configBaseline.current);
   }
 
   function updateAccount(patch: Partial<AccountDraft>) {
@@ -590,10 +605,14 @@ export default function ChannelEditor({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || savePending.current) return;
     setAttempted(true);
     if (!name.trim() || !provider.trim()) {
       toast.error("请填写渠道名称和服务商显示名称");
+      return;
+    }
+    if (modelInput.trim() || (batchOpen && batchInput.trim()) || tagInput.trim()) {
+      toast.error("还有未添加的模型或标签，请先点击添加，或清空对应输入");
       return;
     }
     if (!models.length) {
@@ -715,6 +734,7 @@ export default function ChannelEditor({
         : username.trim() && password
           ? { username: username.trim(), password }
           : undefined;
+    savePending.current = true;
     setBusy(true);
     try {
       await api(channel ? `/api/channels/${channel.id}` : "/api/channels", {
@@ -749,27 +769,29 @@ export default function ChannelEditor({
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "渠道保存失败");
     } finally {
+      savePending.current = false;
       setBusy(false);
     }
   }
 
   return (
+    <>
     <Dialog
       title={channel ? "编辑渠道" : "添加渠道"}
       subtitle={
         channel ? "管理上游连接、模型和调度设置" : "连接一个新的 AI 模型服务商"
       }
-      close={closeEditor}
+      close={() => closeEditor()}
       wide
       className="ce-dialog"
       footer={
         <div className="ce-footer">
           <span>
             <ShieldCheck size={15} />
-            上游密钥加密保存
+            {hasChanges ? "有未保存的更改" : "上游密钥加密保存"}
           </span>
           <div>
-            <Button type="button" onClick={closeEditor} disabled={busy}>
+            <Button type="button" onClick={() => closeEditor()} disabled={busy}>
               取消
             </Button>
             <Button
@@ -836,8 +858,8 @@ export default function ChannelEditor({
 
         <div className="ce-config">
           <Section
-            title="连接服务"
-            description="填写连接地址和认证信息"
+            title="基本信息与连接"
+            description="定义渠道名称，填写上游服务地址和认证信息"
             icon={<Globe size={16} />}
             action={
               <div className="ce-format">
@@ -914,7 +936,7 @@ export default function ChannelEditor({
               </small>
             </label>
             {!simulated && credentialCount + enteredKeys.length === 0 && (
-              <Notice>暂无密钥。可先关闭「启用渠道」，稍后补充。</Notice>
+              <Notice>暂无上游密钥，此渠道暂时无法接收真实请求。可先关闭「启用渠道」，稍后在密钥管理中补充。</Notice>
             )}
           </Section>
 
@@ -1623,5 +1645,7 @@ export default function ChannelEditor({
         </div>
       </form>
     </Dialog>
+    {discardOpen && <Dialog title="放弃渠道更改？" subtitle="当前修改尚未保存，关闭后需要重新填写。" close={() => setDiscardOpen(false)} className="ce-discard-dialog" footer={<div className="ce-discard-actions"><Button variant="secondary" onClick={() => setDiscardOpen(false)}>继续编辑</Button><Button variant="danger" onClick={() => closeEditor(true)}>放弃并关闭</Button></div>}><p className="ce-discard-description">渠道连接、模型和凭据草稿将一并清除。</p></Dialog>}
+    </>
   );
 }

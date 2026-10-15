@@ -58,7 +58,7 @@ function nativeEvents(): Event[] {
   ];
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('public relay preserves the incoming protocol and provider payloads', () => {
   it.each((['anthropic', 'openai'] as const).flatMap(incoming => (['openai', 'anthropic', 'gemini'] as const).map(configured => ({ incoming, configured }))))('keeps $incoming path, body and JSON response through a $configured channel', async ({ incoming, configured }) => {
@@ -310,6 +310,24 @@ describe('public relay preserves the incoming protocol and provider payloads', (
 });
 
 describe('relay byte scanner boundaries', () => {
+  it('cancels an oversized unterminated frame before reading the complete upstream body', async () => {
+    let pulls = 0, cancelled = false;
+    const chunk = encoder.encode('x'.repeat(16 * 1024));
+    const source = new ReadableStream<Uint8Array>({ pull(output) { pulls++; if (pulls <= 128) output.enqueue(chunk); else output.close(); }, cancel() { cancelled = true; } }, { highWaterMark: 0 });
+    const iterator = relayStream(source, clientModel, false, new AbortController().signal);
+    await expect(iterator.next().then(item => item.done)).rejects.toThrow('SSE event exceeded 1 MiB');
+    expect(cancelled).toBe(true); expect(pulls).toBeLessThan(128);
+  });
+  it('bounds frames after the first token without limiting a chunk containing many small valid frames', async () => {
+    const first = frame(nativeEvents()[2]);
+    const large = encoder.encode('data: ' + 'x'.repeat(1024 * 1024) + '\n\n');
+    const iterator = relayStream(new ReadableStream<Uint8Array>({ start(output) { output.enqueue(first); output.enqueue(large); output.close(); } }), clientModel, false, new AbortController().signal);
+    expect((await iterator.next()).value).toMatchObject({ meaningful: true });
+    await expect(iterator.next().then(item => item.done)).rejects.toThrow('SSE event exceeded 1 MiB');
+    const raw = ('data: ' + 'x'.repeat(16 * 1024) + '\n\n').repeat(70); let total = 0;
+    for await (const item of relayStream(new Response(raw).body!, clientModel, false, new AbortController().signal)) total += item.bytes.byteLength;
+    expect(total).toBe(encoder.encode(raw).byteLength);
+  });
   it('observes opaque heartbeat and control events without counting them as output or changing their bytes', async () => {
     const names = ['ping', 'message_start', 'message_delta', 'message_stop', 'error', 'vendor_metadata', 'vendor_signature', 'vendor_status', 'vendor_output'];
     const raw = names.map(name => `event: ${name}\r\ndata: Opaque ${name} value\r\n\r\n`).join('');
@@ -335,5 +353,34 @@ describe('relay byte scanner boundaries', () => {
     const frames = [];
     for await (const item of relayStream(new Response(raw).body!, clientModel, true, new AbortController().signal)) frames.push(new TextDecoder().decode(item.bytes));
     expect(frames.join('')).toBe(': header\r\nid: 1\r\ndata: {"model":"client-alias","nested":{"model":"nested-model"},"future":null}\r\n: between data lines\r\nretry: 9\r\nevent: custom_event\r\n\r\n');
+  });
+});
+
+describe('completed responses survive ancillary persistence failures', () => {
+  it.each(['recordAttempt', 'recordLog', 'setSticky'] as const)('does not regenerate a JSON response when %s fails', async operation => {
+    const { context, store, logs } = setup(); context.settings.retryEnabled = true; context.settings.maxSameChannelRetries = 1;
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    store[operation] = vi.fn(async () => { throw new Error('Storage failed: ' + upstreamSecret); });
+    const fetcher = vi.fn(async () => Response.json(nativeMessage())); vi.stubGlobal('fetch', fetcher);
+    const response = await dispatch({ model: clientModel }, context, store);
+    expect(response.status).toBe(200); expect((await response.json() as any).content[0].text).toBe('Answer'); expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(diagnostic).toHaveBeenCalled(); expect(JSON.stringify(diagnostic.mock.calls)).not.toContain(upstreamSecret);
+    if (operation === 'recordAttempt') expect(logs[0].tokens).toBe(17);
+  });
+  it.each(['recordAttempt', 'recordLog', 'setSticky'] as const)('keeps a successful SSE response intact when %s fails', async operation => {
+    const { context, store } = setup(); context.settings.retryEnabled = true; context.settings.maxSameChannelRetries = 1;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    store[operation] = vi.fn(async () => { throw new Error('Storage unavailable'); });
+    const fetcher = vi.fn(async () => streaming(nativeEvents())); vi.stubGlobal('fetch', fetcher);
+    const response = await dispatch({ model: clientModel, stream: true }, context, store);
+    expect(response.status).toBe(200); expect((await readEvents(response)).at(-1)?.event).toBe('message_stop'); expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('returns the successful backup response even when the failover event cannot be saved', async () => {
+    const { context, store } = setup([channel(), channel('backup')]); context.settings.retryEnabled = true; context.settings.maxSameChannelRetries = 0; context.settings.retryDelayMs = 100;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    store.recordEvent = vi.fn(async () => { throw new Error('Event storage unavailable'); });
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ error: 'busy' }, { status: 503 })).mockImplementation(async () => Response.json(nativeMessage())); vi.stubGlobal('fetch', fetcher);
+    const response = await dispatch({ model: clientModel }, context, store);
+    expect(response.status).toBe(200); expect((await response.json() as any).content[0].text).toBe('Answer'); expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

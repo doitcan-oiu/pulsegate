@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   Archive,
@@ -11,23 +11,22 @@ import {
   Columns3,
   FileUp,
   KeyRound,
-  LayoutGrid,
   LoaderCircle,
   RefreshCw,
   Search,
   Settings2,
   SlidersHorizontal,
-  Tag,
   Tags,
   X,
 } from "lucide-react";
 import { Button, Input, TextArea, Select, Checkbox, Switch, toast } from "./ui";
-import { Card, Chip, Dropdown, Label, Pagination, Popover, Table } from "@heroui/react";
+import { Dropdown, Label, Pagination, Popover, Table } from "@heroui/react";
 import type { GatewayChannel, GatewaySettings } from "../shared/types";
 import { api } from "./api";
 import ChannelActions, { ChannelDialog } from "./ChannelActions";
 import RetrySettings from "./RetrySettings";
 import ProviderIcon from "./ProviderIcon";
+import ChannelTagTree from "./ChannelTagTree";
 import "./channel-manager.css";
 
 type Props = {
@@ -43,23 +42,53 @@ type Props = {
 type Column =
   | "provider"
   | "enabled"
+  | "priority"
   | "tags"
   | "models"
   | "health"
   | "weight"
   | "createdAt";
 const columns: { key: Column; label: string }[] = [
-  { key: "provider", label: "服务商" },
-  { key: "enabled", label: "状态" },
-  { key: "tags", label: "标签" },
+  { key: "priority", label: "优先级" },
+  { key: "enabled", label: "启用" },
+  { key: "health", label: "健康 / 首字" },
   { key: "models", label: "支持的模型" },
-  { key: "health", label: "健康状态" },
+  { key: "tags", label: "标签" },
+  { key: "provider", label: "服务商" },
   { key: "weight", label: "权重" },
   { key: "createdAt", label: "创建时间" },
 ];
+const defaultColumns: Column[] = ["enabled", "priority", "models", "health", "tags"];
+const columnWidths: Record<Column, number> = { provider: 120, enabled: 64, priority: 84, tags: 112, models: 180, health: 180, weight: 64, createdAt: 100 };
+const viewStorageKey = "pulsegate.channel-view.v3";
 type Modal =
   "settings" | "import" | "weights" | "tags" | "assign" | "strategy" | null;
 const statusName = { healthy: "健康", degraded: "延迟异常", offline: "不可用" };
+function channelStatusLabel(channel: GatewayChannel) {
+  if (!channel.enabled) return "已停用";
+  if (channel.health.autoDisabled) return "自动停用";
+  if (channel.config.protocol !== "mock" && channel.credentialCount === 0) return "待配置密钥";
+  if (channel.config.protocol !== "mock" && channel.health.samples === 0) return "待检测";
+  return statusName[channel.status];
+}
+function HealthHistory({ channel }: { channel: GatewayChannel }) {
+  const recent = channel.history.slice(-14).filter(value => value === 0 || value === 1 || value === 2);
+  const count = (value: number) => recent.filter(item => item === value).length;
+  const description = recent.length
+    ? `最近 ${recent.length} 次尝试：成功 ${count(0)} 次、慢响应 ${count(1)} 次、失败 ${count(2)} 次；从左到右由旧到新，灰格表示暂无样本。`
+    : "暂无健康历史；完成请求或探测后显示真实结果，灰格表示暂无样本。";
+  return <div className="gx-health-history">
+    <div className="gx-health-bars" role="img" aria-label={description} title={description}>
+      {Array.from({ length: 14 }, (_, index) => {
+        const sampleIndex = index - (14 - recent.length);
+        const value = recent[sampleIndex];
+        const label = value === 0 ? "成功" : value === 1 ? "慢响应" : value === 2 ? "失败" : "暂无样本";
+        return <i key={index} aria-hidden="true" className={value === 0 ? "gx-good" : value === 1 ? "gx-slow" : value === 2 ? "gx-bad" : "gx-unknown"} title={sampleIndex < 0 ? label : `第 ${sampleIndex + 1} 次：${label}（由旧到新）`} />;
+      })}
+    </div>
+    {!recent.length && <span className="gx-health-empty">暂无历史</span>}
+  </div>;
+}
 function ChannelBalance({ channel, refresh }: { channel: GatewayChannel; refresh: () => void | Promise<void> }) {
   const [loading, setLoading] = useState(false);
   const balance = channel.accountBalance;
@@ -97,13 +126,10 @@ function Filter({
 }) {
   return (
     <Popover>
-      <Button variant="secondary" size="sm">
+      <Button variant="secondary" size="sm" className={selected.length ? "gx-filter-trigger is-active" : "gx-filter-trigger"}>
         {label}
-        {selected.length ? (
-          <Chip size="sm">{selected.length}</Chip>
-        ) : (
-          <ChevronDown size={13} />
-        )}
+        {selected.length > 0 && <span className="gx-filter-count">{selected.length}</span>}
+        <ChevronDown size={13} />
       </Button>
       <Popover.Content placement="bottom end">
         <Popover.Dialog className="gx-filter-panel" aria-label={`${label}筛选`}>
@@ -134,18 +160,16 @@ function Filter({
     </Popover>
   );
 }
-function ModelChips({ models }: { models: string[] }) {
+function ModelList({ models }: { models: string[] }) {
   const [all, setAll] = useState(false);
   return (
     <div className="gx-models">
-      {(all ? models : models.slice(0, 3)).map((model) => (
-        <Chip key={model} size="sm" title={model}>
-          <Chip.Label>{model}</Chip.Label>
-        </Chip>
+      {(all ? models : models.slice(0, 2)).map((model) => (
+        <code key={model} title={model}>{model}</code>
       ))}
-      {models.length > 3 && (
+      {models.length > 2 && (
         <Button variant="ghost" size="sm" onClick={() => setAll(!all)}>
-          {all ? "收起" : `+${models.length - 3}`}
+          {all ? "收起" : `+${models.length - 2}`}
         </Button>
       )}
     </div>
@@ -153,21 +177,23 @@ function ModelChips({ models }: { models: string[] }) {
 }
 function savedView() {
   try {
-    const parsed = JSON.parse(
-      localStorage.getItem("pulsegate.channel-view.v2") || "{}",
-    );
+    const saved = localStorage.getItem(viewStorageKey);
+    const legacy = saved === null ? localStorage.getItem("pulsegate.channel-view.v2") : null;
+    const parsed = JSON.parse(saved ?? legacy ?? "{}");
+    const savedColumns: Column[] = Array.isArray(parsed.columns)
+      ? [...new Set<Column>(parsed.columns.filter((value: unknown): value is Column => columns.some(column => column.key === value)))]
+      : [...defaultColumns];
+    if (legacy !== null) {
+      for (const column of ["priority", "health"] as const) if (!savedColumns.includes(column)) savedColumns.push(column);
+    }
     return {
       size: [10, 20, 50, 100].includes(parsed.size)
         ? (parsed.size as number)
         : 20,
-      columns: Array.isArray(parsed.columns)
-        ? (parsed.columns.filter((value: Column) =>
-            columns.some((c) => c.key === value),
-          ) as Column[])
-        : columns.map((c) => c.key),
+      columns: savedColumns,
     };
   } catch {
-    return { size: 20, columns: columns.map((c) => c.key) };
+    return { size: 20, columns: [...defaultColumns] };
   }
 }
 
@@ -195,13 +221,22 @@ export default function ChannelManager({
   const [pageSize, setPageSize] = useState(() => savedView().size);
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<{
-    key: "name" | "provider" | "weight" | "createdAt";
+    key: "name" | "provider" | "priority" | "weight" | "createdAt";
     asc: boolean;
   }>({ key: "createdAt", asc: false });
   const [selected, setSelected] = useState<string[]>([]);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [modal, setModal] = useState<Modal>(null);
   const [busy, setBusy] = useState(false);
+  const mutationPending = useRef(false);
+  const tagListRevision = useRef(0);
+  const importReadRevision = useRef(0);
+  const [readingImport, setReadingImport] = useState(false);
+  const [strategyDirty, setStrategyDirty] = useState(false);
+  const [strategySaving, setStrategySaving] = useState(false);
+  const strategyPending = useRef(false);
+  const [tagFilterOpen, setTagFilterOpen] = useState(false);
+  const [discardModal, setDiscardModal] = useState(false);
   const [tagList, setTagList] = useState<string[]>([]);
   const [tagName, setTagName] = useState("");
   const [renameFrom, setRenameFrom] = useState<string | null>(null);
@@ -236,7 +271,7 @@ export default function ChannelManager({
   useEffect(() => {
     try {
       localStorage.setItem(
-        "pulsegate.channel-view.v2",
+        viewStorageKey,
         JSON.stringify({ size: pageSize, columns: visibleColumns }),
       );
     } catch {
@@ -244,9 +279,11 @@ export default function ChannelManager({
     }
   }, [pageSize, visibleColumns]);
   useEffect(() => {
+    const revision = tagListRevision.current;
     void api<{ tags: string[] }>("/api/tags")
-      .then((data) => setTagList(data.tags))
+      .then((data) => { if (revision === tagListRevision.current) setTagList(data.tags); })
       .catch(() => undefined);
+    return () => { ++importReadRevision.current; };
   }, []);
   useEffect(() => {
     setSelected((old) =>
@@ -262,9 +299,12 @@ export default function ChannelManager({
     );
     const counts = new Map<string, number>();
     for (const channel of scopedChannels) {
-      for (const tag of new Set(channel.tags)) {
-        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      const paths = new Set<string>();
+      for (const tag of channel.tags) {
+        const parts = tag.split("/");
+        for (let depth = 1; depth <= parts.length; depth++) paths.add(parts.slice(0, depth).join("/"));
       }
+      for (const path of paths) counts.set(path, (counts.get(path) ?? 0) + 1);
     }
     return {
       counts,
@@ -298,11 +338,9 @@ export default function ChannelManager({
               ].some((value) => value.toLowerCase().includes(query))) &&
             (!providers.length || providers.includes(channel.provider)) &&
             (!statuses.length ||
-              statuses.includes(
-                !channel.enabled ? "已停用" : statusName[channel.status],
-              )) &&
+                statuses.includes(channelStatusLabel(channel))) &&
             (!filterTags.length ||
-              filterTags.some((tag) => channel.tags.includes(tag))) &&
+              filterTags.some((tag) => channel.tags.some(value => value === tag || value.startsWith(`${tag}/`)))) &&
             (!untaggedOnly || !channel.tags.length) &&
             (!filterModels.length ||
               filterModels.some((model) => channel.models.includes(model)))
@@ -310,8 +348,8 @@ export default function ChannelManager({
         })
         .sort((a, b) => {
           const difference =
-            sort.key === "weight"
-              ? a.weight - b.weight
+            sort.key === "weight" || sort.key === "priority"
+              ? a[sort.key] - b[sort.key]
               : String(a[sort.key]).localeCompare(String(b[sort.key]), "zh-CN");
           return (
             (sort.asc ? difference : -difference) ||
@@ -351,10 +389,34 @@ export default function ChannelManager({
     untaggedOnly ||
     !!filterModels.length;
   const show = (column: Column) => visibleColumns.includes(column);
-  const toggleSelect = (id: string) =>
-    setSelected((old) =>
-      old.includes(id) ? old.filter((item) => item !== id) : [...old, id],
-    );
+  const workingChannels = channels.filter((channel) => !channel.archived);
+  const modalDirty = modal === "strategy" ? strategyDirty : modal === "import" ? Boolean(importText.trim()) || readingImport : modal === "tags" ? Boolean(tagName.trim() && tagName.trim() !== renameFrom) : modal === "assign" ? assignTags.length > 0 || assignMode !== "add" : modal === "weights" ? weight !== 1 : false;
+  useEffect(() => {
+    if (!modalDirty) return;
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [modalDirty]);
+  function clearFilters() {
+    setSearch(""); setProviders([]); setStatuses([]); setFilterTags([]); setUntaggedOnly(false); setFilterModels([]);
+  }
+  function closeModal(force = false) {
+    if (busy || strategySaving || strategyPending.current || mutationPending.current) return;
+    if (modalDirty && !force) { setDiscardModal(true); return; }
+    ++importReadRevision.current;
+    setReadingImport(false); setStrategyDirty(false);
+    setDiscardModal(false); setModal(null); setImportText(""); setTagName(""); setRenameFrom(null); setAssignTags([]); setAssignMode("add"); setWeight(1);
+  }
+  const toggleSelect = (id: string) => {
+    if (!selected.includes(id) && selected.length >= 200) { toast.error("每次最多批量操作 200 个渠道，请先减少选择"); return; }
+    setSelected((old) => old.includes(id) ? old.filter((item) => item !== id) : [...old, id]);
+  };
+  function togglePageSelection() {
+    if (pageSelected) { setSelected((old) => old.filter((id) => !shown.some((channel) => channel.id === id))); return; }
+    const next = [...new Set([...selected, ...shown.map((channel) => channel.id)])];
+    if (next.length > 200) { toast.error("每次最多批量操作 200 个渠道，请先减少选择"); return; }
+    setSelected(next);
+  }
   async function refresh() {
     const data = await api<GatewayChannel[] | { channels: GatewayChannel[] }>(
       "/api/channels",
@@ -362,21 +424,27 @@ export default function ChannelManager({
     setChannels(Array.isArray(data) ? data : data.channels);
     await onRefresh?.();
   }
-  async function perform(task: () => Promise<unknown>, success: string) {
+  async function perform(task: () => Promise<unknown>, success: string, committed?: () => void) {
+    if (mutationPending.current) return false;
+    mutationPending.current = true;
     setBusy(true);
     try {
       await task();
-      await refresh();
+      committed?.();
       toast.success(success);
+      try { await refresh(); }
+      catch { toast.error("变更已保存，但列表刷新失败。请刷新页面查看最新状态。"); }
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "操作失败");
       return false;
     } finally {
+      mutationPending.current = false;
       setBusy(false);
     }
   }
   async function bulk(action: string, extra: Record<string, unknown> = {}) {
+    if (archiveMode && (action === "enable" || action === "disable")) { toast.error("请先恢复归档渠道，再调整启用状态"); return false; }
     if (!selected.length) {
       toast.error("请先选择渠道");
       return false;
@@ -392,19 +460,39 @@ export default function ChannelManager({
     if (success) {
       setSelected([]);
       setModal(null);
+      setAssignTags([]); setAssignMode("add"); setWeight(1);
     }
     return success;
   }
-  async function editTag() {
-    const name = tagName.trim();
-    if (!name || name.length > 30) {
-      toast.error("标签名称须为 1–30 个字符");
+  function importChannels() {
+    if (readingImport) return;
+    let imported: unknown;
+    try {
+      const parsed = JSON.parse(importText);
+      imported = Array.isArray(parsed) ? parsed : parsed?.channels;
+      if (!Array.isArray(imported) || !imported.length) throw new Error("需要至少一个渠道");
+      if (imported.length > 200) throw new Error("每次最多导入 200 个渠道，请分批操作");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "JSON 格式有误");
       return;
     }
-    if (
-      await perform(
+    const payload = JSON.stringify({ channels: imported });
+    if (new TextEncoder().encode(payload).byteLength > 1048576) { toast.error("导入请求不能超过 1 MB，请将渠道分批导入"); return; }
+    void perform(
+      () => api("/api/channels/import", { method: "POST", body: payload }),
+      "渠道已导入",
+      () => { setImportText(""); setModal(null); },
+    );
+  }
+  async function editTag() {
+    const name = tagName.trim();
+    if (!name || name.length > 256) {
+      toast.error("标签名称须为 1–256 个字符");
+      return;
+    }
+    await perform(
         async () => {
-          await api(
+          const data = await api<{ tags: string[] }>(
             renameFrom
               ? `/api/tags/${encodeURIComponent(renameFrom)}`
               : "/api/tags",
@@ -413,22 +501,22 @@ export default function ChannelManager({
               body: JSON.stringify({ name }),
             },
           );
-          const data = await api<{ tags: string[] }>("/api/tags");
+          ++tagListRevision.current;
           setTagList(data.tags);
+          if (renameFrom) {
+            setChannels((old) => old.map((channel) => ({ ...channel, tags: [...new Set(channel.tags.map((tag) => tag === renameFrom ? name : tag))] })));
+            setFilterTags((old) => [...new Set(old.map((tag) => tag === renameFrom ? name : tag))].filter((prefix) => data.tags.some((tag) => tag === prefix || tag.startsWith(`${prefix}/`))));
+          }
         },
         renameFrom ? "标签已更新，API Key 引用已同步" : "标签已创建",
-      )
-    ) {
-      if (renameFrom) {
-        setFilterTags((old) => [
-          ...new Set(old.map((tag) => (tag === renameFrom ? name : tag))),
-        ]);
-      }
-      setRenameFrom(null);
-      setTagName("");
-    }
+        () => {
+          setRenameFrom(null); setTagName("");
+        },
+    );
   }
   async function openStrategy() {
+    setStrategySettings(null);
+    setStrategyDirty(false);
     setModal("strategy");
     setBusy(true);
     try {
@@ -453,271 +541,97 @@ export default function ChannelManager({
   ];
   return (
     <div className="gx-root">
-      <div className="gx-topbar">
-        <div className="gx-top-note">
-          <span>
-            {channels.filter((channel) => !channel.archived).length} 个渠道
-          </span>
-        </div>
-        <div className="gx-top-actions">
-          <Button variant="ghost" onClick={() => void openStrategy()}>
-            <SlidersHorizontal size={15} />
-            负载均衡策略
-          </Button>
-          <Dropdown>
-            <Button variant="ghost" aria-label="渠道管理工具">管理工具<ChevronDown size={14} /></Button>
-            <Dropdown.Popover>
-              <Dropdown.Menu aria-label="渠道管理工具" onAction={(id) => {
-                if (id === "settings") setModal("settings");
-                if (id === "import") { setImportText(""); setModal("import"); }
-                if (id === "weights") { if (!selected.length) { toast.error("请先勾选需要调整的渠道"); return; } setModal("weights"); }
-              }}>
-                <Dropdown.Item id="import" textValue="批量导入"><FileUp size={16} /><Label>批量导入</Label></Dropdown.Item>
-                <Dropdown.Item id="weights" textValue="批量调整权重"><ArrowUpDown size={16} /><Label>批量调整权重</Label></Dropdown.Item>
-                <Dropdown.Item id="settings" textValue="列表设置"><Settings2 size={16} /><Label>列表设置</Label></Dropdown.Item>
-              </Dropdown.Menu>
-            </Dropdown.Popover>
-          </Dropdown>
-        </div>
-      </div>
       <div className="gx-workspace">
-        <Card<"aside">
-          render={(props) => <aside {...props} />}
-          className="gx-tag-sidebar"
-          aria-label="渠道标签筛选"
-        >
-          <Card.Header className="gx-tag-sidebar-header">
-            <div>
-              <Tags size={17} />
-              <Card.Title>渠道标签</Card.Title>
-            </div>
-            <Chip size="sm">
-              <Chip.Label>{tags.length}</Chip.Label>
-            </Chip>
-          </Card.Header>
-          <Card.Content className="gx-tag-sidebar-body">
-            <div className="gx-tag-search">
-              <Input
-                aria-label="搜索标签"
-                placeholder="搜索标签…"
-                value={tagSearch}
-                onChange={(event) => setTagSearch(event.target.value)}
-              />
-              {tagSearch && (
-                <Button
-                  variant="ghost"
-                  isIconOnly
-                  aria-label="清除标签搜索"
-                  onClick={() => setTagSearch("")}
-                >
-                  <X size={14} />
-                </Button>
-              )}
-            </div>
-            <div className="gx-tag-shortcuts">
-              <Button
-                className="gx-tag-option"
-                variant={
-                  !filterTags.length && !untaggedOnly ? "primary" : "ghost"
-                }
-                aria-pressed={!filterTags.length && !untaggedOnly}
-                onClick={() => {
-                  setFilterTags([]);
-                  setUntaggedOnly(false);
-                }}
-              >
-                <LayoutGrid size={15} />
-                <span className="gx-tag-option-label">全部渠道</span>
-                <Chip size="sm">
-                  <Chip.Label>{tagCounts.all}</Chip.Label>
-                </Chip>
-              </Button>
-              <Button
-                className="gx-tag-option"
-                variant={untaggedOnly ? "primary" : "ghost"}
-                aria-pressed={untaggedOnly}
-                onClick={() => {
-                  setFilterTags([]);
-                  setUntaggedOnly(true);
-                }}
-              >
-                <Tag size={15} />
-                <span className="gx-tag-option-label">未打标签</span>
-                <Chip size="sm">
-                  <Chip.Label>{tagCounts.untagged}</Chip.Label>
-                </Chip>
-              </Button>
-            </div>
-            <div className="gx-tag-caption">
-              <span>标签 · 可多选</span>
-              {filterTags.length > 0 && <span>已选 {filterTags.length}</span>}
-            </div>
-            <div
-              className="gx-tag-options"
-              role="group"
-              aria-label="按标签筛选渠道"
-            >
-              {visibleTags.map((tag) => (
-                <Button
-                  key={tag}
-                  className="gx-tag-option"
-                  variant={filterTags.includes(tag) ? "primary" : "ghost"}
-                  aria-label={`筛选标签 ${tag}`}
-                  aria-pressed={filterTags.includes(tag)}
-                  title={tag}
-                  onClick={() => {
-                    setUntaggedOnly(false);
-                    setFilterTags((old) =>
-                      old.includes(tag)
-                        ? old.filter((value) => value !== tag)
-                        : [...old, tag],
-                    );
-                  }}
-                >
-                  <Tag size={15} />
-                  <span className="gx-tag-option-label">{tag}</span>
-                  <Chip size="sm">
-                    <Chip.Label>{tagCounts.counts.get(tag) ?? 0}</Chip.Label>
-                  </Chip>
-                </Button>
-              ))}
-              {!visibleTags.length && (
-                <p className="gx-tag-empty">
-                  {tagSearch.trim()
-                    ? "没有匹配的标签"
-                    : "暂无标签，可在下方创建"}
-                </p>
-              )}
-            </div>
-            <p className="gx-tag-hint">多选时匹配任一标签</p>
-          </Card.Content>
-          <Card.Footer>
-            <Button
-              className="gx-tag-manage"
-              variant="secondary"
-              onClick={() => {
-                setTagName("");
-                setRenameFrom(null);
-                setModal("tags");
-              }}
-            >
-              <Settings2 size={14} />
-              管理标签
-            </Button>
-          </Card.Footer>
-        </Card>
-        <div className="gx-results">
-          <div className="gx-filters">
-            <label className="gx-search">
-              <Search size={16} />
-              <Input
-                aria-label="搜索渠道"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="按名称、端点或模型筛选"
-              />
-              {search && (
-                <Button
-                  variant="ghost"
-                  isIconOnly
-                  onClick={() => setSearch("")}
-                  aria-label="清除搜索"
-                >
-                  <X size={14} />
-                </Button>
-              )}
-            </label>
-            <Filter
-              label="服务商"
-              values={availableProviders}
-              selected={providers}
-              onChange={setProviders}
-            />
-            <Filter
-              label="状态"
-              values={["健康", "延迟异常", "不可用", "已停用"]}
-              selected={statuses}
-              onChange={setStatuses}
-            />
-            <Filter
-              label="模型"
-              values={models}
-              selected={filterModels}
-              onChange={setFilterModels}
-            />
-            <Popover>
-              <Button variant="secondary" size="sm">
-                <Columns3 size={14} />
-                列设置
+      <ChannelTagTree
+        tags={tags}
+        counts={tagCounts.counts}
+        total={tagCounts.all}
+        untaggedCount={tagCounts.untagged}
+        selected={filterTags}
+        untaggedOnly={untaggedOnly}
+        onSelect={(tag) => { setFilterTags(tag ? [tag] : []); setUntaggedOnly(false); }}
+        onUntagged={() => { setFilterTags([]); setUntaggedOnly(true); }}
+        onManage={() => { setTagName(""); setRenameFrom(null); setModal("tags"); }}
+      />
+      <section className="gx-sheet" aria-label="渠道工作表">
+        <div className="gx-sheet-toolbar">
+          <label className="gx-search">
+            <Search size={16} aria-hidden="true" />
+            <Input aria-label="搜索渠道" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索渠道、模型或端点" />
+            {search && <Button variant="ghost" size="sm" isIconOnly onClick={() => setSearch("")} aria-label="清除搜索"><X size={14} /></Button>}
+          </label>
+          <div className="gx-filter-controls" aria-label="筛选渠道">
+            <Filter label="服务商" values={availableProviders} selected={providers} onChange={setProviders} />
+            <Filter label="状态" values={["健康", "待检测", "待配置密钥", "延迟异常", "不可用", "自动停用", "已停用"]} selected={statuses} onChange={setStatuses} />
+            <Filter label="模型" values={models} selected={filterModels} onChange={setFilterModels} />
+            <Popover isOpen={tagFilterOpen} onOpenChange={setTagFilterOpen}>
+              <Button variant="secondary" size="sm" className={filterTags.length || untaggedOnly ? "gx-filter-trigger is-active" : "gx-filter-trigger"}>
+                标签{filterTags.length > 0 && <span className="gx-filter-count">{filterTags.length}</span>}{untaggedOnly && <span className="gx-filter-count">未标记</span>}<ChevronDown size={13} />
               </Button>
               <Popover.Content placement="bottom end">
-                <Popover.Dialog
-                  className="gx-filter-panel"
-                  aria-label="显示列设置"
-                >
-                  {columns.map((column) => (
-                    <Checkbox
-                      key={column.key}
-                      checked={show(column.key)}
-                      onChange={() =>
-                        setVisibleColumns((old) =>
-                          old.includes(column.key)
-                            ? old.filter((value) => value !== column.key)
-                            : [...old, column.key],
-                        )
-                      }
-                    >
-                      {column.label}
-                    </Checkbox>
-                  ))}
+                <Popover.Dialog className="gx-tag-popover" aria-label="渠道标签筛选">
+                  <div className="gx-tag-popover-heading"><strong>标签筛选</strong><Button variant="ghost" size="sm" disabled={!filterTags.length && !untaggedOnly} onClick={() => { setFilterTags([]); setUntaggedOnly(false); }}>清除</Button></div>
+                  <Input aria-label="搜索标签" placeholder="搜索标签" value={tagSearch} onChange={(event) => setTagSearch(event.target.value)} />
+                  <div className="gx-tag-shortcuts">
+                    <Button variant="ghost" size="sm" aria-pressed={!filterTags.length && !untaggedOnly} onClick={() => { setFilterTags([]); setUntaggedOnly(false); }}><span>全部标签</span><small>{tagCounts.all}</small></Button>
+                    <Button variant="ghost" size="sm" aria-pressed={untaggedOnly} onClick={() => { setFilterTags([]); setUntaggedOnly(true); }}><span>未打标签</span><small>{tagCounts.untagged}</small></Button>
+                  </div>
+                  <div className="gx-tag-options" role="group" aria-label="选择标签，匹配任一项">
+                    {visibleTags.map((tag) => <Checkbox className="gx-tag-choice" key={tag} checked={filterTags.includes(tag)} onChange={() => { setUntaggedOnly(false); setFilterTags((old) => old.includes(tag) ? old.filter((value) => value !== tag) : [...old, tag]); }}><span className="gx-tag-choice-copy"><span>{tag}</span><small>{tagCounts.counts.get(tag) ?? 0}</small></span></Checkbox>)}
+                    {!visibleTags.length && <p className="gx-tag-empty">{tagSearch.trim() ? "没有匹配的标签" : "暂无标签"}</p>}
+                  </div>
+                  <Button variant="ghost" size="sm" className="gx-tag-manage" onClick={() => { setTagFilterOpen(false); setTagName(""); setRenameFrom(null); setModal("tags"); }}><Settings2 size={14} />管理标签</Button>
                 </Popover.Dialog>
               </Popover.Content>
             </Popover>
           </div>
-          <div className="gx-meta">
-            <div>
-              <Button
-                variant={archiveMode ? "ghost" : "primary"}
-                onClick={() => { setArchiveMode(false); if (archiveMode) setSelected([]); }}
-              >
-                使用中
-              </Button>
-              <Button
-                variant={archiveMode ? "primary" : "ghost"}
-                onClick={() => { setArchiveMode(true); if (!archiveMode) setSelected([]); }}
-              >
-                已归档
-              </Button>
-              {activeFilters && (
-                <Button
-                  className="gx-link"
-                  onClick={() => {
-                    setSearch("");
-                    setProviders([]);
-                    setStatuses([]);
-                    setFilterTags([]);
-                    setUntaggedOnly(false);
-                    setFilterModels([]);
-                  }}
-                >
-                  清除筛选
-                </Button>
-              )}
-            </div>
-            <div>
-              <Button className="gx-link" onClick={onNavigateKeys}>
-                <KeyRound size={14} />
-                API Key 权限
-              </Button>
-            </div>
+          <div className="gx-sheet-tools">
+            <Popover>
+              <Button variant="ghost" size="sm" isIconOnly aria-label="显示列设置" title="显示列"><Columns3 size={16} /></Button>
+              <Popover.Content placement="bottom end">
+                <Popover.Dialog className="gx-filter-panel" aria-label="显示列设置">
+                  <strong className="gx-popover-title">显示列</strong>
+                  {columns.map((column) => <Checkbox key={column.key} checked={show(column.key)} onChange={() => setVisibleColumns((old) => old.includes(column.key) ? old.filter((value) => value !== column.key) : [...old, column.key])}>{column.label}</Checkbox>)}
+                  <Button variant="ghost" size="sm" onClick={() => setVisibleColumns([...defaultColumns])}>恢复默认列</Button>
+                </Popover.Dialog>
+              </Popover.Content>
+            </Popover>
+            <Dropdown>
+              <Button variant="ghost" size="sm" disabled={busy} aria-label="渠道管理工具">管理<ChevronDown size={13} /></Button>
+              <Dropdown.Popover>
+                <Dropdown.Menu aria-label="渠道管理工具" onAction={(id) => {
+                  if (id === "settings") setModal("settings");
+                  if (id === "import") { setImportText(""); setModal("import"); }
+                  if (id === "weights") { if (!selected.length) { toast.error("请先选择需要调整的渠道"); return; } setModal("weights"); }
+                  if (id === "strategy") void openStrategy();
+                  if (id === "tags") { setTagName(""); setRenameFrom(null); setModal("tags"); }
+                  if (id === "keys") onNavigateKeys();
+                }}>
+                  <Dropdown.Item id="import" textValue="批量导入"><FileUp size={15} /><Label>批量导入</Label></Dropdown.Item>
+                  <Dropdown.Item id="weights" textValue="批量调整权重"><ArrowUpDown size={15} /><Label>批量调整权重</Label></Dropdown.Item>
+                  <Dropdown.Item id="tags" textValue="标签管理"><Tags size={15} /><Label>标签管理</Label></Dropdown.Item>
+                  <Dropdown.Item id="strategy" textValue="负载均衡策略"><SlidersHorizontal size={15} /><Label>负载均衡策略</Label></Dropdown.Item>
+                  <Dropdown.Item id="keys" textValue="API Key 权限"><KeyRound size={15} /><Label>API Key 权限</Label></Dropdown.Item>
+                  <Dropdown.Item id="settings" textValue="列表设置"><Settings2 size={15} /><Label>列表设置</Label></Dropdown.Item>
+                </Dropdown.Menu>
+              </Dropdown.Popover>
+            </Dropdown>
           </div>
+        </div>
+        <div className="gx-sheet-nav">
+          <div className="gx-view-tabs" role="group" aria-label="渠道视图">
+            <Button variant="ghost" className="gx-view-tab" aria-pressed={!archiveMode} onClick={() => { setArchiveMode(false); if (archiveMode) setSelected([]); }}>使用中<span>{workingChannels.length}</span></Button>
+            <Button variant="ghost" className="gx-view-tab" aria-pressed={archiveMode} onClick={() => { setArchiveMode(true); if (!archiveMode) setSelected([]); }}>已归档<span>{channels.length - workingChannels.length}</span></Button>
+          </div>
+          <div className="gx-view-meta"><span aria-live="polite">{filtered.length} 个结果</span>{activeFilters && <Button variant="ghost" size="sm" onClick={clearFilters}>清除筛选<X size={12} /></Button>}</div>
+        </div>
           {selected.length > 0 && (
-            <div className="gx-bulk">
+            <div className="gx-bulk" role="region" aria-label="所选渠道批量操作" aria-busy={busy}>
               <strong>已选择 {selected.length} 个渠道</strong>
-              <Button disabled={busy} onClick={() => void bulk("enable")}>
+              <Button disabled={busy || archiveMode} onClick={() => void bulk("enable")}>
                 启用
               </Button>
-              <Button disabled={busy} onClick={() => void bulk("disable")}>
+              <Button disabled={busy || archiveMode} onClick={() => void bulk("disable")}>
                 停用
               </Button>
               <Button
@@ -750,13 +664,15 @@ export default function ChannelManager({
                 <Archive size={13} />
                 {archiveMode ? "恢复" : "归档"}
               </Button>
-              <Button onClick={() => setSelected([])}>取消选择</Button>
+              <Button variant="ghost" disabled={busy} onClick={() => setSelected([])}>取消选择</Button>
             </div>
           )}
-          <Table className="gx-channel-table">
+          <p className="gx-scroll-hint">左右滑动查看全部列</p>
+          <Table variant="secondary" className="gx-channel-table">
             <Table.ScrollContainer>
               <Table.Content
                 className="gx-table"
+                style={{ minWidth: 340 + visibleColumns.reduce((width, column) => width + columnWidths[column], 0) }}
                 aria-label="上游渠道列表"
                 sortDescriptor={{
                   column: sort.key,
@@ -778,6 +694,7 @@ export default function ChannelManager({
                       allowsSorting={[
                         "name",
                         "provider",
+                        "priority",
                         "weight",
                         "createdAt",
                       ].includes(column.id)}
@@ -788,34 +705,20 @@ export default function ChannelManager({
                             ? "gx-expand-cell"
                             : column.id === "select"
                               ? "gx-check-cell"
-                              : undefined
+                              : column.id === "priority" || column.id === "weight"
+                                ? "gx-number"
+                                : undefined
                       }
                     >
                       {column.id === "select" ? (
                         <Checkbox
                           aria-label="选择本页全部渠道"
                           checked={pageSelected}
-                          onChange={() =>
-                            setSelected((old) =>
-                              pageSelected
-                                ? old.filter(
-                                    (id) =>
-                                      !shown.some(
-                                        (channel) => channel.id === id,
-                                      ),
-                                  )
-                                : [
-                                    ...new Set([
-                                      ...old,
-                                      ...shown.map((channel) => channel.id),
-                                    ]),
-                                  ],
-                            )
-                          }
+                          onChange={togglePageSelection}
                         />
                       ) : column.id === "expand" ? (
                         <span className="gx-sr-only">展开</span>
-                      ) : ["name", "provider", "weight", "createdAt"].includes(
+                      ) : ["name", "provider", "priority", "weight", "createdAt"].includes(
                           column.id,
                         ) ? (
                         <Table.SortableColumnHeader
@@ -838,7 +741,7 @@ export default function ChannelManager({
                 <Table.Body
                   renderEmptyState={() => (
                     <div className="gx-empty">
-                      <Search size={24} />
+                      {archiveMode && !activeFilters ? <Archive size={28} /> : <Search size={28} />}
                       <strong>
                         {activeFilters
                           ? "没有符合条件的渠道"
@@ -849,8 +752,9 @@ export default function ChannelManager({
                       <span>
                         {activeFilters
                           ? "调整筛选条件或清除筛选。"
-                          : "添加真实上游，或在开发测试场安装故障实验渠道。"}
+                          : archiveMode ? "归档渠道保留配置，但不会参与请求路由。" : "点击页面右上角添加渠道，连接你的第一个模型服务商。"}
                       </span>
+                      {activeFilters && <Button variant="secondary" size="sm" onClick={clearFilters}>清除筛选</Button>}
                     </div>
                   )}
                 >
@@ -970,12 +874,12 @@ export default function ChannelManager({
               </Pagination>
             </div>
           </footer>
-        </div>
+      </section>
       </div>
       {confirmation && (
         <ChannelDialog
           title={confirmation.title}
-          onClose={() => setConfirmation(null)}
+          onClose={() => !busy && setConfirmation(null)}
         >
           <p className="cx-hint">{confirmation.description}</p>
           <footer className="cx-footer">
@@ -1016,11 +920,15 @@ export default function ChannelManager({
                       ? "负载均衡与重试策略"
                       : "标签管理"
           }
-          onClose={() => {
-            setModal(null);
-            setImportText("");
-          }}
+          onClose={() => closeModal()}
+          className="gx-management-dialog"
           wide={modal === "strategy"}
+          footer={modal !== "strategy" ? <div className="gx-dialog-actions">
+            <Button variant="secondary" disabled={busy} onClick={() => closeModal()}>{modal === "settings" || modal === "tags" ? "完成" : "取消"}</Button>
+            {modal === "import" && <Button variant="primary" disabled={busy || readingImport || !importText.trim()} onClick={importChannels}>{busy ? "导入中…" : readingImport ? "正在读取…" : "导入渠道"}</Button>}
+            {modal === "weights" && <Button variant="primary" disabled={busy || !Number.isFinite(weight) || weight < 0 || weight > 10000} onClick={() => void bulk("weights", { weight })}>{busy ? "保存中…" : "保存权重"}</Button>}
+            {modal === "assign" && <Button variant="primary" disabled={busy || (!assignTags.length && assignMode !== "replace")} onClick={() => void bulk("tags", { tags: assignTags, mode: assignMode })}>{busy ? "应用中…" : `应用到 ${selected.length} 个渠道`}</Button>}
+          </div> : undefined}
         >
           {modal === "settings" && (
             <>
@@ -1056,11 +964,6 @@ export default function ChannelManager({
                   </Checkbox>
                 ))}
               </div>
-              <footer className="cx-footer">
-                <Button className="cx-primary" onClick={() => setModal(null)}>
-                  完成
-                </Button>
-              </footer>
             </>
           )}
           {modal === "import" && (
@@ -1074,6 +977,7 @@ export default function ChannelManager({
                 <span>读取 JSON 文件</span>
                 <Input
                   type="file"
+                  disabled={busy}
                   accept=".json,application/json"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
@@ -1082,7 +986,11 @@ export default function ChannelManager({
                       toast.error("文件不能超过 1 MB");
                       return;
                     }
-                    void file.text().then(setImportText);
+                    const revision = ++importReadRevision.current;
+                    setReadingImport(true);
+                    void file.text().then((value) => { if (revision === importReadRevision.current) setImportText(value); })
+                      .catch(() => { if (revision === importReadRevision.current) toast.error("文件读取失败，请重新选择 JSON 文件"); })
+                      .finally(() => { if (revision === importReadRevision.current) setReadingImport(false); });
                   }}
                 />
               </label>
@@ -1090,54 +998,16 @@ export default function ChannelManager({
                 <span>渠道 JSON</span>
                 <TextArea
                   rows={14}
+                  disabled={busy}
                   className="cx-code"
                   value={importText}
                   spellCheck={false}
-                  onChange={(e) => setImportText(e.target.value)}
+                  onChange={(e) => { ++importReadRevision.current; setReadingImport(false); setImportText(e.target.value); }}
                   placeholder={
                     '[{"name":"OpenAI 主渠道","provider":"OpenAI","endpoint":"https://api.openai.com/v1","models":["gpt-4.1"],"tags":["production"],"weight":1,"apiKeys":[{"label":"主密钥","secret":"sk-…"}]}]'
                   }
                 />
               </label>
-              <footer className="cx-footer">
-                <Button
-                  className="cx-primary"
-                  disabled={busy || !importText.trim()}
-                  onClick={() => {
-                    let imported: unknown;
-                    try {
-                      const parsed = JSON.parse(importText);
-                      imported = Array.isArray(parsed)
-                        ? parsed
-                        : parsed.channels;
-                      if (!Array.isArray(imported) || !imported.length)
-                        throw new Error("需要至少一个渠道");
-                    } catch (error) {
-                      toast.error(
-                        error instanceof Error
-                          ? error.message
-                          : "JSON 格式有误",
-                      );
-                      return;
-                    }
-                    void perform(
-                      () =>
-                        api("/api/channels/import", {
-                          method: "POST",
-                          body: JSON.stringify({ channels: imported }),
-                        }),
-                      "渠道已导入",
-                    ).then((success) => {
-                      if (success) {
-                        setImportText("");
-                        setModal(null);
-                      }
-                    });
-                  }}
-                >
-                  {busy ? "导入中…" : "导入渠道"}
-                </Button>
-              </footer>
             </>
           )}
           {modal === "weights" && (
@@ -1157,20 +1027,6 @@ export default function ChannelManager({
                   onChange={(e) => setWeight(Number(e.target.value))}
                 />
               </label>
-              <footer className="cx-footer">
-                <Button
-                  className="cx-primary"
-                  disabled={
-                    busy ||
-                    !Number.isFinite(weight) ||
-                    weight < 0 ||
-                    weight > 10000
-                  }
-                  onClick={() => void bulk("weights", { weight })}
-                >
-                  保存权重
-                </Button>
-              </footer>
             </>
           )}
           {modal === "assign" && (
@@ -1179,6 +1035,7 @@ export default function ChannelManager({
                 标签用于 API Key
                 的渠道权限。此操作将影响匹配这些标签的请求范围。
               </p>
+              {assignMode === "replace" && <p className="gx-assignment-warning" role="status">将覆盖所选渠道的全部标签。未选择标签时，会清空这些渠道的标签。</p>}
               <label className="cx-field">
                 <span>操作</span>
                 <Select
@@ -1210,19 +1067,6 @@ export default function ChannelManager({
                   </Checkbox>
                 ))}
               </div>
-              <footer className="cx-footer">
-                <Button
-                  className="cx-primary"
-                  disabled={
-                    busy || (!assignTags.length && assignMode !== "replace")
-                  }
-                  onClick={() =>
-                    void bulk("tags", { tags: assignTags, mode: assignMode })
-                  }
-                >
-                  应用到 {selected.length} 个渠道
-                </Button>
-              </footer>
             </>
           )}
           {modal === "tags" && (
@@ -1243,7 +1087,7 @@ export default function ChannelManager({
                   </span>
                   <Input
                     value={tagName}
-                    maxLength={30}
+                    maxLength={256}
                     required
                     onChange={(e) => setTagName(e.target.value)}
                   />
@@ -1299,19 +1143,16 @@ export default function ChannelManager({
                           description: `确定删除标签「${tag}」？被 API Key 引用的标签不能删除。`,
                           action: async () => {
                             const success = await perform(async () => {
-                              await api(
+                              const data = await api<{ tags: string[] }>(
                                 `/api/tags/${encodeURIComponent(tag)}`,
                                 { method: "DELETE" },
                               );
-                              const data = await api<{ tags: string[] }>(
-                                "/api/tags",
-                              );
+                              ++tagListRevision.current;
                               setTagList(data.tags);
+                              setChannels((old) => old.map((channel) => ({ ...channel, tags: channel.tags.filter((value) => value !== tag) })));
+                              setFilterTags((old) => old.filter((prefix) => data.tags.some((value) => value === prefix || value.startsWith(`${prefix}/`))));
                             }, "标签已删除");
                             if (!success) throw new Error("操作失败");
-                            setFilterTags((old) =>
-                              old.filter((value) => value !== tag),
-                            );
                           },
                         })
                       }
@@ -1327,17 +1168,24 @@ export default function ChannelManager({
             (strategySettings ? (
               <RetrySettings
                 settings={strategySettings}
-                onSave={async (settings) => {
+                onDirtyChange={setStrategyDirty}
+                onSavingChange={setStrategySaving}
+                onSave={async (_settings, patch) => {
+                  strategyPending.current = true;
+                  setStrategySaving(true);
+                  try {
                   const data = await api<
                     GatewaySettings | { settings: GatewaySettings }
                   >("/api/settings", {
                     method: "PATCH",
-                    body: JSON.stringify(settings),
+                    body: JSON.stringify(patch),
                   });
                   setStrategySettings(
                     "settings" in data ? data.settings : data,
                   );
-                  await onRefresh?.();
+                  try { await onRefresh?.(); }
+                  catch { toast.error("策略已保存，但页面刷新失败。请刷新页面查看最新状态。"); }
+                  } finally { strategyPending.current = false; setStrategySaving(false); }
                 }}
               />
             ) : (
@@ -1348,6 +1196,7 @@ export default function ChannelManager({
             ))}
         </ChannelDialog>
       )}
+      {discardModal && <ChannelDialog title="放弃未保存的内容？" subtitle="当前修改尚未保存，关闭后需要重新填写。" onClose={() => setDiscardModal(false)} className="gx-discard-dialog" footer={<div className="gx-dialog-actions"><Button variant="secondary" onClick={() => setDiscardModal(false)}>继续编辑</Button><Button variant="danger" onClick={() => closeModal(true)}>放弃并关闭</Button></div>}><p className="cx-hint">确认后仅关闭当前编辑窗口。</p></ChannelDialog>}
     </div>
   );
 }
@@ -1380,6 +1229,9 @@ function ChannelRows({
   refresh: () => Promise<void>;
   onPlayground?: (channelId?: string) => void;
 }) {
+  const missingCredential = channel.config.protocol !== "mock" && channel.credentialCount === 0;
+  const healthLabel = channelStatusLabel(channel);
+  const healthColor = !channel.enabled ? "default" : channel.health.autoDisabled || missingCredential ? "warning" : channel.health.samples === 0 && channel.config.protocol !== "mock" ? "default" : channel.status === "healthy" ? "success" : channel.status === "degraded" ? "warning" : "danger";
   const rows = [
     <Table.Row
       key={channel.id}
@@ -1416,21 +1268,17 @@ function ChannelRows({
           </span>
           <div className="gx-channel-info">
             <strong className="gx-channel-title" title={channel.name}>{channel.name}</strong>
-            {(channel.config.protocol === 'mock' || ['newapi', 'sub2api'].includes(channel.config.integration ?? '')) && <div className="gx-name-meta">
-              {channel.config.protocol === "mock" && <small>本地故障实验</small>}
-              {['newapi','sub2api'].includes(channel.config.integration ?? '') && <div className="gx-account-summary">
+            {!show("provider") && <small className="gx-provider-subtitle" title={channel.provider}>{channel.provider}</small>}
+            {['newapi', 'sub2api'].includes(channel.config.integration ?? '') && <div className="gx-name-meta">
+              <div className="gx-account-summary">
                 <span className="gx-balance-provider" title={`${channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'} 余额监控`}>{channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'}</span>
                 <ChannelBalance channel={channel} refresh={refresh} />
-              </div>}
+              </div>
             </div>}
           </div>
         </div>
       </Table.Cell>
-      {show("provider") && (
-        <Table.Cell>
-          <span className="gx-provider" title={channel.provider}>{channel.provider}</span>
-        </Table.Cell>
-      )}
+      {show("priority") && <Table.Cell className="gx-number gx-priority" textValue={String(channel.priority)}><span title="数值越小，调度优先级越高">{channel.priority}</span></Table.Cell>}
       {show("enabled") && (
         <Table.Cell>
           <Switch
@@ -1441,14 +1289,23 @@ function ChannelRows({
           />
         </Table.Cell>
       )}
+      {show("health") && (
+        <Table.Cell className="gx-health-cell">
+          <div className="gx-health-summary"><div className={`gx-health-status gx-health-${healthColor}`} title={channel.health.reason ?? undefined}><i aria-hidden="true" />{healthLabel}</div><span className="gx-health-latency" title="平均首字耗时（TTFT）">首字 {channel.health.averageTtft != null ? `${channel.health.averageTtft.toFixed(2)} s` : "—"}</span></div>
+          <HealthHistory channel={channel} />
+        </Table.Cell>
+      )}
+      {show("models") && (
+        <Table.Cell className="gx-model-cell">
+          <ModelList models={channel.models} />
+        </Table.Cell>
+      )}
       {show("tags") && (
         <Table.Cell>
           <div className="gx-tags">
             {channel.tags.length ? (
               channel.tags.map((tag) => (
-                <Chip key={tag} size="sm">
-                  <Chip.Label>{tag}</Chip.Label>
-                </Chip>
+                <span className="gx-tag-text" key={tag} title={tag}>{tag}</span>
               ))
             ) : (
               <em>—</em>
@@ -1456,56 +1313,9 @@ function ChannelRows({
           </div>
         </Table.Cell>
       )}
-      {show("models") && (
-        <Table.Cell className="gx-model-cell">
-          <ModelChips models={channel.models} />
-        </Table.Cell>
-      )}
-      {show("health") && (
-        <Table.Cell className="gx-health-cell">
-          <div
-            className="gx-health-bars"
-            title={`${statusName[channel.status]} · ${channel.health.reason || `平均首字 ${channel.health.averageTtft ?? "—"} s`}`}
-          >
-            {Array.from({ length: 14 }, (_, i) => {
-              const recent = channel.history.slice(-14);
-              const value = recent[i - (14 - recent.length)];
-              return (
-                <i
-                  key={i}
-                  className={
-                    value == null
-                      ? "gx-unknown"
-                      : value === 2
-                        ? "gx-bad"
-                        : value === 1
-                          ? "gx-slow"
-                          : "gx-good"
-                  }
-                />
-              );
-            })}
-          </div>
-          <Chip
-            size="sm"
-            color={
-              !channel.enabled
-                ? "default"
-                : channel.status === "healthy"
-                  ? "success"
-                  : channel.status === "degraded"
-                    ? "warning"
-                    : "danger"
-            }
-            className="gx-health-label"
-          >
-            <Chip.Label>
-              {channel.enabled ? statusName[channel.status] : "已停用"}
-              {channel.health.averageTtft != null
-                ? ` · ${channel.health.averageTtft.toFixed(2)}s`
-                : " · 无样本"}
-            </Chip.Label>
-          </Chip>
+      {show("provider") && (
+        <Table.Cell>
+          <span className="gx-provider" title={channel.provider}>{channel.provider}</span>
         </Table.Cell>
       )}
       {show("weight") && (
@@ -1571,6 +1381,7 @@ function ChannelRows({
             <div>
               <small>健康判定</small>
               <strong>{channel.health.reason || "暂无异常记录"}</strong>
+              <HealthHistory channel={channel} />
               <small>
                 {channel.health.samples} 个样本 · 失败{" "}
                 {channel.health.failureCount} · 恢复{" "}

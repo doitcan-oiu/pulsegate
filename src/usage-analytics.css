@@ -1,65 +1,77 @@
 @layer theme, base, components, utilities, app-layout;
 @layer app-layout {
-  .ua-page { display: grid; gap: 30px; min-width: 0; }
+  .ua-page { display: grid; gap: 34px; min-width: 0; color: var(--foreground); }
   .ua-page section { min-width: 0; }
-  .ua-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-  .ua-section-heading h2 { margin: 0; color: var(--foreground); font-size: 16px; font-weight: 600; }
-  .ua-section-heading > span { font-size: 12px; color: var(--muted); text-align: right; }
-  .ua-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-  .ua-stat { display: flex; flex-direction: column; gap: 8px; padding: 20px; }
-  .ua-stat > span { color: var(--muted); font-size: 13px; }
-  .ua-stat > strong { color: var(--foreground); font-size: 28px; line-height: 1.3; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.4px; }
-  .ua-stat > small { color: var(--muted); font-size: 12px; line-height: 1.6; }
-  .ua-performance-details { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); margin: 0; padding: 20px 4px 0; gap: 18px 12px; }
-  .ua-performance-details > div { min-width: 0; }
-  .ua-performance-details dt { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
-  .ua-performance-details dd { margin: 0; font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--foreground); }
-  .ua-usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; padding: 22px 0; }
-  .ua-usage-summary > div { display: flex; flex-direction: column; gap: 8px; padding: 0 24px; min-width: 0; }
-  .ua-usage-summary > div + div { border-left: 1px solid var(--border); }
-  .ua-usage-summary span { font-size: 12px; color: var(--muted); }
-  .ua-usage-summary strong { font-size: 22px; font-weight: 600; line-height: 1.35; font-variant-numeric: tabular-nums; color: var(--foreground); overflow-wrap: anywhere; }
-  .ua-usage-summary small { font-size: 12px; color: var(--muted); }
-  .ua-charts-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
-  .ua-chart-card { min-width: 0; overflow: hidden; display: flex; flex-direction: column; padding: 20px; }
-  .ua-chart-header { padding: 0; margin: 0; }
-  .ua-chart-header h3 { font-size: 15px; font-weight: 600; color: var(--foreground); line-height: 1.5; margin: 0; }
-  .ua-chart-header p { font-size: 12px; color: var(--muted); line-height: 1.7; margin: 5px 0 0; }
-  .ua-legend { display: flex; flex-wrap: wrap; gap: 9px 16px; color: var(--muted); margin-top: 14px; font-size: 12px; }
-  .ua-legend span { display: inline-flex; gap: 6px; align-items: center; }
-  .ua-legend i, .ua-outcome-chart li > i { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
-  .ua-chart { height: 238px; margin-top: 16px; min-width: 0; width: 100%; }
-  .ua-chart-empty { display: flex; width: 100%; height: 100%; min-height: 200px; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: var(--muted); font-size: 13px; line-height: 1.7; padding: 20px; text-align: center; }
+  .ua-context { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: var(--muted); font-size: 12px; }
+  .ua-stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-block: 1px solid var(--border); padding-block: 24px; }
+  .ua-stat { min-width: 0; display: flex; flex-direction: column; gap: 9px; padding-inline: 20px; }
+  .ua-stat:first-child { padding-left: 0; }
+  .ua-stat:last-child { padding-right: 0; }
+  .ua-stat + .ua-stat { border-left: 1px solid var(--border); }
+  .ua-stat > span { font-size: 12px; color: var(--muted); }
+  .ua-stat > strong { font-size: 27px; font-weight: 500; letter-spacing: -.8px; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .ua-stat > small { font-size: 12px; color: var(--muted); line-height: 1.7; }
+  .ua-performance-details { display: flex; flex-wrap: wrap; margin: 0; padding-top: 20px; gap: 14px 26px; }
+  .ua-performance-details > div { display: flex; align-items: baseline; gap: 9px; }
+  .ua-performance-details dt { color: var(--muted); font-size: 12px; }
+  .ua-performance-details dd { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .ua-coverage-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .ua-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+  .ua-section-heading h2 { font-size: 14px; font-weight: 500; margin: 0; }
+  .ua-section-heading > span { color: var(--muted); font-size: 12px; }
+  .ua-charts-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ua-chart-card { min-width: 0; padding: 26px 26px 24px; border-bottom: 1px solid var(--border); }
+  .ua-chart-card:nth-child(odd) { border-right: 1px solid var(--border); padding-left: 0; }
+  .ua-chart-card:nth-child(even) { padding-right: 0; }
+  .ua-chart-header h3 { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.6; }
+  .ua-chart-header p { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.7; }
+  .ua-legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 13px; color: var(--muted); font-size: 12px; }
+  .ua-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .ua-legend i, .ua-outcome-chart li > i { width: 10px; height: 3px; flex-shrink: 0; }
+  .ua-chart { height: 246px; width: 100%; margin-top: 20px; min-width: 0; }
+  .ua-chart-empty { display: flex; width: 100%; height: 100%; min-height: 200px; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; line-height: 1.8; padding: 24px; text-align: center; }
+  .ua-empty-overview { min-height: 260px; border-bottom: 1px solid var(--border); }
   .ua-outcome-chart { width: 100%; height: 100%; display: flex; align-items: center; }
-  .ua-outcome-chart > ul { width: 46%; list-style: none; padding: 0; margin: 0; display: grid; gap: 16px; }
-  .ua-outcome-chart li { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .ua-outcome-chart > ul { width: 46%; list-style: none; padding: 0; margin: 0; display: grid; gap: 17px; }
+  .ua-outcome-chart li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
   .ua-outcome-chart li > span { flex: 1; }
-  .ua-outcome-chart li > strong { color: var(--foreground); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
-  .ua-methodology { border-top: 1px solid var(--border); padding-top: 14px; color: var(--muted); font-size: 12px; line-height: 1.85; }
+  .ua-outcome-chart li > strong { color: var(--foreground); font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; }
+  .ua-methodology { color: var(--muted); font-size: 12px; line-height: 1.9; padding-bottom: 12px; }
+  .ua-methodology summary { cursor: pointer; color: var(--foreground); font-size: 13px; width: fit-content; padding-block: 4px; }
+  .ua-methodology[open] summary { margin-bottom: 12px; }
   .ua-methodology p { margin: 0; }
   .ua-methodology p + p { margin-top: 6px; }
-  .ua-unavailable { padding: 20px; }
+  .ua-methodology summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  .ua-unavailable { border-block: 1px solid var(--border); }
   @media (max-width: 1200px) {
-    .ua-performance-details { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .ua-stat { padding: 18px 16px; }
-    .ua-stat > strong { font-size: 25px; }
-    .ua-usage-summary > div { padding-inline: 18px; }
+    .ua-stat { padding-inline: 14px; }
+    .ua-stat > strong { font-size: 23px; }
+    .ua-chart-card { padding-inline: 20px; }
+  }
+  @media (max-width: 900px) {
+    .ua-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); padding-block: 0; }
+    .ua-stat { padding: 18px 14px; }
+    .ua-stat:nth-child(3n+1) { border-left: 0; padding-left: 0; }
+    .ua-stat:nth-child(n+4) { border-top: 1px solid var(--border); }
+    .ua-stat:last-child { padding-right: 14px; }
+    .ua-performance-details { gap: 12px 20px; }
   }
   @media (max-width: 720px) {
-    .ua-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .ua-page { gap: 28px; }
+    .ua-context { font-size: 12px; }
+    .ua-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .ua-stat:nth-child(3n+1) { border-left: 1px solid var(--border); padding-left: 14px; }
+    .ua-stat:nth-child(odd) { border-left: 0; padding-left: 0; }
+    .ua-stat:nth-child(n+3) { border-top: 1px solid var(--border); }
+    .ua-stat > strong { font-size: 25px; }
+    .ua-performance-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+    .ua-performance-details > div { display: block; }
+    .ua-performance-details dd { margin-top: 5px; }
+    .ua-section-heading { gap: 8px; }
+    .ua-section-heading > span { font-size: 12px; }
     .ua-charts-grid { grid-template-columns: minmax(0, 1fr); }
-    .ua-usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0; }
-    .ua-usage-summary > div { padding: 18px; }
-    .ua-usage-summary > div:nth-child(3) { border-left: 0; }
-    .ua-usage-summary > div:nth-child(n+3) { border-top: 1px solid var(--border); }
-    .ua-section-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
-    .ua-section-heading > span { text-align: left; }
-    .ua-chart-card { padding: 18px 14px; }
-  }
-  @media (max-width: 450px) {
-    .ua-performance-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .ua-stat > strong { font-size: 23px; }
-    .ua-page { gap: 26px; }
-    .ua-outcome-chart li { font-size: 12px; }
+    .ua-chart-card, .ua-chart-card:nth-child(odd), .ua-chart-card:nth-child(even) { padding: 22px 0; border-right: 0; }
+    .ua-chart { height: 228px; }
+    .ua-chart-empty { padding-inline: 12px; }
   }
 }

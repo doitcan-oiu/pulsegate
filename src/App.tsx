@@ -13,7 +13,6 @@ import {
   Download,
   FileText,
   FlaskConical,
-  GitBranch,
   Globe2,
   KeyRound,
   Layers,
@@ -26,23 +25,13 @@ import {
   Settings2,
   ShieldCheck,
   TrendingUp,
-  Zap,
+  X,
 } from "lucide-react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import Overview from "./Overview";
 import {
   Card,
   Chip,
   Toast,
-  Table,
   Alert,
   Avatar,
   Spinner,
@@ -60,6 +49,7 @@ import type {
 } from "../shared/types";
 import { defaultSettings } from "../shared/types";
 import { api, ApiError } from "./api";
+import { csvCell } from "./csv";
 import ChannelEditor from "./ChannelEditor";
 import { providerModelSuggestions } from "./provider-models";
 import ChannelManager from "./ChannelManager";
@@ -68,6 +58,8 @@ import RetrySettings from "./RetrySettings";
 import Playground from "./Playground";
 import UsageAnalytics from "./UsageAnalytics";
 import RequestLogs from "./RequestLogs";
+import ConsoleErrorBoundary from "./ConsoleErrorBoundary";
+import { consoleRouteHash, readConsoleRoute } from "./navigation";
 import "./app-functional.css";
 
 type Page =
@@ -99,17 +91,17 @@ const details: Record<
 > = {
   overview: {
     title: "网关概览",
-    description: "感知每一次响应，让请求始终走向健康的渠道。",
+    description: "查看请求流量、渠道健康与近期调度事件。",
     eyebrow: "GATEWAY OVERVIEW",
   },
   channels: {
     title: "渠道管理",
-    description: "管理上游、标签和模型，追踪每个渠道的真实健康状态。",
+    description: "统一管理上游连接、模型与渠道访问范围。",
     eyebrow: "UPSTREAM CHANNELS",
   },
   keys: {
     title: "API Keys",
-    description: "为每个应用划定渠道范围，让授权与智能调度一起生效。",
+    description: "管理应用访问凭证，以及渠道、模型和请求额度权限。",
     eyebrow: "ACCESS & PROFILES",
   },
   routing: {
@@ -119,22 +111,22 @@ const details: Record<
   },
   playground: {
     title: "测试场",
-    description: "测试单个渠道或完整网关，查看响应和每一次重试。",
+    description: "验证模型响应，定位渠道连接与请求问题。",
     eyebrow: "MODEL PLAYGROUND",
   },
   requests: {
     title: "请求日志",
-    description: "追溯首字延迟、上游错误，以及请求经过的每一个渠道。",
+    description: "检索请求记录，追踪延迟、错误与重试过程。",
     eyebrow: "REQUEST EXPLORER",
   },
   analytics: {
     title: "用量分析",
-    description: "从实际请求记录了解模型用量与运行效率。",
+    description: "分析请求表现、模型用量与渠道运行效率。",
     eyebrow: "USAGE & INSIGHTS",
   },
   settings: {
     title: "网关设置",
-    description: "管理网关接入、调度、重试和运行配置。",
+    description: "配置网关接入、请求调度、健康检查与恢复策略。",
     eyebrow: "GATEWAY SETTINGS",
   },
 };
@@ -154,7 +146,8 @@ const emptyDashboard: DashboardData = {
 };
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请重试";
-const count = (value: number) => value.toLocaleString("zh-CN");
+const hasDashboardMetrics = (value: { events: DashboardData["events"] }): value is DashboardData =>
+  "totals" in value && "latency" in value && "channels" in value;
 const seconds = (value: number | null) =>
   value == null ? "—" : value.toFixed(2) + " s";
 const dateTime = (value: string) =>
@@ -248,11 +241,18 @@ function Heading({
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>("overview");
-  const [settingsTab, setSettingsTab] = useState("connection");
+  const [page, setPage] = useState<Page>(() => readConsoleRoute().page);
+  const [settingsTab, setSettingsTab] = useState(() => readConsoleRoute().settingsTab);
+  const [playgroundVisited, setPlaygroundVisited] = useState(() => readConsoleRoute().page === "playground");
+  const [settingsVisited, setSettingsVisited] = useState(() => readConsoleRoute().page === "settings");
   const [mobileNav, setMobileNav] = useState(false);
+  const [mobileViewport, setMobileViewport] = useState(() => window.matchMedia("(max-width: 760px)").matches);
+  const sidebarRef = useRef<HTMLElement>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [connectionError, setConnectionError] = useState("");
+  const [metricsError, setMetricsError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const refreshRequestId = useRef(0);
   const [token, setToken] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
   const [channels, setChannels] = useState<GatewayChannel[]>([]);
@@ -273,6 +273,7 @@ export default function App() {
   const [result, setResult] = useState("");
   const [logPage, setLogPage] = useState(1);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState("");
   const [logsClearing, setLogsClearing] = useState(false);
   const logsRequestId = useRef(0);
   const logsClearingRef = useRef(false);
@@ -303,20 +304,35 @@ export default function App() {
   }, [startSession]);
   const refresh = useCallback(
     async (quiet = false) => {
+      const requestId = ++refreshRequestId.current;
       if (!quiet) setRefreshing(true);
       try {
-        const [bootstrap, metrics] = await Promise.all([
+        const needsMetrics = page === "overview" || page === "analytics";
+        const [configuration, activity] = await Promise.allSettled([
           api<BootstrapData>("/api/bootstrap"),
-          api<DashboardData>("/api/dashboard?range=" + range),
+          needsMetrics
+            ? api<DashboardData>("/api/dashboard?range=" + range)
+            : api<{ events: DashboardData["events"] }>("/api/events"),
         ]);
+        if (requestId !== refreshRequestId.current) return;
+        if (configuration.status === "rejected") throw configuration.reason;
+        const bootstrap = configuration.value;
         setChannels(bootstrap.channels);
         setKeys(bootstrap.keys);
         setTags(bootstrap.tags);
         setSettings(bootstrap.settings);
-        setDashboard(metrics);
         setReady(true);
         setConnectionError("");
-        const latest = metrics.events[0];
+        setLastUpdated(new Date());
+        if (activity.status === "rejected") {
+          if (needsMetrics) setMetricsError(errorText(activity.reason));
+          return;
+        }
+        if (hasDashboardMetrics(activity.value)) {
+          setDashboard(activity.value);
+          setMetricsError("");
+        }
+        const latest = activity.value.events[0];
         if (
           seenEvent.current &&
           latest &&
@@ -326,6 +342,7 @@ export default function App() {
           toast(latest.title, { description: latest.description });
         if (latest) seenEvent.current = latest.id;
       } catch (e) {
+        if (requestId !== refreshRequestId.current) return;
         if (e instanceof ApiError && e.status === 401) {
           setSession((old) => (old ? { ...old, authenticated: false } : old));
           setReady(false);
@@ -334,10 +351,10 @@ export default function App() {
           if (!quiet) toast.error(errorText(e));
         }
       } finally {
-        if (!quiet) setRefreshing(false);
+        if (requestId === refreshRequestId.current) setRefreshing(false);
       }
     },
-    [range],
+    [range, page],
   );
   useEffect(() => {
     if (session?.authenticated) void refresh();
@@ -353,6 +370,7 @@ export default function App() {
     if (logsClearingRef.current) return;
     const requestId = ++logsRequestId.current;
     setLogsLoading(true);
+    setLogsError("");
     const params = new URLSearchParams({
       limit: "25",
       offset: String((logPage - 1) * 25),
@@ -369,7 +387,11 @@ export default function App() {
       if (logPage > 1 && (logPage - 1) * 25 >= data.total)
         setLogPage(Math.max(1, Math.ceil(data.total / 25)));
     } catch (e) {
-      if (requestId === logsRequestId.current) toast.error(errorText(e));
+      if (requestId === logsRequestId.current) {
+        setLogs([]);
+        setTotalLogs(0);
+        setLogsError(errorText(e));
+      }
     } finally {
       if (requestId === logsRequestId.current) setLogsLoading(false);
     }
@@ -379,12 +401,59 @@ export default function App() {
       const timer = setTimeout(() => void refreshLogs(), 250);
       return () => clearTimeout(timer);
     }
-  }, [page, session?.authenticated, refreshLogs, dashboard]);
+  }, [page, session?.authenticated, refreshLogs]);
+  useEffect(() => {
+    if (!session?.authenticated || page !== "requests") return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refreshLogs();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [page, session?.authenticated, refreshLogs]);
+  useEffect(() => {
+    const restore = () => {
+      const route = readConsoleRoute();
+      setPage(route.page);
+      setSettingsTab(route.settingsTab);
+      if (route.page === "playground") setPlaygroundVisited(true);
+      if (route.page === "settings") setSettingsVisited(true);
+      setMobileNav(false);
+    };
+    if (!window.location.hash) window.history.replaceState(null, "", consoleRouteHash(page, settingsTab));
+    window.addEventListener("popstate", restore);
+    window.addEventListener("hashchange", restore);
+    return () => {
+      window.removeEventListener("popstate", restore);
+      window.removeEventListener("hashchange", restore);
+    };
+  }, []);
+  useEffect(() => { document.title = `${details[page].title} · PulseGate`; }, [page]);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 760px)");
+    const update = () => { setMobileViewport(media.matches); if (!media.matches) setMobileNav(false); };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (!mobileNav || !mobileViewport) return;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    sidebarRef.current?.querySelector<HTMLButtonElement>(".console-nav-close")?.focus();
+    return () => {
+      document.body.style.overflow = overflow;
+      document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus();
+    };
+  }, [mobileNav, mobileViewport]);
   const navigate = (next: Page) => {
-    if (next === "routing") { setSettingsTab("routing"); setPage("settings"); }
-    else { if (next === "settings") setSettingsTab("connection"); setPage(next); }
+    const destination = next === "routing" ? "settings" : next;
+    const tab = next === "routing" ? "routing" : "connection";
+    const hash = consoleRouteHash(destination, tab);
+    if (window.location.hash !== hash) window.history.pushState(null, "", hash);
+    setPage(destination);
+    if (destination === "settings") { setSettingsVisited(true); setSettingsTab(tab); }
+    if (destination === "playground") setPlaygroundVisited(true);
     setMobileNav(false);
     window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    requestAnimationFrame(() => document.getElementById("page-title")?.focus({ preventScroll: true }));
   };
   const playground = (id?: string) => {
     setPlayChannel(id);
@@ -407,10 +476,10 @@ export default function App() {
       setLoginBusy(false);
     }
   }
-  async function saveSettings(next: GatewaySettings) {
+  async function saveSettings(_next: GatewaySettings, patch: Partial<GatewaySettings>) {
     const response = await api<{ settings: GatewaySettings }>("/api/settings", {
       method: "PATCH",
-      body: JSON.stringify(next),
+      body: JSON.stringify(patch),
     });
     setSettings(response.settings);
     await refresh(true);
@@ -490,7 +559,7 @@ export default function App() {
           rows
             .map((row) =>
               row
-                .map((v) => '"' + String(v).replaceAll('"', '""') + '"')
+                .map(csvCell)
                 .join(","),
             )
             .join("\r\n"),
@@ -504,43 +573,6 @@ export default function App() {
     }
   }
   const visibleChannels = channels.filter((c) => !c.archived);
-  const healthy = visibleChannels.filter(
-    (c) => c.enabled && c.status === "healthy",
-  );
-  const abnormal = visibleChannels.filter(
-    (c) => c.enabled && c.status !== "healthy",
-  );
-  const totals = dashboard.totals;
-  const metrics = [
-    {
-      label: "实际请求",
-      value: count(totals.requests),
-      unit: "次",
-      icon: Activity,
-      caption: "API / 测试场，不含健康探测",
-    },
-    {
-      label: "请求成功率",
-      value: totals.requests ? totals.successRate.toFixed(1) : "—",
-      unit: "%",
-      icon: ShieldCheck,
-      caption: "包含成功切换后的请求",
-    },
-    {
-      label: "平均有效首字",
-      value: totals.averageTtft ? totals.averageTtft.toFixed(2) : "—",
-      unit: "s",
-      icon: Zap,
-      caption: "健康阈值 " + settings.threshold + " s",
-    },
-    {
-      label: "成功故障转移",
-      value: count(totals.failovers),
-      unit: "次",
-      icon: GitBranch,
-      caption: "在授权范围内自动切换",
-    },
-  ];
   const toaster = <Toast.Provider placement="bottom end" />;
   if (!session || !session.authenticated || !ready)
     return (
@@ -620,13 +652,33 @@ export default function App() {
   return (
     <div className="app-shell">
       {toaster}
+      <a className="console-skip-link" href="#main-content" onClick={(event) => {
+        event.preventDefault();
+        document.getElementById("main-content")?.focus();
+      }}>跳转到主要内容</a>
       {mobileNav && (
         <div className="nav-overlay" onClick={() => setMobileNav(false)} />
       )}
-      <aside className={"sidebar " + (mobileNav ? "open" : "")}>
+      <aside ref={sidebarRef} id="console-navigation" className={"sidebar " + (mobileNav ? "open" : "")}
+        inert={mobileViewport && !mobileNav ? true : undefined}
+        role={mobileViewport && mobileNav ? "dialog" : undefined}
+        aria-modal={mobileViewport && mobileNav ? true : undefined}
+        aria-label="控制台导航"
+        onKeyDown={(event) => {
+          if (!mobileViewport || !mobileNav) return;
+          if (event.key === "Escape") { event.preventDefault(); setMobileNav(false); }
+          if (event.key !== "Tab") return;
+          const focusable = sidebarRef.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex="0"]');
+          if (!focusable?.length) return;
+          const first = focusable[0], last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        }}>
+        <Button className="icon-button console-nav-close" variant="ghost" aria-label="关闭导航" onClick={() => setMobileNav(false)}><X size={18} /></Button>
         <a
           href="#overview"
           className="brand"
+          title="PulseGate"
           onClick={(e) => {
             e.preventDefault();
             navigate("overview");
@@ -636,11 +688,13 @@ export default function App() {
             <Activity size={25} strokeWidth={2.3} />
           </div>
           <div>
-            PulseGate<span>智能大模型网关</span>
+            PulseGate
           </div>
         </a>
         <Button
           className="workspace-picker"
+          title="默认工作空间"
+          aria-label="默认工作空间设置"
           onClick={() => navigate("settings")}
         >
           <span className="workspace-icon">
@@ -649,19 +703,23 @@ export default function App() {
           <span>
             <strong>默认工作空间</strong>
             <small>
-              {session.devMode ? "Local D1 workspace" : "Cloudflare workspace"}
+              {session.devMode ? "Local workspace" : "Production"}
             </small>
           </span>
           <ChevronDown size={14} />
         </Button>
         <div className="nav-section-label">
-          工作空间 <span>WORKSPACE</span>
+          工作区
         </div>
         <nav aria-label="主导航">
-          {navItems.map((item) => (
+          {navItems.map((item, index) => (
+            <div className="console-nav-entry" key={item.id}>
+              {index === 3 && <div className="console-nav-group">监控与调试</div>}
             <Button
-              variant={page === item.id ? "primary" : "ghost"}
-              key={item.id}
+              variant="ghost"
+              aria-current={page === item.id ? "page" : undefined}
+              title={item.label}
+              aria-label={item.label}
               className={"nav-item " + (page === item.id ? "selected" : "")}
               onClick={() => navigate(item.id)}
             >
@@ -671,10 +729,9 @@ export default function App() {
                 <Chip size="sm" variant="soft">
                   {visibleChannels.length}
                 </Chip>
-              ) : (
-                page === item.id && <span className="nav-active-dot" />
-              )}
+              ) : null}
             </Button>
+            </div>
           ))}
         </nav>
         <div className="sidebar-bottom">
@@ -688,10 +745,8 @@ export default function App() {
               <Avatar.Fallback>D</Avatar.Fallback>
             </Avatar>
             <div>
-              <strong>Administrator</strong>
-              <small>
-                {session.devMode ? "本地开发环境" : "Cloudflare Workers"}
-              </small>
+              <strong>管理员</strong>
+              <small>{session.devMode ? "本地环境" : "生产环境"}</small>
             </div>
             <Button
               className="icon-button"
@@ -703,53 +758,40 @@ export default function App() {
           </div>
         </div>
       </aside>
-      <div className="main-shell">
+      <div className="main-shell" inert={mobileViewport && mobileNav ? true : undefined}>
         <header className="topbar">
           <div className="breadcrumb">
             <Button
               className="icon-button mobile-menu"
               aria-label="打开导航"
+              aria-expanded={mobileNav}
+              aria-controls="console-navigation"
               onClick={() => setMobileNav(true)}
             >
               <Menu size={20} />
             </Button>
             <Globe2 size={15} />
-            <span>工作空间</span>
+            <span>默认工作空间</span>
             <ChevronRight size={13} />
             <strong>{details[page].title}</strong>
           </div>
           <div className="topbar-actions">
-            <span className="fn-environment">
-              <Database size={13} />
-              D1 已连接
+            <span className={"fn-environment" + (connectionError ? " console-connection-error" : "")} role="status">
+              <i className="console-status-dot" />
+              {connectionError ? "连接异常" : "已连接"}
             </span>
-            <Chip size="sm" variant="soft">
-              {session.devMode ? "LOCAL" : "WORKERS"}
-            </Chip>
-            <Button
-              className="topbar-avatar"
-              isIconOnly
-              variant="ghost"
-              aria-label="管理设置"
-              onClick={() => navigate("settings")}
-            >
-              <Avatar size="sm">
-                <Avatar.Fallback>D</Avatar.Fallback>
-              </Avatar>
-            </Button>
+            <span className="console-env-label">{session.devMode ? "本地环境" : "生产环境"}</span>
           </div>
         </header>
-        <main>
+        <main id="main-content" tabIndex={-1}>
           <div className="page-heading">
             <div>
-              <div className="eyebrow">{details[page].eyebrow}</div>
-              <h1>
+              <h1 id="page-title" tabIndex={-1}>
                 {details[page].title}
-                <span className="page-title-dot" />
               </h1>
-              <p>{details[page].description}</p>
             </div>
             <div className="heading-actions">
+              {lastUpdated && <span className="console-last-updated" title="页面打开时每 15 秒自动更新">更新于 {lastUpdated.toLocaleTimeString("zh-CN", { hour12: false })}</span>}
               {["overview", "analytics"].includes(page) && (
                 <Select
                   className="fn-range"
@@ -787,7 +829,8 @@ export default function App() {
               )}
               {page === "requests" && (
                 <Button
-                  className="button button-primary"
+                  className="button button-secondary"
+                  variant="secondary"
                   onClick={() => void exportLogs()}
                   disabled={logsClearing}
                 >
@@ -797,6 +840,7 @@ export default function App() {
               )}
             </div>
           </div>
+          <ConsoleErrorBoundary resetKey={page}>
           {connectionError && (
             <Alert status="danger">
               <Alert.Indicator />
@@ -807,221 +851,16 @@ export default function App() {
               </Alert.Content>
             </Alert>
           )}
+          {metricsError && (page === "overview" || page === "analytics") && (
+            <Alert status="warning" className="console-data-alert"><Alert.Indicator /><Alert.Content>
+              <Alert.Title>统计数据暂时无法更新</Alert.Title>
+              <Alert.Description>{metricsError}。已保留上次数据，其他管理功能仍可使用。</Alert.Description>
+            </Alert.Content></Alert>
+          )}
           {page === "overview" && (
-            <>
-              <div className="health-banner">
-                <div className="health-banner-icon">
-                  <ShieldCheck size={18} />
-                </div>
-                <div>
-                  <strong>
-                    {visibleChannels.length
-                      ? healthy.length +
-                        " 个健康渠道 · " +
-                        abnormal.length +
-                        " 个异常渠道"
-                      : "工作空间已就绪，添加第一个上游渠道"}
-                  </strong>
-                  <span>
-                    {visibleChannels.length
-                      ? "最近 " +
-                        settings.window +
-                        " 次尝试判断健康，连续 " +
-                        settings.recovery +
-                        " 次健康探测后恢复。"
-                      : "配置真实上游，或在测试场创建本地测试渠道验证故障切换。"}
-                  </span>
-                </div>
-                <Button
-                  onClick={() =>
-                    navigate(visibleChannels.length ? "routing" : "playground")
-                  }
-                >
-                  {visibleChannels.length ? "查看策略" : "打开测试场"}
-                  <ArrowRight size={13} />
-                </Button>
-              </div>
-              <div className="metrics-grid">
-                {metrics.map((m) => (
-                  <Card className="metric-card" key={m.label}>
-                    <div className="metric-top">
-                      {m.label}
-                      <div className="metric-icon">
-                        <m.icon size={17} />
-                      </div>
-                    </div>
-                    <div className="metric-value">
-                      {m.value}
-                      <span>{m.unit}</span>
-                    </div>
-                    <div className="metric-bottom">
-                      <small>{m.caption}</small>
-                    </div>
-                  </Card>
-                ))}
-              </div>
-              <div className="overview-grid">
-                <Card className="panel latency-panel">
-                  <Heading
-                    title="首字延迟趋势"
-                    subtitle="仅统计真实 SSE 请求的有效首字延迟"
-                  />
-                  <div className="fn-chart-legend">
-                    <span>
-                      <i style={{ background: "var(--accent)" }} />
-                      优先渠道
-                    </span>
-                    <span>
-                      <i style={{ background: "var(--success)" }} />
-                      其他渠道
-                    </span>
-                    <span>阈值 {settings.threshold}s</span>
-                  </div>
-                  <LatencyChart
-                    data={dashboard.latency}
-                    threshold={settings.threshold}
-                  />
-                </Card>
-                <Card className="panel routing-panel">
-                  <Heading
-                    title="当前调度"
-                    subtitle="先权限筛选，再选择健康渠道"
-                  />
-                  <div className="fn-routing">
-                    <div className="fn-route-mode">
-                      <GitBranch size={20} />
-                      <strong>
-                        {
-                          {
-                            failover: "故障转移",
-                            adaptive: "低延迟优先",
-                            "round-robin": "轮询",
-                            weighted: "加权随机",
-                            "circuit-breaker": "熔断保护",
-                          }[settings.strategy]
-                        }
-                      </strong>
-                    </div>
-                    <dl>
-                      <div>
-                        <dt>有效首字超时</dt>
-                        <dd>
-                          {settings.streamFirstTokenTimeout
-                            ? settings.streamFirstTokenTimeout + " s"
-                            : "已关闭"}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>同渠道 / 跨渠道重试</dt>
-                        <dd>
-                          {settings.maxSameChannelRetries} /{" "}
-                          {settings.maxChannelRetries}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>会话粘性</dt>
-                        <dd>
-                          {settings.stickyMode === "prefer"
-                            ? "trace → thread"
-                            : "关闭"}
-                        </dd>
-                      </div>
-                    </dl>
-                    <Button
-                      className="button button-secondary"
-                      onClick={() => playground()}
-                    >
-                      <FlaskConical size={15} />
-                      验证调度策略
-                    </Button>
-                  </div>
-                </Card>
-                <Card className="panel channels-panel">
-                  <Heading
-                    title="渠道健康"
-                    subtitle="最近的实际尝试与窗口平均值"
-                    action={
-                      <Button
-                        className="text-button"
-                        onClick={() => navigate("channels")}
-                      >
-                        全部渠道
-                        <ChevronRight size={14} />
-                      </Button>
-                    }
-                  />
-                  <div className="table-scroll">
-                    <Table>
-                      <Table.ScrollContainer>
-                        <Table.Content
-                          aria-label="渠道健康"
-                          className="channel-table compact"
-                          onRowAction={(id) => {
-                            const found = channels.find(
-                              (channel) => channel.id === String(id),
-                            );
-                            if (found) setEditor(found);
-                          }}
-                        >
-                          <Table.Header>
-                            <Table.Column id="column-0" isRowHeader>
-                              渠道
-                            </Table.Column>
-                            <Table.Column id="column-1">状态</Table.Column>
-                            <Table.Column id="column-2">平均首字</Table.Column>
-                            <Table.Column id="column-3">请求</Table.Column>
-                          </Table.Header>
-                          <Table.Body>
-                            {visibleChannels.slice(0, 6).map((c) => (
-                              <Table.Row key={c.id} id={c.id}>
-                                <Table.Cell>
-                                  <strong>{c.name}</strong>
-                                </Table.Cell>
-                                <Table.Cell>
-                                  <Badge
-                                    result={c.enabled ? c.status : "offline"}
-                                  />
-                                </Table.Cell>
-                                <Table.Cell className="mono">
-                                  {seconds(c.health.averageTtft)}
-                                </Table.Cell>
-                                <Table.Cell className="mono">
-                                  {count(c.requests)}
-                                </Table.Cell>
-                              </Table.Row>
-                            ))}
-                          </Table.Body>
-                        </Table.Content>
-                      </Table.ScrollContainer>
-                    </Table>
-                  </div>
-                  {!visibleChannels.length && (
-                    <Empty>还没有渠道，添加上游后即可开始调度。</Empty>
-                  )}
-                </Card>
-                <Card className="panel events-panel">
-                  <Heading
-                    title="调度事件"
-                    subtitle="健康判定、切换与恢复的实际记录"
-                  />
-                  <div className="fn-events">
-                    {dashboard.events.slice(0, 5).map((event) => (
-                      <div className="fn-event" key={event.id}>
-                        <span className={"fn-event-symbol fn-" + event.type}>
-                          <Activity size={15} />
-                        </span>
-                        <div>
-                          <strong>{event.title}</strong>
-                          <p>{event.description}</p>
-                          <small>{dateTime(event.createdAt)}</small>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  {!dashboard.events.length && <Empty>还没有调度事件。</Empty>}
-                </Card>
-              </div>
-            </>
+            <Overview dashboard={dashboard} channels={channels} settings={settings} range={dashboard.analytics?.range ?? range}
+              onNavigate={navigate} onEdit={setEditor} onCreate={() => setEditor("new")}
+              onCopyAddress={() => void copy(window.location.origin + "/v1")} />
           )}
           {page === "channels" && (
             <ChannelManager
@@ -1044,7 +883,8 @@ export default function App() {
               onChange={() => refresh(true)}
             />
           )}
-          {page === "playground" && (
+          {playgroundVisited && (
+            <section hidden={page !== "playground"} aria-label="模型测试工作区">
             <Playground
               key={playVersion}
               channels={channels}
@@ -1053,8 +893,13 @@ export default function App() {
               onRefresh={() => refresh(true)}
               devMode={session.devMode}
             />
+            </section>
           )}
           {page === "requests" && (
+            <>
+            {logsError && <Alert status="danger" className="console-data-alert"><Alert.Indicator /><Alert.Content>
+              <Alert.Title>请求日志加载失败</Alert.Title><Alert.Description>{logsError}。请调整筛选条件或点击刷新重试。</Alert.Description>
+            </Alert.Content></Alert>}
             <RequestLogs
               logs={logs}
               total={totalLogs}
@@ -1069,10 +914,17 @@ export default function App() {
               onOpen={(id) => void showLog(id)}
               onClear={clearLogs}
             />
+            </>
           )}
           {page === "analytics" && <UsageAnalytics dashboard={dashboard} />}
-          {page === "settings" && (
-            <Tabs selectedKey={settingsTab} onSelectionChange={(id) => setSettingsTab(String(id))} variant="secondary" className="fn-settings-tabs">
+          {settingsVisited && (
+            <section hidden={page !== "settings"} aria-label="网关配置工作区">
+            <Tabs selectedKey={settingsTab} onSelectionChange={(id) => {
+              const tab = id === "routing" ? "routing" : "connection";
+              setSettingsTab(tab);
+              const hash = consoleRouteHash("settings", tab);
+              if (window.location.hash !== hash) window.history.pushState(null, "", hash);
+            }} variant="secondary" className="fn-settings-tabs">
               <Tabs.ListContainer>
                 <Tabs.List aria-label="网关设置分类">
                   <Tabs.Tab id="connection">接入与运行<Tabs.Indicator /></Tabs.Tab>
@@ -1104,7 +956,9 @@ export default function App() {
                 <RetrySettings settings={settings} onSave={saveSettings} />
               </Tabs.Panel>
             </Tabs>
+            </section>
           )}
+          </ConsoleErrorBoundary>
           <footer className="page-footer">
             <span>PulseGate · Workers + D1</span>
             <span>
@@ -1216,80 +1070,6 @@ export default function App() {
   );
 }
 
-function LatencyChart({
-  data,
-  threshold,
-}: {
-  data: DashboardData["latency"];
-  threshold: number;
-}) {
-  if (!data.length)
-    return <Empty>发起流式请求后，这里会显示真实首字延迟。</Empty>;
-  return (
-    <div className="fn-chart">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart
-          data={data}
-          margin={{ top: 16, right: 22, bottom: 10, left: 0 }}
-        >
-          <CartesianGrid stroke="var(--border)" vertical={false} />
-          <XAxis
-            dataKey="time"
-            tickFormatter={(value) =>
-              new Date(value).toLocaleTimeString("zh-CN", {
-                hour: "2-digit",
-                minute: "2-digit",
-                timeZone: "Asia/Shanghai",
-              })
-            }
-            tick={{ fontSize: 12, fill: "var(--muted)" }}
-            axisLine={false}
-            tickLine={false}
-          />
-          <YAxis
-            unit="s"
-            tick={{ fontSize: 12, fill: "var(--muted)" }}
-            axisLine={false}
-            tickLine={false}
-          />
-          <Tooltip
-            labelFormatter={(value) => dateTime(String(value))}
-            formatter={(value, name) => [
-              typeof value === "number" ? value.toFixed(2) + " s" : "—",
-              name,
-            ]}
-            contentStyle={{
-              border: "1px solid var(--border)",
-              borderRadius: 10,
-              fontSize: 12,
-            }}
-          />
-          <ReferenceLine
-            y={threshold}
-            stroke="var(--warning)"
-            strokeDasharray="4 4"
-          />
-          <Line
-            name="优先渠道"
-            dataKey="primary"
-            stroke="var(--accent)"
-            strokeWidth={2}
-            dot={{ r: 3 }}
-            connectNulls={false}
-          />
-          <Line
-            name="其他渠道"
-            dataKey="backup"
-            stroke="var(--success)"
-            strokeWidth={2}
-            dot={{ r: 3 }}
-            connectNulls={false}
-          />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
 
 function ConnectionSettings({
   settings,
@@ -1315,13 +1095,39 @@ function ConnectionSettings({
   const [retention, setRetention] = useState(settings.logRetentionDays);
   const [notifications, setNotifications] = useState(settings.notifications);
   const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const settingsSignature = JSON.stringify([settings.account, settings.gateway, settings.aiGatewayEnabled, settings.logRetentionDays, settings.notifications]);
+  const [savedSignature, setSavedSignature] = useState(settingsSignature);
+  const draftSignature = JSON.stringify([account.trim(), gateway.trim(), enabled, retention, notifications]);
+  const dirty = draftSignature !== savedSignature || Boolean(secret || clear);
+  function reset() {
+    setAccount(settings.account); setGateway(settings.gateway); setEnabled(settings.aiGatewayEnabled);
+    setRetention(settings.logRetentionDays); setNotifications(settings.notifications);
+    setSecret(""); setClear(false); setSaveError(""); setSavedSignature(settingsSignature);
+  }
+  useEffect(() => {
+    if (!dirty) {
+      setAccount(settings.account); setGateway(settings.gateway); setEnabled(settings.aiGatewayEnabled);
+      setRetention(settings.logRetentionDays); setNotifications(settings.notifications); setSavedSignature(settingsSignature);
+    }
+  }, [settingsSignature, dirty]);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   async function save(e: FormEvent) {
     e.preventDefault();
+    if (busy || !dirty) return;
+    setSaveError("");
+    if (enabled && (!account.trim() || !gateway.trim())) { setSaveError("启用 AI Gateway 前，请填写 Account ID 和 Gateway ID。"); return; }
+    if (!Number.isInteger(retention) || retention < 1 || retention > 3650) { setSaveError("日志保留天数须为 1–3650 的整数。"); return; }
     setBusy(true);
     try {
       await onSave({
-        account,
-        gateway,
+        account: account.trim(),
+        gateway: gateway.trim(),
         aiGatewayEnabled: enabled,
         notifications,
         logRetentionDays: retention,
@@ -1330,9 +1136,10 @@ function ConnectionSettings({
       });
       setSecret("");
       setClear(false);
+      setSavedSignature(draftSignature);
       toast.success("网关设置已保存");
     } catch (e) {
-      toast.error(errorText(e));
+      setSaveError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -1345,6 +1152,7 @@ function ConnectionSettings({
           subtitle="按渠道选择直连或自定义服务商接入"
         />
         <form className="fn-settings-form" onSubmit={save}>
+          <fieldset className="console-form-fields" disabled={busy}>
           <div className="fn-connection-title">
             <Cloud size={24} />
             <div>
@@ -1434,13 +1242,21 @@ function ConnectionSettings({
               页面打开时通知新的调度事件
             </Switch>
           </div>
+          </fieldset>
+          {saveError && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Description>{saveError}</Alert.Description></Alert.Content></Alert>}
+          <div className="console-save-bar">
+            <span className={"console-save-status" + (dirty ? " is-dirty" : "")} role="status">{dirty ? "有未保存的更改" : "当前配置已保存"}</span>
+            <div>
+              <Button variant="secondary" disabled={busy || !dirty} onClick={reset}>放弃更改</Button>
           <Button
             type="submit"
             className="button button-primary"
-            disabled={busy}
+            disabled={busy || !dirty}
           >
             {busy ? "保存中…" : "保存设置"}
           </Button>
+            </div>
+          </div>
         </form>
       </Card>
       <Card className="panel">

@@ -6,6 +6,12 @@
     justify-content: flex-end;
     gap: 5px;
   }
+  .gx-table .cx-actions > .button {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+  }
   .cx-menu {
     max-height: calc(100dvh - 32px);
     overflow: auto;
@@ -14,30 +20,30 @@
   .cx-hint,
   .cx-help {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.75;
     overflow-wrap: anywhere;
   }
   .cx-help {
     display: block;
-    font-size: 12px;
+    font-size: 13px;
   }
   .cx-field {
     display: flex;
     flex-direction: column;
     gap: 8px;
     margin: 16px 0;
-    font-size: 13px;
+    font-size: 14px;
     min-width: 0;
   }
   .cx-field small {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
   }
   .cx-field .cx-code {
     font-family: ui-monospace, SFMono-Regular, monospace;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
   }
   .cx-form-grid {
@@ -78,7 +84,7 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     font:
-      12px/1.8 ui-monospace,
+      13px/1.8 ui-monospace,
       monospace;
   }
   .cx-credentials article {
@@ -100,14 +106,14 @@
     flex-wrap: wrap;
   }
   .cx-credentials strong {
-    font-size: 13px;
+    font-size: 14px;
   }
   .cx-credentials code {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
   }
   .cx-credentials small {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .cx-test-result {
@@ -122,11 +128,11 @@
     align-items: center;
     gap: 14px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .cx-test-summary strong {
-    font-size: 13px;
+    font-size: 14px;
   }
   .cx-test-attempt {
     display: flex;
@@ -135,11 +141,11 @@
     padding: 12px 0;
     margin-top: 10px;
     border-top: 1px solid var(--border);
-    font-size: 12px;
+    font-size: 13px;
   }
   .cx-test-attempt b {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
   }
   .cx-test-attempt span {
     flex: 1;
@@ -148,13 +154,13 @@
   .cx-test-attempt small {
     display: block;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.8;
     overflow-wrap: anywhere;
   }
   .cx-test-attempt em {
     font-style: normal;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     white-space: nowrap;
   }
@@ -162,7 +168,7 @@
     min-width: 0;
   }
   .cx-test-history h4 {
-    font-size: 13px;
+    font-size: 14px;
     margin-top: 24px;
     overflow-wrap: anywhere;
   }

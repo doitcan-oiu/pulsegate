@@ -160,8 +160,13 @@ export class Store implements GatewayStore {
     const key = await this.getKey(keyId); if (!key || key.status !== 'active' || key.activeProfile !== profileId || expired(key)) return false;
     const current = key.profiles.find(p => p.id === profileId); if (!current) return false;
     limit = Math.max(0,Number(current.requestLimit) || 0);
-    const usage = await this.env.DB.prepare('UPDATE profile_usage SET used=used+1 WHERE key_id=? AND profile_id=? AND (?<=0 OR used<?) RETURNING used').bind(keyId,profileId,limit,limit).first();
-    if (!usage) return false; await this.env.DB.prepare('UPDATE api_keys SET used=used+1 WHERE id=?').bind(keyId).run(); return true;
+    const reserved = await this.env.DB.batch([
+      this.env.DB.prepare('UPDATE profile_usage SET used=used+1 WHERE key_id=? AND profile_id=? AND (?<=0 OR used<?)').bind(keyId,profileId,limit,limit),
+      // changes() observes the preceding profile update in this same transaction;
+      // an exhausted or missing profile must not increment the key's total.
+      this.env.DB.prepare('UPDATE api_keys SET used=used+1 WHERE id=? AND changes()=1').bind(keyId),
+    ]);
+    return reserved[0].meta.changes === 1;
   }
   async listTags(): Promise<string[]> { return (await this.env.DB.prepare('SELECT name FROM tags ORDER BY name').all<{ name: string }>()).results.map(r => r.name); }
   async addTag(name: string): Promise<void> { await this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(name).run(); }
@@ -261,6 +266,8 @@ export class Store implements GatewayStore {
     await this.env.DB.prepare('INSERT INTO gateway_state(id,value,expires_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value,expires_at=excluded.expires_at').bind(id,JSON.stringify(value),Date.now()+120000).run(); return true;
   }
   async listLogs(options: { limit?: number; offset?: number; q?: string; result?: string; channelId?: string; source?: string } = {}): Promise<{ logs: GatewayLog[]; total: number }> {
+    // D1 limits LIKE patterns to 50 UTF-8 bytes, including the two wildcards.
+    if (options.q && new TextEncoder().encode(options.q).byteLength > 48) throw new HttpError(400, '搜索关键词过长，最多 48 个英文字符或 16 个汉字；混合输入请适当缩短');
     const where = ['1=1']; const args: (string | number)[] = [];
     if (options.q) { where.push('(model LIKE ? OR json_extract(data,\'$.channel\') LIKE ? OR id LIKE ?)'); const q = '%'+options.q+'%'; args.push(q,q,q); }
     for (const [key,column] of [['result','result'],['channelId','channel_id'],['source','source']] as const) if (options[key]) { where.push(column+'=?'); args.push(options[key]!); }

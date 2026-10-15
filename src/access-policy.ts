@@ -1,4 +1,15 @@
-import type { GatewayChannel, KeyProfile } from '../shared/types';
+import type { GatewayApiKey, GatewayChannel, KeyProfile } from '../shared/types';
+
+/** Date-only expiry is inclusive through the end of the selected Beijing date. */
+export function apiKeyExpired(key: Pick<GatewayApiKey, 'expires'>, now = Date.now()): boolean {
+  if (['', '永不过期', 'never'].includes(key.expires)) return false;
+  const expires = /^\d{4}-\d{2}-\d{2}$/.test(key.expires) ? `${key.expires}T23:59:59.999+08:00` : key.expires;
+  return Date.parse(expires) <= now;
+}
+
+export function usableApiKey(key: Pick<GatewayApiKey, 'status' | 'expires'>, now = Date.now()): boolean {
+  return key.status === 'active' && !apiKeyExpired(key, now);
+}
 
 /** Match the public model list: whitelist mapping targets, then expose their entry names. */
 export function modelsForProfile(channels: GatewayChannel[], profile: KeyProfile, includeDisabled = false): string[] {
