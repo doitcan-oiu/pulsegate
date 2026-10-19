@@ -8,32 +8,29 @@
     "dev": "concurrently -k -n frontend,worker \"npm:dev:frontend\" \"npm:dev:worker\"",
     "dev:frontend": "vite --host 127.0.0.1",
     "dev:worker": "wrangler dev --config wrangler.dev.jsonc --ip 127.0.0.1 --port 8787 --persist-to .wrangler/state",
-    "build": "tsc -b && tsc -p tsconfig.worker.json && vite build",
+    "build": "vue-tsc --noEmit && tsc -p tsconfig.worker.json && vite build",
     "test": "vitest run",
     "preview": "vite preview --host 127.0.0.1",
     "deploy": "npm run build && wrangler deploy && wrangler d1 migrations apply DB --remote",
     "deploy:button": "node scripts/deploy-button.mjs"
   },
   "dependencies": {
-    "@heroui/react": "^3.2.6",
-    "@heroui/styles": "^3.2.6",
-    "@tailwindcss/vite": "^4.3.3",
-    "lucide-react": "^0.468.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "recharts": "^3.2.1",
-    "tailwindcss": "^4.3.3"
+    "@mdi/font": "^7.4.47",
+    "chart.js": "^4.5.1",
+    "vue": "^3.5.44",
+    "vue-chartjs": "^5.3.4",
+    "vuetify": "^4.2.6"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.0",
     "@cloudflare/workers-types": "^5.20261012.1",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^5.0.0",
+    "@vitejs/plugin-vue": "^6.0.10",
     "concurrently": "^10.0.6",
     "typescript": "~5.9.3",
     "vite": "^7.1.7",
+    "vite-plugin-vuetify": "^2.1.3",
     "vitest": "^4.1.11",
+    "vue-tsc": "^3.3.13",
     "wrangler": "^4.42.0"
   }
 }
