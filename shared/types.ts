@@ -4,8 +4,9 @@ export type ProviderProtocol = 'openai' | 'anthropic' | 'gemini' | 'mock';
 export type RoutingStrategy = 'failover' | 'adaptive' | 'round-robin' | 'weighted' | 'circuit-breaker';
 export type MockScenario = 'healthy' | 'slow' | 'error' | 'empty' | 'disconnect' | 'transient';
 export type ModelPrice = { model: string; input: number; output: number };
+export type AccountIntegration = 'newapi' | 'sub2api' | 'bbdevlab';
 export type ChannelConfig = {
-  integration?: 'native' | 'newapi' | 'sub2api';
+  integration?: 'native' | AccountIntegration;
   protocol: ProviderProtocol;
   gatewayMode: 'direct' | 'ai-gateway';
   customProviderSlug: string;
@@ -23,7 +24,7 @@ export type ChannelConfig = {
 export type GatewayChannel = {
   hasAccountCredentials?: boolean;
   accountAuthMode?: 'password' | 'token' | 'cookie';
-  accountIntegration?: 'newapi' | 'sub2api';
+  accountIntegration?: AccountIntegration;
   accountBalance?: { status: 'pending' | 'ok' | 'error'; amount: number | null; unit: string; updatedAt: string | null; checkedAt: string | null; error?: string };
   id: string; name: string; provider: string; model: string; models: string[];
   tags: string[]; weight: number; endpoint: string; status: ChannelStatus;

@@ -8,5 +8,6 @@
   "d1_databases": [{ "binding": "DB", "database_name": "pulsegate-db", "migrations_dir": "migrations" }],
   "durable_objects": { "bindings": [{ "name": "GATEWAY_STATE", "class_name": "GatewayState" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GatewayState"] }],
+  "triggers": { "crons": ["* * * * *"] },
   "vars": { "DEV_MODE": "true" }
 }

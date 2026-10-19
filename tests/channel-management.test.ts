@@ -1,10 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { env } from 'cloudflare:workers';
-import { applyD1Migrations, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { applyD1Migrations, createExecutionContext, createScheduledController, waitOnExecutionContext } from 'cloudflare:test';
 import worker from '../worker/index';
 import { decryptSecret } from '../worker/crypto';
 import { refreshAccountBalance, refreshDueAccounts } from '../worker/accounts';
 import { Store } from '../worker/store';
+import { channel as parseChannel } from '../worker/validation';
 import type { Env } from '../worker/env';
 import type { GatewayChannel } from '../shared/types';
 
@@ -15,11 +16,20 @@ async function call(path: string, method = 'GET', data?: unknown, authenticated 
   const content = await response.text(); await waitOnExecutionContext(ctx);
   return { status: response.status, content, json: JSON.parse(content) };
 }
+async function runScheduled(customEnv: Env = testEnv) {
+  const ctx = createExecutionContext();
+  try { await worker.scheduled(createScheduledController({ cron: '* * * * *', scheduledTime: Date.now() }), customEnv, ctx); }
+  finally { await waitOnExecutionContext(ctx); }
+}
+async function manualBalance(id: string) {
+  const refreshed = await call(`/api/channels/${id}/balance`, 'POST', {});
+  expect(refreshed.status).toBe(200); return refreshed;
+}
 beforeAll(async () => { await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS); });
 beforeEach(async () => {
   await testEnv.DB.batch(['channel_accounts','credentials','channels','settings','tags','gateway_state'].map(table => testEnv.DB.prepare('DELETE FROM ' + table)));
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 function mockAccount(balance = 12.5) {
   return vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const path = new URL(String(input)).pathname;
@@ -30,7 +40,7 @@ function mockAccount(balance = 12.5) {
 }
 async function accountChannel(kind: 'newapi' | 'sub2api' = 'newapi') {
   const result = await call('/api/channels', 'POST', { name: 'Account test', endpoint: 'https://account.example/v1', models: ['model-a'], config: { protocol: 'openai', integration: kind }, accountCredentials: { username: 'fake-user@example.com', password: 'fake-account-password' }, apiKeys: ['fake-api-key'] });
-  expect(result.status).toBe(201); return result;
+  expect(result.status).toBe(201); await manualBalance(result.json.channel.id); return result;
 }
 
 describe('model discovery management endpoint', () => {
@@ -110,6 +120,7 @@ describe('account monitoring independent of the API protocol', () => {
     }); vi.stubGlobal('fetch', fetcher);
     const created = await call('/api/channels', 'POST', { name: 'Native monitored', endpoint: 'https://account.example', models: ['native-model'], config: { protocol, integration: 'newapi' }, apiKeys: [inferenceKey], accountCredentials: { accessToken: monitorToken, userId: '42' } });
     expect(created.status).toBe(201); expect(created.json.channel.config).toMatchObject({ protocol, integration: 'newapi' }); expect(created.json.channel.accountIntegration).toBe('newapi');
+    await manualBalance(created.json.channel.id);
     expect((await new Store(testEnv).getChannel(created.json.channel.id))?.accountBalance).toMatchObject({ status: 'ok', amount: 3 });
     const discovered = await call('/api/channels/discover-models', 'POST', { channelId: created.json.channel.id });
     expect(discovered.status).toBe(200); expect(discovered.json.models).toEqual(['native-model']);
@@ -277,7 +288,7 @@ describe('encrypted channel accounts and balance refresh', () => {
   }
   async function cookieAccountChannel() {
     const created = await call('/api/channels', 'POST', { name: 'Cookie account', endpoint: 'https://account.example', models: ['a'], config: { protocol: 'anthropic', integration: 'sub2api' }, accountCredentials: browserCredentials });
-    expect(created.status).toBe(201); return created;
+    expect(created.status).toBe(201); await manualBalance(created.json.channel.id); return created;
   }
   it('persists a Sub2API browser JWT without a Cookie under encrypted browser-session mode', async () => {
     const token = 'private-jwt-without-cookie';
@@ -288,6 +299,7 @@ describe('encrypted channel accounts and balance refresh', () => {
     }); vi.stubGlobal('fetch', fetcher);
     const created = await call('/api/channels', 'POST', { name: 'JWT session account', endpoint: 'https://account.example', models: ['a'], config: { integration: 'sub2api' }, accountCredentials: { cookie: '', accessToken: 'Bearer ' + token } });
     expect(created.status).toBe(201); expect(created.json.channel).toMatchObject({ accountAuthMode: 'cookie', accountIntegration: 'sub2api', hasAccountCredentials: true });
+    await manualBalance(created.json.channel.id);
     const id = created.json.channel.id, row = await cookieAccountRow(id);
     expect(JSON.parse(await decryptSecret(row.credentials, testEnv))).toEqual({ cookie: '', accessToken: token });
     expect(row.credentials).not.toContain(token); expect(row.auth_secret).not.toContain(token);
@@ -329,7 +341,8 @@ describe('encrypted channel accounts and balance refresh', () => {
     expect((await call(`/api/channels/${id}/balance`, 'POST', {})).status).toBe(400); expect(fetcher).not.toHaveBeenCalled();
     const profileFetch = mockCookieProfile(10.25);
     const on = await call(`/api/channels/${id}`, 'PATCH', { config: { integration: 'sub2api' } });
-    expect(on.status).toBe(200); expect(on.json.channel.accountAuthMode).toBe('cookie'); expect(profileFetch).toHaveBeenCalledTimes(1);
+    expect(on.status).toBe(200); expect(on.json.channel.accountAuthMode).toBe('cookie'); expect(profileFetch).not.toHaveBeenCalled();
+    await manualBalance(id); expect(profileFetch).toHaveBeenCalledTimes(1);
     expect((await cookieAccountRow(id)).credentials).toBe(row.credentials); expect((await store.getChannel(id))?.accountBalance?.amount).toBe(10.25);
   });
   it.each(['newapi', 'native'] as const)('rejects Cookie credentials for %s before saving channels or partial imports', async integration => {
@@ -344,12 +357,14 @@ describe('encrypted channel accounts and balance refresh', () => {
     mockCookieProfile(6.75);
     const cookie = await call(`/api/channels/${id}`, 'PATCH', { accountCredentials: browserCredentials });
     expect(cookie.status).toBe(200); expect(cookie.json.channel.accountAuthMode).toBe('cookie');
+    await manualBalance(id);
     const cookieRow = await cookieAccountRow(id); expect(cookieRow.version).toBeGreaterThan(old.version); expect(JSON.parse(await decryptSecret(cookieRow.credentials, testEnv))).toEqual(browserCredentials);
     expect(JSON.parse(await decryptSecret(cookieRow.auth_secret!, testEnv))).toMatchObject({ cookie: browserCredentials.cookie, token: browserCredentials.accessToken });
     expect((await store.getChannel(id))?.accountBalance?.amount).toBe(6.75);
     mockAccount(9.5);
     const password = await call(`/api/channels/${id}`, 'PATCH', { accountCredentials: { username: 'new-private-user', password: 'new-private-password' } });
     expect(password.status).toBe(200); expect(password.json.channel.accountAuthMode).toBe('password');
+    await manualBalance(id);
     const passwordRow = await cookieAccountRow(id);
     expect(JSON.parse(await decryptSecret(passwordRow.credentials, testEnv))).toEqual({ username: 'new-private-user', password: 'new-private-password' });
     expect(JSON.parse(await decryptSecret(passwordRow.auth_secret!, testEnv))).not.toHaveProperty('cookie');
@@ -361,7 +376,7 @@ describe('encrypted channel accounts and balance refresh', () => {
     expect((await call(`/api/channels/${id}/balance`, 'POST', {})).status).toBe(200); expect(manualFetch).toHaveBeenCalledTimes(1);
     expect((await store.getChannel(id))?.accountBalance?.amount).toBe(8.5);
     await testEnv.DB.prepare('UPDATE channel_accounts SET next_refresh_at=0 WHERE channel_id=?').bind(id).run();
-    const cronFetch = mockCookieProfile(9.5); await refreshDueAccounts(testEnv, await store.listChannels(), true); expect(cronFetch).toHaveBeenCalledTimes(1);
+    const cronFetch = mockCookieProfile(9.5); await runScheduled(); expect(cronFetch).toHaveBeenCalledTimes(1);
     const last = (await store.getChannel(id))!.accountBalance!;
     const failedFetch = vi.fn(async () => Response.json({ message: JSON.stringify(browserCredentials) }, { status: 401 })); vi.stubGlobal('fetch', failedFetch);
     const failure = await call(`/api/channels/${id}/balance`, 'POST', {});
@@ -402,6 +417,7 @@ describe('encrypted channel accounts and balance refresh', () => {
     const created = await call('/api/channels','POST',{ name:'Token account',endpoint:'https://account.example',models:['a'],config:{ integration:'newapi' },accountCredentials:{ accessToken:token,userId:'42' } });
     expect(created.status).toBe(201); expect(created.json.channel.accountAuthMode).toBe('token');
     const id = created.json.channel.id;
+    await manualBalance(id);
     const store = new Store(testEnv);
     expect((await store.getChannel(id))?.accountBalance).toMatchObject({ status:'ok',amount:5,unit:'USD' });
     const row = await testEnv.DB.prepare('SELECT credentials FROM channel_accounts WHERE channel_id=?').bind(id).first<{credentials:string}>();
@@ -564,14 +580,136 @@ describe('encrypted channel accounts and balance refresh', () => {
     const fetcher = vi.fn(); vi.stubGlobal('fetch',fetcher);
     await refreshDueAccounts(testEnv,await store.listChannels(),true); expect(fetcher).not.toHaveBeenCalled();
   });
-  it('bounds scheduled account work to five and bootstrap work to one three-account batch', async () => {
+  it('bounds each Cron batch to five and leaves bootstrap as a cached read', async () => {
     mockAccount();
     for (let i=0;i<7;i++) await accountChannel();
     await testEnv.DB.prepare('UPDATE channel_accounts SET next_refresh_at=0').run();
-    await refreshDueAccounts(testEnv,await new Store(testEnv).listChannels(),true);
+    await runScheduled();
     expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM channel_accounts WHERE next_refresh_at>0').first<{count:number}>())?.count).toBe(5);
-    await testEnv.DB.prepare('UPDATE channel_accounts SET next_refresh_at=0').run();
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
     await call('/api/bootstrap');
-    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM channel_accounts WHERE next_refresh_at>0').first<{count:number}>())?.count).toBe(3);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM channel_accounts WHERE next_refresh_at>0').first<{count:number}>())?.count).toBe(5);
+    mockAccount(); await runScheduled();
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM channel_accounts WHERE next_refresh_at>0').first<{count:number}>())?.count).toBe(7);
+  });
+});
+
+describe('Worker Cron balance monitoring', () => {
+  const backends = [
+    { integration: 'newapi', credentials: { accessToken: 'fake-cron-newapi-token', userId: '42' }, path: '/api/user/self', payload: { success: true, data: { quota: 1500000 } }, amount: 3, unit: 'USD' },
+    { integration: 'sub2api', credentials: { cookie: 'session=fake-cron-cookie', accessToken: 'fake-cron-sub2api-token' }, path: '/api/v1/user/profile', payload: { code: 0, data: { balance: 9.5 } }, amount: 9.5, unit: 'USD' },
+    { integration: 'bbdevlab', credentials: { accessToken: 'fake-cron-bbdevlab-token' }, path: '/api/usage/token/', payload: { code: true, data: { total_available: 133516262 }, message: 'ok' }, amount: 1335, unit: '余额' },
+  ] as const;
+
+  it.each(backends)('does not query $integration balances from create, edit, or browser reads', async ({ integration, credentials }) => {
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    const created = await call('/api/channels', 'POST', { name: `${integration} queued`, endpoint: 'https://monitor.example/v1', models: ['a'], config: { integration }, accountCredentials: credentials });
+    expect(created.status).toBe(201); expect(created.json.channel.accountBalance).toMatchObject({ status: 'pending', amount: null });
+    const id = created.json.channel.id;
+    const edited = await call(`/api/channels/${id}`, 'PATCH', { endpoint: 'https://updated-monitor.example/v1', config: { protocol: 'gemini' }, accountCredentials: credentials });
+    expect(edited.status).toBe(200); expect(edited.json.channel.accountBalance).toMatchObject({ status: 'pending', amount: null });
+    expect((await call('/api/bootstrap')).status).toBe(200); expect((await call('/api/channels')).status).toBe(200);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await testEnv.DB.prepare('SELECT next_refresh_at,lease_until,auth_secret,balance FROM channel_accounts WHERE channel_id=?').bind(id).first()).toMatchObject({ next_refresh_at: 0, lease_until: 0, auth_secret: null, balance: null });
+  });
+
+  it.each(backends)('refreshes $integration through a scheduled event without an HTTP entry', async ({ integration, credentials, path, payload, amount, unit }) => {
+    const store = new Store(testEnv);
+    const channel = parseChannel({ name: `${integration} scheduled`, endpoint: 'https://cron-monitor.example/v1', models: ['a'], config: { integration } }, true);
+    await store.saveChannel(channel, false, [], credentials);
+    const http = vi.spyOn(worker, 'fetch');
+    const fetcher = vi.fn(async (target: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(target)), headers = new Headers(init?.headers);
+      expect(url.origin).toBe('https://cron-monitor.example'); expect(init?.body).toBeUndefined(); expect(headers.get('Accept')).toBe('application/json');
+      if (integration === 'newapi' && url.pathname === '/api/status') return Response.json({ success: true, data: { quota_per_unit: 500000 } });
+      expect(url.pathname).toBe(path); expect(headers.get('Authorization')).toBe('Bearer ' + credentials.accessToken);
+      if (integration === 'newapi') expect(headers.get('New-Api-User')).toBe('42');
+      if (integration === 'sub2api') expect(headers.get('Cookie')).toBe('session=fake-cron-cookie');
+      if (integration === 'bbdevlab') expect([...headers.keys()].sort()).toEqual(['accept', 'authorization']);
+      return Response.json(payload);
+    }); vi.stubGlobal('fetch', fetcher);
+    const started = Date.now();
+    await runScheduled();
+    expect(http).not.toHaveBeenCalled(); expect(fetcher).toHaveBeenCalledTimes(integration === 'newapi' ? 2 : 1);
+    const balance = (await store.getChannel(channel.id))?.accountBalance;
+    expect(balance).toMatchObject({ status: 'ok', amount, unit }); expect(Date.parse(balance!.checkedAt!)).toBeGreaterThanOrEqual(started);
+    const row = await testEnv.DB.prepare('SELECT next_refresh_at,lease_until,credentials,auth_secret FROM channel_accounts WHERE channel_id=?').bind(channel.id).first<{ next_refresh_at: number; lease_until: number; credentials: string; auth_secret: string }>();
+    expect(row!.next_refresh_at).toBeGreaterThan(started); expect(row!.lease_until).toBe(0); expect(row!.credentials).not.toContain(credentials.accessToken); expect(row!.auth_secret).not.toContain(credentials.accessToken);
+    await runScheduled(); expect(fetcher).toHaveBeenCalledTimes(integration === 'newapi' ? 2 : 1);
+  });
+
+  it('advances failing accounts and later batches so one rejected upstream cannot starve the queue', async () => {
+    const store = new Store(testEnv), ids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const channel = parseChannel({ name: `Cron queue ${i}`, endpoint: `https://queue-${i}.example/v1`, models: ['a'], config: { integration: 'newapi' } }, true);
+      await store.saveChannel(channel, false, [], { accessToken: `fake-queue-token-${i}` }); ids.push(channel.id);
+    }
+    const fetcher = vi.fn(async (target: RequestInfo | URL) => {
+      const url = new URL(String(target));
+      if (url.hostname === 'queue-0.example') return Response.json({ message: 'fake-queue-token-0' }, { status: 503 });
+      if (url.pathname === '/api/status') return Response.json({ success: true, data: { quota_per_unit: 500000 } });
+      expect(url.pathname).toBe('/api/user/self'); return Response.json({ success: true, data: { quota: 500000 } });
+    }); vi.stubGlobal('fetch', fetcher);
+    await runScheduled();
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM channel_accounts WHERE next_refresh_at>0').first<{ count: number }>())?.count).toBe(5);
+    await runScheduled();
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM channel_accounts WHERE next_refresh_at>0 AND lease_until=0').first<{ count: number }>())?.count).toBe(7);
+    const failed = (await store.getChannel(ids[0]))!.accountBalance!;
+    expect(failed).toMatchObject({ status: 'error', amount: null }); expect(failed.error).not.toContain('fake-queue-token-0');
+    for (const id of ids.slice(1)) expect((await store.getChannel(id))?.accountBalance).toMatchObject({ status: 'ok', amount: 1 });
+    expect(fetcher.mock.calls.filter(([target]) => new URL(String(target)).hostname === 'queue-0.example')).toHaveLength(1);
+  });
+
+  it('still refreshes balances and releases their lease when settings cannot be read', async () => {
+    const store = new Store(testEnv), fixture = backends[2];
+    const channel = parseChannel({ name: 'Balance survives settings failure', endpoint: 'https://independent-cron.example/v1', models: ['a'], config: { integration: fixture.integration } }, true);
+    await store.saveChannel(channel, false, [], fixture.credentials);
+    vi.spyOn(Store.prototype, 'getSettings').mockRejectedValueOnce(new Error('injected settings read failure'));
+    const fetcher = vi.fn(async (target: RequestInfo | URL) => {
+      expect(new URL(String(target)).pathname).toBe(fixture.path); return Response.json(fixture.payload);
+    }); vi.stubGlobal('fetch', fetcher);
+    const started = Date.now();
+    await expect(runScheduled()).rejects.toThrow('injected settings read failure');
+    expect(fetcher).toHaveBeenCalledTimes(1); expect((await store.getChannel(channel.id))?.accountBalance).toMatchObject({ status: 'ok', amount: fixture.amount, unit: fixture.unit });
+    const row = await testEnv.DB.prepare('SELECT next_refresh_at,lease_until FROM channel_accounts WHERE channel_id=?').bind(channel.id).first<{ next_refresh_at: number; lease_until: number }>();
+    expect(row!.lease_until).toBe(0); expect(row!.next_refresh_at).toBeGreaterThan(started);
+  });
+
+  it('still refreshes balances and releases their lease when the health recovery query fails', async () => {
+    const store = new Store(testEnv), fixture = backends[2];
+    const channel = parseChannel({ name: 'Balance survives health failure', endpoint: 'https://independent-cron.example/v1', models: ['a'], config: { integration: fixture.integration } }, true);
+    await store.saveChannel(channel, false, [], fixture.credentials);
+    const failure = new Error('injected health recovery query failure');
+    let healthQueries = 0;
+    const database = new Proxy(testEnv.DB, { get(target, property) {
+      if (property === 'prepare') return (sql: string) => {
+        if (sql.startsWith('SELECT k.channel_id,k.id,k.reason,k.disabled_at FROM credentials k')) { healthQueries++; throw failure; }
+        return target.prepare(sql);
+      };
+      const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const http = vi.spyOn(worker, 'fetch');
+    const fetcher = vi.fn(async (target: RequestInfo | URL) => {
+      expect(new URL(String(target)).pathname).toBe(fixture.path); return Response.json(fixture.payload);
+    }); vi.stubGlobal('fetch', fetcher);
+    const started = Date.now();
+    await expect(runScheduled({ ...testEnv, DB: database })).rejects.toThrow(failure.message);
+    expect(healthQueries).toBe(1); expect(http).not.toHaveBeenCalled(); expect(fetcher).toHaveBeenCalledTimes(1);
+    expect((await store.getChannel(channel.id))?.accountBalance).toMatchObject({ status: 'ok', amount: fixture.amount, unit: fixture.unit });
+    const row = await testEnv.DB.prepare('SELECT next_refresh_at,lease_until FROM channel_accounts WHERE channel_id=?').bind(channel.id).first<{ next_refresh_at: number; lease_until: number }>();
+    expect(row!.lease_until).toBe(0); expect(row!.next_refresh_at).toBeGreaterThan(started);
+  });
+
+  it('still refreshes balances when cleanup fails and reports the scheduled failure', async () => {
+    const store = new Store(testEnv), fixture = backends[1];
+    const channel = parseChannel({ name: 'Independent Cron balance', endpoint: 'https://independent-cron.example/v1', models: ['a'], config: { integration: fixture.integration } }, true);
+    await store.saveChannel(channel, false, [], fixture.credentials);
+    vi.spyOn(Store.prototype, 'cleanup').mockRejectedValueOnce(new Error('injected cleanup failure'));
+    const fetcher = vi.fn(async (target: RequestInfo | URL) => {
+      expect(new URL(String(target)).pathname).toBe(fixture.path); return Response.json(fixture.payload);
+    }); vi.stubGlobal('fetch', fetcher);
+    await expect(runScheduled()).rejects.toThrow('injected cleanup failure');
+    expect(fetcher).toHaveBeenCalledTimes(1); expect((await store.getChannel(channel.id))?.accountBalance).toMatchObject({ status: 'ok', amount: fixture.amount });
   });
 });

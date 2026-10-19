@@ -1,5 +1,5 @@
 import type { Env, GatewayContext, KeyRecord } from './env';
-import type { GatewayApiKey, GatewayChannel, KeyProfile } from '../shared/types';
+import type { GatewayApiKey, GatewayChannel, GatewaySettings, KeyProfile } from '../shared/types';
 import { Store, expired, publicKey } from './store';
 import { hashToken, randomToken } from './crypto';
 import { handleGateway, probeChannel } from './gateway';
@@ -64,7 +64,7 @@ function importedCredentials(b: Record<string,unknown>): ImportedCredential[] {
 async function createChannel(store: Store,b: Record<string,unknown>,dev: boolean,fixture = false): Promise<GatewayChannel> {
   const c = channel(b,dev); const creds = importedCredentials(b);
   const account = parseAccountCredentials(b.accountCredentials);
-  assert(!['newapi','sub2api'].includes(c.config.integration ?? '') || account, '请填写后台账号密码；NewAPI 也可使用后台访问令牌');
+  assertAccountReuse(c,null,account);
   await store.saveChannel(c,fixture,creds,account);
   return (await store.getChannel(c.id))!;
 }
@@ -93,14 +93,14 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
   if (!(await authenticated(request,env))) throw new HttpError(401,'请先登录管理控制台');
   if (!['GET','HEAD','OPTIONS'].includes(request.method)) sameOrigin(request,env);
   const path = new URL(request.url).pathname; const url = new URL(request.url); const method = request.method; const dev = development(request,env);
-  if (path === '/api/bootstrap' && method === 'GET') { const channels = await store.listChannels(); if (channels.some(c => c.hasAccountCredentials)) ctx.waitUntil(refreshDueAccounts(env,channels,dev,3)); return response({ channels,keys:await store.listKeys(),settings:await store.getSettings(),tags:await store.listTags(),devMode:dev }); }
+  if (path === '/api/bootstrap' && method === 'GET') return response({ channels:await store.listChannels(),keys:await store.listKeys(),settings:await store.getSettings(),tags:await store.listTags(),devMode:dev });
   if (path === '/api/settings') { if (method === 'GET') return response({ settings:await store.getSettings() }); if (method === 'PATCH') { const b = await body(request); const s = settings(b,await store.getSettings()); await store.saveSettings(s,text(b.aiGatewayToken,'',16000),bool(b.clearAiGatewayToken,false)); return response({ settings:await store.getSettings() }); } }
-  if (path === '/api/channels') { if (method === 'GET') return response({ channels:await store.listChannels() }); if (method === 'POST') { const c = await createChannel(store,await body(request),dev); if (c.hasAccountCredentials) ctx.waitUntil(refreshAccountBalance(env,c,dev)); return response({ channel:c },201); } }
+  if (path === '/api/channels') { if (method === 'GET') return response({ channels:await store.listChannels() }); if (method === 'POST') return response({ channel:await createChannel(store,await body(request),dev) },201); }
   if (path === '/api/channels/import' && method === 'POST') {
     const b = await body(request); assert(Array.isArray(b.channels) && b.channels.length > 0 && b.channels.length <= 200,'Import requires 1–200 channels');
     const entries = (b.channels as unknown[]).map(value => {
       const entry = object(value), c = channel(entry,dev), credentials = importedCredentials(entry), account = parseAccountCredentials(entry.accountCredentials);
-      assert(!['newapi','sub2api'].includes(c.config.integration ?? '') || account, '请填写后台账号密码；NewAPI 也可使用后台访问令牌');
+      assertAccountReuse(c,null,account);
       return { channel:c, credentials, account };
     });
     return response({ channels:await store.importChannels(entries) },201);
@@ -142,14 +142,13 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
         const account = parseAccountCredentials(b.accountCredentials);
         assertAccountReuse(changed,c,account);
         await store.saveChannel(changed,false,importedCredentials(b),account);
-        if (account || changed.endpoint !== c.endpoint || changed.config.integration !== c.config.integration) ctx.waitUntil(refreshAccountBalance(env,changed,dev,true));
         return response({ channel:await store.getChannel(c.id) });
       }
       if (method === 'DELETE') { await store.deleteChannel(c.id); return noContent(); }
     }
     if (tail === 'clone' && method === 'POST') { const clone = { ...structuredClone(c),id:crypto.randomUUID(),name:c.name+' · 副本',enabled:false,credentialCount:0,hasAccountCredentials:false,accountAuthMode:undefined,accountIntegration:undefined,accountBalance:undefined,createdAt:new Date().toISOString(),requests:0,ttft:0,successRate:0,history:[],health:{ averageTtft:null,averageDuration:null,samples:0,autoDisabled:false,cooldownUntil:null,recoveryCount:0,failureCount:0,reason:null },status:'healthy' as const }; await store.saveChannel(clone); return response({ channel:clone },201); }
     if (tail === 'test' && method === 'POST') return testChannel(request,env,ctx,store,c,await body(request));
-    if (tail === 'balance' && method === 'POST') { assert(['newapi','sub2api'].includes(c.config.integration ?? ''), '请先开启上游余额监控'); await refreshAccountBalance(env,c,dev,true); return response({ channel:await store.getChannel(c.id) }); }
+    if (tail === 'balance' && method === 'POST') { assert(['newapi','sub2api','bbdevlab'].includes(c.config.integration ?? ''), '请先开启上游余额监控'); await refreshAccountBalance(env,c,dev,true); return response({ channel:await store.getChannel(c.id) }); }
     if (tail === 'recover' && method === 'POST') return testChannel(request,env,ctx,store,c,{},true);
     if (tail === 'reset-health' && method === 'POST') { await store.resetChannelHealth(c.id); return response({ channel:await store.getChannel(c.id) }); }
     if (tail === 'tests' && method === 'GET') return response(await store.listLogs({ channelId:c.id,source:'probe',limit:50 }));
@@ -174,6 +173,15 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
   }
   throw new HttpError(404,'API endpoint not found');
 }
+async function recoverDueChannels(env: Env,ctx: ExecutionContext,store: Store,s: GatewaySettings,channels: GatewayChannel[]): Promise<void> {
+  const due = channels.filter(c => c.enabled && !c.archived && c.health.cooldownUntil && Date.parse(c.health.cooldownUntil) <= Date.now() && (c.health.autoDisabled ? (c.config.autoDisable.enabled ? c.config.autoDisable.recover : s.autoDisableRecover) : s.autoRecover));
+  const disabled = (await env.DB.prepare("SELECT k.channel_id,k.id,k.reason,k.disabled_at FROM credentials k JOIN channels c ON c.id=k.channel_id LEFT JOIN gateway_state p ON p.id='probe-credential:'||k.id WHERE k.enabled=0 AND k.reason IS NOT NULL AND k.disabled_at<=? AND json_extract(c.data,'$.enabled')=1 AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND CASE WHEN json_extract(c.data,'$.config.autoDisable.enabled')=1 THEN json_extract(c.data,'$.config.autoDisable.recover') ELSE ? END=1 ORDER BY CAST(COALESCE(p.value,'0') AS INTEGER) LIMIT 32").bind(new Date().toISOString(),s.autoDisableRecover ? 1 : 0).all<{ channel_id:string;id:string;reason:string;disabled_at:string }>()).results;
+  const eligibleDisabled = disabled.filter(d => { const c = channels.find(c => c.id === d.channel_id); return c && c.enabled && !c.archived && credentialRecoveryAllowed(c,s,{ enabled:false,reason:d.reason,disabledAt:d.disabled_at }); });
+  const seen = new Set(due.map(c => c.id)); for (const d of eligibleDisabled) { const c = channels.find(c => c.id === d.channel_id)!; if (!seen.has(c.id)) { due.push(c); seen.add(c.id); } }
+  const probes = (await env.DB.prepare('SELECT id,value FROM gateway_state WHERE id LIKE \'probe-channel:%\'').all<{ id:string;value:string }>()).results; const lastProbe = new Map(probes.map(p => [p.id.slice(14),Number(p.value)]));
+  due.sort((a,b) => (lastProbe.get(a.id) ?? 0)-(lastProbe.get(b.id) ?? 0));
+  for (const c of due.slice(0,8)) { const d = eligibleDisabled.find(d => d.channel_id === c.id); try { const gw: GatewayContext = { env,ctx,settings:c.health.autoDisabled ? { ...s,autoRecover:true } : s,channels,key:null,profile:null,source:'probe',forceChannelId:c.id }; if (d) gw.forceCredentialId = d.id; const result = await probeChannel(c,gw,store,{ stream:!c.health.reason?.includes('响应耗时'),credentialId:d?.id }); await result.text(); } catch { /* Failed probes remain unhealthy. The fair cursor prevents permanently bad channels starving other probes. */ } finally { const statements = [env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('probe-channel:'+c.id,String(Date.now()))]; if (d) statements.push(env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('probe-credential:'+d.id,String(Date.now()))); await env.DB.batch(statements); } }
+}
 export default {
   async fetch(request: Request,env: Env,ctx: ExecutionContext): Promise<Response> {
     const path = new URL(request.url).pathname;
@@ -193,14 +201,16 @@ export default {
     } catch (error) { if (path === '/v1/messages') return anthropicErrorResponse(error instanceof HttpError ? error.status : 500,error instanceof HttpError ? error.message : 'Gateway operation failed; check server configuration'); if (error instanceof HttpError) return response({ error:{ message:error.message,type:'gateway_error' } },error.status); return response({ error:{ message:'Gateway operation failed; check server configuration',type:'gateway_error' } },500); }
   },
   async scheduled(_controller: ScheduledController,env: Env,ctx: ExecutionContext): Promise<void> {
-    const store = new Store(env); const s = await store.getSettings(); const channels = await store.listChannels(); const due = channels.filter(c => c.enabled && !c.archived && c.health.cooldownUntil && Date.parse(c.health.cooldownUntil) <= Date.now() && (c.health.autoDisabled ? (c.config.autoDisable.enabled ? c.config.autoDisable.recover : s.autoDisableRecover) : s.autoRecover));
-    const disabled = (await env.DB.prepare("SELECT k.channel_id,k.id,k.reason,k.disabled_at FROM credentials k JOIN channels c ON c.id=k.channel_id LEFT JOIN gateway_state p ON p.id='probe-credential:'||k.id WHERE k.enabled=0 AND k.reason IS NOT NULL AND k.disabled_at<=? AND json_extract(c.data,'$.enabled')=1 AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND CASE WHEN json_extract(c.data,'$.config.autoDisable.enabled')=1 THEN json_extract(c.data,'$.config.autoDisable.recover') ELSE ? END=1 ORDER BY CAST(COALESCE(p.value,'0') AS INTEGER) LIMIT 32").bind(new Date().toISOString(),s.autoDisableRecover ? 1 : 0).all<{ channel_id:string;id:string;reason:string;disabled_at:string }>()).results;
-    const eligibleDisabled = disabled.filter(d => { const c = channels.find(c => c.id === d.channel_id); return c && c.enabled && !c.archived && credentialRecoveryAllowed(c,s,{ enabled:false,reason:d.reason,disabledAt:d.disabled_at }); });
-    const seen = new Set(due.map(c => c.id)); for (const d of eligibleDisabled) { const c = channels.find(c => c.id === d.channel_id)!; if (!seen.has(c.id)) { due.push(c); seen.add(c.id); } }
-    const probes = (await env.DB.prepare('SELECT id,value FROM gateway_state WHERE id LIKE \'probe-channel:%\'').all<{ id:string;value:string }>()).results; const lastProbe = new Map(probes.map(p => [p.id.slice(14),Number(p.value)]));
-    due.sort((a,b) => (lastProbe.get(a.id) ?? 0)-(lastProbe.get(b.id) ?? 0));
-    for (const c of due.slice(0,8)) { const d = eligibleDisabled.find(d => d.channel_id === c.id); try { const gw: GatewayContext = { env,ctx,settings:c.health.autoDisabled ? { ...s,autoRecover:true } : s,channels,key:null,profile:null,source:'probe',forceChannelId:c.id }; if (d) gw.forceCredentialId = d.id; const result = await probeChannel(c,gw,store,{ stream:!c.health.reason?.includes('响应耗时'),credentialId:d?.id }); await result.text(); } catch { /* Failed probes remain unhealthy. The fair cursor prevents permanently bad channels starving other probes. */ } finally { const statements = [env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('probe-channel:'+c.id,String(Date.now()))]; if (d) statements.push(env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('probe-credential:'+d.id,String(Date.now()))); await env.DB.batch(statements); } }
-    await refreshDueAccounts(env,channels,env.DEV_MODE === 'true');
-    await store.cleanup(s.logRetentionDays);
+    const store = new Store(env);
+    const settings = store.getSettings();
+    const channels = store.listChannels();
+    // Balance monitoring must run even if health recovery or log cleanup fails.
+    const jobs = await Promise.allSettled([
+      channels.then(items => refreshDueAccounts(env,items,env.DEV_MODE === 'true')),
+      Promise.all([settings,channels]).then(([config,items]) => recoverDueChannels(env,ctx,store,config,items)),
+      settings.then(config => store.cleanup(config.logRetentionDays)),
+    ]);
+    const failed = jobs.find(job => job.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   },
 } satisfies ExportedHandler<Env>;

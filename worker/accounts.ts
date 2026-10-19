@@ -1,4 +1,4 @@
-import type { GatewayChannel } from '../shared/types';
+import type { AccountIntegration, GatewayChannel } from '../shared/types';
 import type { Env } from './env';
 import { encryptSecret, decryptSecret } from './crypto';
 import { HttpError, assert, object, text, url } from './validation';
@@ -12,8 +12,12 @@ type AccountRow = { channel_id: string; credentials: string; auth_secret: string
 type Session = { token?: string; cookie?: string; userId?: string; expiresAt: number; base: string };
 export const BALANCE_REFRESH_MS = 5 * 60 * 1000;
 
+function isAccountIntegration(value: unknown): value is AccountIntegration {
+  return typeof value === 'string' && ['newapi', 'sub2api', 'bbdevlab'].includes(value);
+}
+
 export function accountIntegration(channel: GatewayChannel): GatewayChannel['accountIntegration'] {
-  return channel.accountIntegration ?? (channel.hasAccountCredentials && ['newapi', 'sub2api'].includes(channel.config.integration ?? '') ? channel.config.integration as 'newapi' | 'sub2api' : undefined);
+  return channel.accountIntegration ?? (channel.hasAccountCredentials && isAccountIntegration(channel.config.integration) ? channel.config.integration : undefined);
 }
 
 export function accountAuthMode(account: AccountCredentials): NonNullable<GatewayChannel['accountAuthMode']> {
@@ -21,19 +25,31 @@ export function accountAuthMode(account: AccountCredentials): NonNullable<Gatewa
 }
 
 export function assertAccountCredentials(channel: GatewayChannel, account: AccountCredentials): void {
-  assert(['newapi', 'sub2api'].includes(channel.config.integration ?? ''), '仅 NewAPI / Sub2API 渠道使用后台账号');
+  assert(isAccountIntegration(channel.config.integration), '仅 NewAPI / Sub2API / BBDevLab 渠道使用后台凭据');
+  if (channel.config.integration === 'bbdevlab') {
+    assert('accessToken' in account && Object.keys(account).every(key => key === 'accessToken'), 'BBDevLab 仅支持后台访问令牌，不支持账号密码、Cookie 或用户 ID');
+    return;
+  }
   if ('cookie' in account) assert(channel.config.integration === 'sub2api', 'Cookie / 浏览器会话仅支持 Sub2API 后台');
   else if ('accessToken' in account) assert(channel.config.integration === 'newapi', '后台访问令牌仅支持 NewAPI 渠道');
 }
 
 export function assertAccountReuse(channel: GatewayChannel, previous: GatewayChannel | null, account?: AccountCredentials): void {
   const integration = channel.config.integration;
-  if (!['newapi', 'sub2api'].includes(integration ?? '')) return;
+  if (!isAccountIntegration(integration)) return;
   if (account) {
     assertAccountCredentials(channel, account);
     return;
   }
   assert(previous?.hasAccountCredentials && accountIntegration(previous) === integration, '开启余额监控或切换后台类型时，请填写对应的后台凭据');
+}
+
+function normalizeAccessToken(value: unknown): string {
+  const rawToken = text(value, '', 4096);
+  assert(!/[\x00-\x1f\x7f]/.test(rawToken), '后台访问令牌不能包含控制字符');
+  const accessToken = rawToken.trim().replace(/^Bearer(?:\s+|$)/i, '');
+  assert(accessToken && !/\s/.test(accessToken), '后台访问令牌不能为空或包含空白字符');
+  return accessToken;
 }
 
 export function parseAccountCredentials(value: unknown): AccountCredentials | undefined {
@@ -58,8 +74,7 @@ export function parseAccountCredentials(value: unknown): AccountCredentials | un
     return { cookie, ...(accessToken ? { accessToken } : {}) };
   }
   if (b.accessToken !== undefined) {
-    const accessToken = text(b.accessToken, '', 4096).trim();
-    assert(accessToken && !/[\s\x00-\x1f\x7f]/.test(accessToken), '后台访问令牌不能为空或包含空白、控制字符');
+    const accessToken = normalizeAccessToken(b.accessToken);
     assert(!text(b.username, '', 256).trim() && !text(b.password, '', 4096), '后台访问令牌与账号密码不能同时填写');
     const userId = text(b.userId, '', 20).trim();
     assert(!userId || /^\d+$/.test(userId) && Number.isSafeInteger(Number(userId)) && Number(userId) > 0, '用户 ID 须为正整数，且不超过安全整数范围');
@@ -114,7 +129,9 @@ async function accountRequest(base: string, path: string, signal: AbortSignal, i
     throw new HttpError(response.status, `后台接口 HTTP ${response.status}`);
   }
   const json = await readUpstreamJSON(response, 512 * 1024);
-  if (json.success === false || (json.code !== undefined && ![0, 200].includes(Number(json.code)))) throw (newApi ? newApiAuthError(json) : undefined) ?? new HttpError(502, '后台拒绝请求；请检查账号、密码及后台登录验证要求');
+  if (path === '/api/usage/token/') {
+    if (json.code !== true) throw new HttpError(502, 'BBDevLab 拒绝余额查询，请检查后台访问令牌');
+  } else if (json.success === false || (json.code !== undefined && ![0, 200].includes(Number(json.code)))) throw (newApi ? newApiAuthError(json) : undefined) ?? new HttpError(502, '后台拒绝请求；请检查账号、密码及后台登录验证要求');
   return { json, response };
 }
 
@@ -168,12 +185,25 @@ export async function fetchAccountBalance(channel: GatewayChannel, credentials: 
   const base = accountBase(channel, dev); const signal = AbortSignal.timeout(20000);
   const sub = channel.config.integration === 'sub2api';
   assertAccountCredentials(channel, credentials);
+  if (channel.config.integration === 'bbdevlab' && 'accessToken' in credentials) {
+    const session: Session = { token: normalizeAccessToken(credentials.accessToken), expiresAt: Date.now() + 3600000, base };
+    let payload: Record<string, any>;
+    try {
+      payload = (await accountRequest(base, '/api/usage/token/', signal, { method: 'GET', headers: { Authorization: `Bearer ${session.token}` } })).json;
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(502, 'BBDevLab 余额查询失败，请检查后台连接与访问令牌');
+    }
+    const raw = payload.data?.total_available;
+    const available = finiteAmount(typeof raw === 'string' ? raw.trim() : raw);
+    return { amount: Math.trunc(available / 100000) || 0, unit: '余额', session };
+  }
   const cookieMode = 'cookie' in credentials;
   const directMode = cookieMode || 'accessToken' in credentials;
   const reusedSession = !directMode && !!cached && cached.base === base && cached.expiresAt > Date.now() + 10000;
   let session: Session;
   if ('cookie' in credentials) session = { cookie: credentials.cookie, token: credentials.accessToken, expiresAt: Date.now() + 3600000, base };
-  else if ('accessToken' in credentials) session = { token: credentials.accessToken, userId: credentials.userId, expiresAt: Date.now() + 3600000, base };
+  else if ('accessToken' in credentials) session = { token: normalizeAccessToken(credentials.accessToken), userId: credentials.userId, expiresAt: Date.now() + 3600000, base };
   else session = reusedSession ? cached! : await loginAccount(channel, credentials, base, signal);
   const profile = async () => {
     const init = { headers: sessionHeaders(session, cookieMode) };
@@ -206,11 +236,11 @@ export async function fetchAccountBalance(channel: GatewayChannel, credentials: 
 }
 
 export async function refreshAccountBalance(env: Env, channel: GatewayChannel, dev: boolean, force = false): Promise<void> {
-  if (!['newapi', 'sub2api'].includes(channel.config.integration ?? '')) return;
+  if (!isAccountIntegration(channel.config.integration)) return;
   const now = Date.now();
   // Capture the destination and credentials in one atomic read. A Cron snapshot can
   // outlive a channel edit; never pair a new password with that snapshot's old URL.
-  const claimed = await env.DB.prepare("UPDATE channel_accounts SET lease_until=? WHERE channel_id=? AND lease_until<=? AND (?=1 OR next_refresh_at<=?) AND EXISTS (SELECT 1 FROM channels c WHERE c.id=channel_accounts.channel_id AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api')) RETURNING *, (SELECT data FROM channels WHERE id=channel_accounts.channel_id) AS channel_data").bind(now + 45000, channel.id, now, force ? 1 : 0, now).first<AccountRow>();
+  const claimed = await env.DB.prepare("UPDATE channel_accounts SET lease_until=? WHERE channel_id=? AND lease_until<=? AND (?=1 OR next_refresh_at<=?) AND EXISTS (SELECT 1 FROM channels c WHERE c.id=channel_accounts.channel_id AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api','bbdevlab')) RETURNING *, (SELECT data FROM channels WHERE id=channel_accounts.channel_id) AS channel_data").bind(now + 45000, channel.id, now, force ? 1 : 0, now).first<AccountRow>();
   if (!claimed) return;
   const old = claimed.balance ? JSON.parse(claimed.balance) as Balance : null;
   try {
@@ -233,7 +263,7 @@ export async function refreshDueAccounts(env: Env, channels: GatewayChannel[], d
   // A rejected cached session plus encrypted NewAPI login can require seven fetches.
   // Five accounts plus eight recovery probes stay below the Free plan's 50 external fetches.
   const boundedLimit = Math.min(5, Math.max(0, Math.floor(limit)));
-  const due = await env.DB.prepare("SELECT a.channel_id FROM channel_accounts a JOIN channels c ON c.id=a.channel_id WHERE a.next_refresh_at<=? AND a.lease_until<=? AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api') ORDER BY a.next_refresh_at LIMIT ?").bind(Date.now(), Date.now(), boundedLimit).all<{ channel_id: string }>();
+  const due = await env.DB.prepare("SELECT a.channel_id FROM channel_accounts a JOIN channels c ON c.id=a.channel_id WHERE a.next_refresh_at<=? AND a.lease_until<=? AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api','bbdevlab') ORDER BY a.next_refresh_at LIMIT ?").bind(Date.now(), Date.now(), boundedLimit).all<{ channel_id: string }>();
   // Bounded batches leave headroom for normal gateway traffic and Cron subrequest limits.
   for (let i = 0; i < due.results.length; i += 3) {
     await Promise.allSettled(due.results.slice(i, i + 3).map(({ channel_id }) => {

@@ -14,13 +14,19 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const baseline = clone(props.channel?.config ?? defaultChannelConfig);
 const services = [{ value: 'openai', title: 'OpenAI', endpoint: 'https://api.openai.com' }, { value: 'anthropic', title: 'Anthropic', endpoint: 'https://api.anthropic.com' }, { value: 'gemini', title: 'Gemini', endpoint: 'https://generativelanguage.googleapis.com' }];
 const initialConnection = baseline.gatewayMode === 'ai-gateway' ? 'ai-gateway' : baseline.relayUrl ? 'relay' : 'direct';
+type BalanceBackend = 'newapi' | 'sub2api' | 'bbdevlab';
+type AccountDraft = { mode: NonNullable<GatewayChannel['accountAuthMode']>; username: string; password: string; accessToken: string; userId: string; cookie: string };
+const balanceBackends = [{ title: 'NewAPI', value: 'newapi' }, { title: 'Sub2API', value: 'sub2api' }, { title: 'BBDevLab', value: 'bbdevlab' }];
+const isBalanceBackend = (value: string | undefined): value is BalanceBackend => balanceBackends.some(backend => backend.value === value);
+const initialBackend = isBalanceBackend(baseline.integration) ? baseline.integration : isBalanceBackend(props.channel?.accountIntegration) ? props.channel.accountIntegration : 'newapi';
 const editorTab = ref('connection');
 const connectionPanels = ref<string | undefined>(initialConnection !== 'direct' ? 'connection' : undefined);
-const draft = ref({ name: props.channel?.name ?? '', provider: props.channel?.provider ?? 'OpenAI', protocol: baseline.protocol, endpoint: props.channel?.endpoint ?? services[0]!.endpoint, models: [...(props.channel?.models ?? [])], model: props.channel?.model ?? '', tags: [...(props.channel?.tags ?? [])], priority: props.channel?.priority ?? 0, weight: props.channel?.weight ?? 1, enabled: props.channel?.enabled ?? true, secrets: '', connection: initialConnection, relayUrl: baseline.relayUrl, slug: baseline.customProviderSlug, balance: ['newapi', 'sub2api'].includes(baseline.integration ?? ''), backend: (baseline.integration === 'sub2api' || (!['newapi', 'sub2api'].includes(baseline.integration ?? '') && props.channel?.accountIntegration === 'sub2api') ? 'sub2api' : 'newapi') as 'newapi' | 'sub2api' });
-const accounts = ref({ newapi: { mode: props.channel?.accountIntegration === 'newapi' ? props.channel.accountAuthMode ?? 'password' : 'password', username: '', password: '', accessToken: '', userId: '', cookie: '' }, sub2api: { mode: props.channel?.accountIntegration === 'sub2api' ? props.channel.accountAuthMode ?? 'password' : 'password', username: '', password: '', accessToken: '', userId: '', cookie: '' } });
+const draft = ref({ name: props.channel?.name ?? '', provider: props.channel?.provider ?? 'OpenAI', protocol: baseline.protocol, endpoint: props.channel?.endpoint ?? services[0]!.endpoint, models: [...(props.channel?.models ?? [])], model: props.channel?.model ?? '', tags: [...(props.channel?.tags ?? [])], priority: props.channel?.priority ?? 0, weight: props.channel?.weight ?? 1, enabled: props.channel?.enabled ?? true, secrets: '', connection: initialConnection, relayUrl: baseline.relayUrl, slug: baseline.customProviderSlug, balance: isBalanceBackend(baseline.integration), backend: initialBackend as BalanceBackend });
+function accountDraft(backend: BalanceBackend): AccountDraft { return { mode: backend === 'bbdevlab' ? 'token' : props.channel?.accountIntegration === backend ? props.channel.accountAuthMode ?? 'password' : 'password', username: '', password: '', accessToken: '', userId: '', cookie: '' }; }
+const accounts = ref<Record<BalanceBackend, AccountDraft>>({ newapi: accountDraft('newapi'), sub2api: accountDraft('sub2api'), bbdevlab: accountDraft('bbdevlab') });
 const account = computed(() => accounts.value[draft.value.backend]);
 const simulated = computed(() => draft.value.protocol === 'mock');
-const savedAccount = computed(() => props.channel?.hasAccountCredentials && (props.channel.accountIntegration ?? baseline.integration) === draft.value.backend && (props.channel.accountAuthMode ?? 'password') === account.value.mode);
+const savedAccount = computed(() => props.channel?.hasAccountCredentials && (props.channel.accountIntegration ?? baseline.integration) === draft.value.backend && (props.channel.accountAuthMode ?? (draft.value.backend === 'bbdevlab' ? 'token' : 'password')) === account.value.mode);
 const snapshot = () => JSON.stringify({ draft: draft.value, accounts: accounts.value, modelInput: modelInput.value, batchInput: batchInput.value, tagInput: tagInput.value });
 const modelInput = ref(''); const batchInput = ref(''); const tagInput = ref('');
 const initial = snapshot();
@@ -92,7 +98,12 @@ async function save() {
     if (d.balance && !simulated.value) {
       editorTab.value = 'account';
       const a = account.value;
-      if (a.mode === 'cookie') {
+      if (d.backend === 'bbdevlab') {
+        const token = a.accessToken.trim().replace(/^Bearer(?:\s+|$)/i, '');
+        if (!savedAccount.value && !token) throw new Error('请填写 BBDevLab 后台令牌');
+        if ((a.accessToken.trim() && !token) || token.length > 4096 || /\s|[\x00-\x1f\x7f]/.test(token)) throw new Error('BBDevLab 后台令牌须为单行，不超过 4,096 个字符');
+        if (token) accountCredentials = { accessToken: token };
+      } else if (a.mode === 'cookie') {
         if (!savedAccount.value && !a.cookie.trim() && !a.accessToken.trim()) throw new Error('请填写 Cookie 或后台登录 Token');
         if (a.cookie.length > 16000 || /[\x00-\x1f\x7f]/.test(a.cookie)) throw new Error('Cookie 须为单行，不超过 16,000 个字符');
         const token = a.accessToken.trim().replace(/^Bearer(?:\s+|$)/i, '');
@@ -111,7 +122,7 @@ async function save() {
     }
     busy.value = true;
     await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), enabled: d.enabled, config: connectionConfig(), ...(apiKeys.length ? { apiKeys } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
-    d.secrets = ''; accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
+    d.secrets = ''; accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; accounts.value.bbdevlab.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
   } catch (error) { notify(error instanceof Error ? error.message : '保存失败', 'error'); }
   finally { busy.value = false; }
 }
@@ -160,12 +171,12 @@ async function save() {
           <v-switch v-model="draft.enabled" :disabled="channel?.archived" label="启用渠道" color="primary" hide-details />
         </section>
         <section v-show="editorTab === 'account'">
-          <div class="editor-section-heading"><h3>上游余额监控</h3><p>通过 NewAPI 或 Sub2API 账户自动刷新余额。</p></div>
+          <div class="editor-section-heading"><h3>上游余额监控</h3><p>支持 NewAPI、Sub2API 和 BBDevLab，由 Worker 定时刷新。</p></div>
           <div class="account-toggle"><div><strong class="text-body-2">自动读取账户余额</strong><p class="text-caption text-medium-emphasis mt-1">关闭监控后，已保存的凭据仍然保留。</p></div><v-switch v-model="draft.balance" :disabled="simulated" color="primary" hide-details aria-label="自动刷新账户余额" /></div>
           <template v-if="draft.balance && !simulated">
-            <div class="editor-field-grid editor-field-grid--responsive mt-4"><v-select v-model="draft.backend" :items="[{ title: 'NewAPI', value: 'newapi' }, { title: 'Sub2API', value: 'sub2api' }]" label="后台类型" /><v-select v-model="account.mode" :items="[{ title: '账号密码', value: 'password' }, ...(draft.backend === 'newapi' ? [{ title: '后台访问令牌', value: 'token' }] : [{ title: 'Cookie / 登录 Token', value: 'cookie' }])]" label="认证方式" /></div>
+            <div class="editor-field-grid editor-field-grid--responsive mt-4" :class="{ 'editor-field-grid--single': draft.backend === 'bbdevlab' }"><v-select v-model="draft.backend" :items="balanceBackends" label="后台类型" /><v-select v-if="draft.backend !== 'bbdevlab'" v-model="account.mode" :items="[{ title: '账号密码', value: 'password' }, ...(draft.backend === 'newapi' ? [{ title: '后台访问令牌', value: 'token' }] : [{ title: 'Cookie / 登录 Token', value: 'cookie' }])]" label="认证方式" /></div>
             <v-alert v-if="savedAccount" type="info" variant="tonal" density="compact" class="mb-4">已有加密保存的账户凭据，全部留空即可沿用。</v-alert>
-            <div class="account-fields"><template v-if="account.mode === 'password'"><v-text-field v-model="account.username" label="后台账号" autocomplete="off" /><v-text-field v-model="account.password" label="后台密码" type="password" autocomplete="new-password" /></template><template v-else><v-text-field v-if="account.mode === 'cookie'" v-model="account.cookie" label="Cookie" type="password" maxlength="16000" autocomplete="off" /><v-text-field v-model="account.accessToken" label="后台访问 Token" type="password" autocomplete="off" /><v-text-field v-if="account.mode === 'token'" v-model="account.userId" label="用户 ID（可选）" /></template></div>
+            <div class="account-fields"><template v-if="draft.backend === 'bbdevlab'"><v-text-field v-model="account.accessToken" label="BBDevLab 后台令牌" type="password" maxlength="4096" autocomplete="off" hint="与上游 API Key 独立保存；已有凭据时留空沿用。" persistent-hint /></template><template v-else-if="account.mode === 'password'"><v-text-field v-model="account.username" label="后台账号" autocomplete="off" /><v-text-field v-model="account.password" label="后台密码" type="password" autocomplete="new-password" /></template><template v-else><v-text-field v-if="account.mode === 'cookie'" v-model="account.cookie" label="Cookie" type="password" maxlength="16000" autocomplete="off" /><v-text-field v-model="account.accessToken" label="后台访问 Token" type="password" autocomplete="off" /><v-text-field v-if="account.mode === 'token'" v-model="account.userId" label="用户 ID（可选）" /></template></div>
           </template>
           <div v-else class="account-placeholder"><v-icon size="24">mdi-wallet-outline</v-icon><p>按需启用余额监控</p><span>渠道调用不依赖此账户配置。</span></div>
         </section>
@@ -188,6 +199,7 @@ async function save() {
 .editor-nav-note { display: flex; align-items: flex-start; gap: 8px; margin: 16px 10px 4px; color: rgba(var(--v-theme-on-surface), .5); font-size: 12px; line-height: 1.7; }
 .editor-content { min-width: 0; padding-block: 3px; }
 .editor-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }
+.editor-field-grid--single { grid-template-columns: minmax(0, 1fr); }
 .editor-section-heading { gap: 10px; margin-bottom: 16px; }
 .editor-section-heading h3 { font-size: 15px; font-weight: 600; }
 .editor-section-heading p { margin-top: 5px; font-size: 13px; color: rgba(var(--v-theme-on-surface), .6); line-height: 1.6; }

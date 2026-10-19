@@ -8,8 +8,8 @@
 
 | 模块 | 当前实现 |
 | --- | --- |
-| 添加渠道 | OpenAI / Anthropic / Gemini 接口类型，用于模型获取和渠道测试；独立的 NewAPI / Sub2API 余额监控选项、多密钥；支持模型搜索、多选、手动/批量添加及默认测试模型 |
-| 后台余额 | NewAPI 账号密码/后台令牌、Sub2API 账号密码/浏览器会话，凭据与登录会话 AES-GCM 加密；每 5 分钟刷新，名称副标题展示余额与状态，可点击立即刷新 |
+| 添加渠道 | OpenAI / Anthropic / Gemini 接口类型，用于模型获取和渠道测试；独立的 NewAPI / Sub2API / BBDevLab 余额监控选项、多密钥；支持模型搜索、多选、手动/批量添加及默认测试模型 |
+| 后台余额 | NewAPI 账号密码/后台令牌、Sub2API 账号密码/浏览器会话、BBDevLab 令牌，凭据与登录会话 AES-GCM 加密；Worker Cron 每分钟检查到期账户，余额默认每 5 分钟更新，名称副标题展示余额与状态，可点击立即刷新 |
 | 渠道列表 | 搜索、服务商/状态/标签/模型筛选、分页、列设置、批量启停/标签/权重、JSON 导入 |
 | 渠道菜单 | Vuetify 可视化弹窗：模型映射行、价格与成本预览、类型化请求覆盖、连接与端点预览、限额卡片、状态码选择与恢复流程、密钥轮换、SSE/非流式测试及历史；支持复制、归档与删除 |
 | API Keys | 精简凭证列表与固定操作栏；基础名称和渠道权限优先，高级模型/映射/额度/多 Profile 默认折叠，保留启停/撤销/轮换、到期与标签授权 |
@@ -29,13 +29,15 @@
 
 NewAPI / Sub2API 的后台凭据独立于推理 API Key。后台地址从 Base URL 去除末尾 `/v1` 或 `/v1beta` 推导，保留部署子目录；余额不经过 AI Gateway。NewAPI 使用 `/api/user/self` 的 `quota`，按站点 `/api/status` 的 `quota_per_unit` 换算为 USD，无法取得比例时显示原始额度；Sub2API 显示后台 `balance`。支持 NewAPI 旧 Cookie、新 Token 与可选 RSA 密码加密登录，以及 Sub2API Token 登录。NewAPI 还可选择后台访问令牌，在个人设置中生成并填写；旧版站点同时需要数字用户 ID，新版 PAT 可省略。令牌使用 `Authorization: Bearer`，旧版用户标识使用 `New-Api-User`，均加密保存、不回显。[NewAPI 官方后台鉴权说明](https://docs.newapi.pro/zh/docs/api/management/auth)。
 
-NewAPI 开启 Turnstile 人机验证时，账号密码登录会提示改用后台访问令牌。二次验证、禁用密码登录、令牌失效和用户 ID 错误也会给出具体提示，失败时保留上次成功余额及时间。自动刷新采用 D1 租约、版本校验和有限批次，账户较多时分批处理；归档渠道不刷新。Cloudflare Cron 在页面关闭后继续运行，本地打开控制台时也会触发到期刷新。
+NewAPI 开启 Turnstile 人机验证时，账号密码登录会提示改用后台访问令牌。二次验证、禁用密码登录、令牌失效和用户 ID 错误也会给出具体提示，失败时保留上次成功余额及时间。所有后台的自动刷新统一由 [Cloudflare Worker Cron 的 scheduled 入口](https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/)执行，每分钟扫描到期账户，默认刷新间隔为 5 分钟；采用 D1 租约、版本校验和有限批次，账户较多时分批处理，归档或关闭监控的渠道不刷新。页面关闭且没有业务请求时仍会执行；打开页面和创建、编辑渠道只读取或保存配置，不发起后台余额查询。保存新凭据后显示待更新，等待下一次 Cron，也可点击手动刷新。余额、健康探测和日志清理独立执行，单项失败不会阻止其他任务。
+
+BBDevLab 使用独立的后台令牌，支持纯令牌或带 `Bearer` 前缀的值。后台地址同样由渠道 Base URL 推导，例如 `https://api.bddevlab.online/v1` 对应 `GET https://api.bddevlab.online/api/usage/token/`，请求只发送 `Accept: application/json` 和 `Authorization: Bearer <令牌>`。仅接受成功响应 `code: true`，可用余额取 `Math.trunc(total_available / 100000)`；例如 `133516262` 显示 `1335`，不将其标记为美元。令牌加密保存且不回显，失败时保留最近的成功余额。
 
 Sub2API 可选择「Cookie / 浏览器会话」读取余额，不再由网关提交邮箱密码登录。先在浏览器登录后台并完成人机验证，再从开发者工具「网络」中的个人信息或余额请求复制单行 `Cookie` 请求头值。标准 Sub2API 通过 Bearer JWT 识别登录用户，可只填同一请求的 `Authorization` 值或本地存储中的 `auth_token`，支持 `Bearer` 前缀；只有 `cf_clearance` 等人机验证 Cookie 不足以读取余额。需要 Cookie 的站点同时填写，使用 Cookie 认证的定制站点可只填 Cookie。Cookie 与后台登录 Token 至少填写一个，均加密保存、不回显；编辑时全部留空保留现有会话，填写新会话会替换已保存 Cookie 和 Token，请提供所需的完整会话。浏览器会话过期或失效后需手动重新登录并更新。
 
 模型别名采用可搜索的紧凑列表编辑；请求转发使用上游模型名称，JSON 响应及每个 SSE JSON 事件的 `model` 返回客户端原始请求的公开模型名，跨渠道切换后也保持一致。
 
-上游接口类型与余额后台分别配置：OpenAI / Anthropic / Gemini 接口类型用于模型发现与渠道测试，不决定公开请求的格式。可独立打开「上游余额监控」并选择 NewAPI / Sub2API，监控只决定后台余额的认证和读取方式。已有渠道按原接口类型和监控类型加载，可直接切换真实渠道的接口类型；关闭监控保留已保存凭据、会话和最近余额，恢复同一后台可继续使用。切换后台类型须提供对应凭据，账户草稿按后台类型独立保留。历史数据无需数据库迁移。
+上游接口类型与余额后台分别配置：OpenAI / Anthropic / Gemini 接口类型用于模型发现与渠道测试，不决定公开请求的格式。可独立打开「上游余额监控」并选择 NewAPI / Sub2API / BBDevLab，监控只决定后台余额的认证和读取方式。已有渠道按原接口类型和监控类型加载，可直接切换真实渠道的接口类型；关闭监控保留已保存凭据、会话和最近余额，恢复同一后台可继续使用。切换后台类型须提供对应凭据，账户草稿按后台类型独立保留。历史数据无需数据库迁移。
 
 已有安装升级时需应用新的账户表迁移，账号和会话均不保存在渠道公开 JSON 中：
 
