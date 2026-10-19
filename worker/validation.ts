@@ -57,7 +57,7 @@ export function channel(input: unknown, dev: boolean, previous?: GatewayChannel)
   const endpoint = cfg.protocol === 'mock' && (b.endpoint === undefined || b.endpoint === '') ? 'http://127.0.0.1/mock' : url(b.endpoint, dev, c.endpoint);
   assert(models.length, 'At least one model is required');
   const archived = bool(b.archived,c.archived);
-  return { ...c, name, provider: text(b.provider, c.provider, 128), model, models, tags: strings(b.tags, c.tags, 100), endpoint, weight: number(b.weight, c.weight, 0, 10000), priority: Math.floor(number(b.priority, c.priority, -10000, 10000)), enabled: archived ? false : bool(b.enabled, c.enabled), archived, config: cfg };
+  return { ...c, name, provider: text(b.provider, c.provider, 128), model, models, tags: strings(b.tags, c.tags, 100), endpoint, displayMultiplier: number(b.displayMultiplier, c.displayMultiplier ?? 1), weight: number(b.weight, c.weight, 0, 10000), priority: Math.floor(number(b.priority, c.priority, -10000, 10000)), enabled: archived ? false : bool(b.enabled, c.enabled), archived, config: cfg };
 }
 export function profile(input: unknown): KeyProfile {
   const b = object(input); const scope = oneOf(b.scope, ['all', 'tags', 'channels'] as const, 'all');

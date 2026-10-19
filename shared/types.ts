@@ -26,6 +26,8 @@ export type GatewayChannel = {
   accountAuthMode?: 'password' | 'token' | 'cookie';
   accountIntegration?: AccountIntegration;
   accountBalance?: { status: 'pending' | 'ok' | 'error'; amount: number | null; unit: string; updatedAt: string | null; checkedAt: string | null; error?: string };
+  /** Display metadata only; never used for routing, requests, balances, or pricing. */
+  displayMultiplier?: number;
   id: string; name: string; provider: string; model: string; models: string[];
   tags: string[]; weight: number; endpoint: string; status: ChannelStatus;
   priority: number; ttft: number; successRate: number; requests: number;

@@ -43,6 +43,59 @@ async function accountChannel(kind: 'newapi' | 'sub2api' = 'newapi') {
   expect(result.status).toBe(201); await manualBalance(result.json.channel.id); return result;
 }
 
+describe('display-only channel multiplier', () => {
+  const input = { name: 'Display metadata', models: ['model-a'], config: { protocol: 'mock' } };
+
+  it('defaults to one and preserves precise decimals through edits and unrelated PATCH requests', async () => {
+    const created = await call('/api/channels', 'POST', input);
+    expect(created.status).toBe(201); expect(created.json.channel.displayMultiplier).toBe(1);
+    const id = created.json.channel.id, prices = [{ model: 'model-a', input: 2.5, output: 4.5 }];
+    const first = await call(`/api/channels/${id}`, 'PATCH', { displayMultiplier: 0.04, config: { prices } });
+    expect(first.status).toBe(200); expect(first.json.channel.displayMultiplier).toBe(0.04);
+    const renamed = await call(`/api/channels/${id}`, 'PATCH', { name: 'Renamed', tags: ['display'], weight: 3 });
+    expect(renamed.status).toBe(200); expect(renamed.json.channel.displayMultiplier).toBe(0.04);
+    const edited = await call(`/api/channels/${id}`, 'PATCH', { displayMultiplier: 0.109 });
+    expect(edited.status).toBe(200); expect(edited.json.channel.displayMultiplier).toBe(0.109); expect(edited.json.channel.config.prices).toEqual(prices); expect(edited.json.channel.weight).toBe(3);
+    const row = await testEnv.DB.prepare('SELECT data FROM channels WHERE id=?').bind(id).first<{ data: string }>();
+    expect(JSON.parse(row!.data).displayMultiplier).toBe(0.109);
+    expect((await new Store(testEnv).getChannel(id))?.displayMultiplier).toBe(0.109);
+  });
+
+  it('reads legacy rows as one without a migration and retains that default on later edits', async () => {
+    const created = await call('/api/channels', 'POST', { ...input, displayMultiplier: 0.04 }), id = created.json.channel.id;
+    await testEnv.DB.prepare("UPDATE channels SET data=json_remove(data,'$.displayMultiplier') WHERE id=?").bind(id).run();
+    const store = new Store(testEnv);
+    expect((await store.getChannel(id))?.displayMultiplier).toBe(1); expect((await store.listChannels())[0].displayMultiplier).toBe(1);
+    expect((await call('/api/bootstrap')).json.channels[0].displayMultiplier).toBe(1);
+    const before = await testEnv.DB.prepare('SELECT data FROM channels WHERE id=?').bind(id).first<{ data: string }>();
+    expect(JSON.parse(before!.data)).not.toHaveProperty('displayMultiplier');
+    const edited = await call(`/api/channels/${id}`, 'PATCH', { name: 'Legacy edited' });
+    expect(edited.status).toBe(200); expect(edited.json.channel.displayMultiplier).toBe(1);
+  });
+
+  it('persists imported decimals and bounds, applies missing defaults, and carries the value into clones', async () => {
+    const values = [0.04, 0.109, 0, 1000000, undefined];
+    const imported = await call('/api/channels/import', 'POST', { channels: values.map((value, index) => ({ ...input, name: `Imported display ${index}`, ...(value === undefined ? {} : { displayMultiplier: value }) })) });
+    expect(imported.status).toBe(201); expect(imported.json.channels.map((channel: GatewayChannel) => channel.displayMultiplier)).toEqual([0.04, 0.109, 0, 1000000, 1]);
+    const clone = await call(`/api/channels/${imported.json.channels[1].id}/clone`, 'POST', {});
+    expect(clone.status).toBe(201); expect(clone.json.channel.displayMultiplier).toBe(0.109); expect(clone.json.channel.id).not.toBe(imported.json.channels[1].id);
+    expect((await new Store(testEnv).getChannel(clone.json.channel.id))?.displayMultiplier).toBe(0.109);
+  });
+
+  it('rejects invalid multiplier types and ranges before changing channels or partial imports', async () => {
+    const created = await call('/api/channels', 'POST', { ...input, displayMultiplier: 0.04 }), id = created.json.channel.id;
+    for (const value of [null, '', '0.04', false, [], {}, -0.001, 1000000.001]) {
+      expect((await call('/api/channels', 'POST', { ...input, displayMultiplier: value })).status).toBe(400);
+      expect((await call(`/api/channels/${id}`, 'PATCH', { name: 'Must not save', displayMultiplier: value })).status).toBe(400);
+    }
+    for (const value of [NaN, Infinity, -Infinity]) expect(() => parseChannel({ ...input, displayMultiplier: value }, true)).toThrow();
+    const imported = await call('/api/channels/import', 'POST', { channels: [{ ...input, name: 'Must not import', tags: ['must-not-import'] }, { ...input, displayMultiplier: null }] });
+    expect(imported.status).toBe(400);
+    const store = new Store(testEnv); expect(await store.listChannels()).toHaveLength(1); expect(await store.listTags()).toEqual([]);
+    expect(await store.getChannel(id)).toMatchObject({ name: input.name, displayMultiplier: 0.04 });
+  });
+});
+
 describe('model discovery management endpoint', () => {
   it.each([
     ['openai', 'https://models.example', '/v1/models', 'authorization', 'Bearer fake-key', { data: [{ id: 'model-a' }] }, 'model-a'],

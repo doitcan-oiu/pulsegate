@@ -11,6 +11,9 @@ type DataRow = { id: string; data: string; health_version?: number };
 type CredRow = { id: string; channel_id: string; label: string; preview: string; secret: string; enabled: number; failure_count: number; recovery_count: number; disabled_at: string | null; reason: string | null; created_at: string };
 type CredentialInput = { label: string; secret: string };
 const decode = <T>(row: { data: string }): T => JSON.parse(row.data) as T;
+function decodeChannel(row: { data: string }): GatewayChannel {
+  const channel = decode<GatewayChannel>(row); channel.displayMultiplier ??= 1; return channel;
+}
 const now = (): string => new Date().toISOString();
 function validateCredential({ label,secret }: CredentialInput): void {
   if (!secret || secret.length > 16000) throw new HttpError(400, 'Credential must be 1–16000 characters');
@@ -26,11 +29,11 @@ export class Store implements GatewayStore {
   }
   async listChannels(): Promise<GatewayChannel[]> {
     const rows = await this.env.DB.prepare('SELECT c.data,a.channel_id AS account_id,a.balance, (SELECT COUNT(*) FROM credentials s WHERE s.channel_id=c.id) AS credential_count FROM channels c LEFT JOIN channel_accounts a ON a.channel_id=c.id ORDER BY json_extract(c.data,\'$.createdAt\') DESC').all<{ data: string; credential_count: number; account_id: string | null; balance: string | null }>();
-    return rows.results.map(row => ({ ...decode<GatewayChannel>(row), credentialCount: row.credential_count, hasAccountCredentials: !!row.account_id, accountBalance: row.balance ? JSON.parse(row.balance) : row.account_id ? { status:'pending',amount:null,unit:'',updatedAt:null,checkedAt:null } : undefined }));
+    return rows.results.map(row => ({ ...decodeChannel(row), credentialCount: row.credential_count, hasAccountCredentials: !!row.account_id, accountBalance: row.balance ? JSON.parse(row.balance) : row.account_id ? { status:'pending',amount:null,unit:'',updatedAt:null,checkedAt:null } : undefined }));
   }
   async getChannel(id: string): Promise<GatewayChannel | null> {
     const row = await this.env.DB.prepare('SELECT data FROM channels WHERE id=?').bind(id).first<DataRow>();
-    if (!row) return null; const channel = decode<GatewayChannel>(row); channel.credentialCount = (await this.listCredentialMeta(id)).length;
+    if (!row) return null; const channel = decodeChannel(row); channel.credentialCount = (await this.listCredentialMeta(id)).length;
     const account = await this.env.DB.prepare('SELECT balance FROM channel_accounts WHERE channel_id=?').bind(id).first<{ balance: string | null }>();
     channel.hasAccountCredentials = !!account;
     channel.accountBalance = account?.balance ? JSON.parse(account.balance) : account ? { status:'pending',amount:null,unit:'',updatedAt:null,checkedAt:null } : undefined;
