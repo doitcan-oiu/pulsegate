@@ -1,5 +1,6 @@
 import type { GatewayChannel, GatewaySettings } from '../shared/types';
-import { resolveApiUrl } from '../shared/upstream-url';
+import { defaultChannelConfig } from '../shared/types';
+import { resolveApiUrl, resolveClientApiUrl } from '../shared/upstream-url';
 import { parseSSE, StreamFailure } from './sse';
 
 export type ChatBody = Record<string, any> & { model: string; messages: Record<string, any>[]; stream?: boolean };
@@ -138,14 +139,18 @@ export function toGemini(original: ChatBody, channel: GatewayChannel): Record<st
   return result;
 }
 
-/** A bare API origin may omit the default version; explicit paths are relative to the supplied base. */
+/** Native calls use configured endpoints; relay calls supply their actual client pathname alongside the protocol override. */
 export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, model: string, stream: boolean, endpointPath?: string, protocolOverride?: GatewayChannel['config']['protocol']): string {
   const config = channel.config;
   const protocol = protocolOverride ?? config.protocol;
-  const path = endpointPath ?? (protocol === 'anthropic' ? config.endpoints.messages : protocol === 'gemini' ? config.endpoints.generate : config.endpoints.chat);
+  const clientPath = protocolOverride ? endpointPath : undefined;
+  const configuredPath = clientPath === '/v1/chat/completions' && config.endpoints.chat !== defaultChannelConfig.endpoints.chat ? config.endpoints.chat
+    : clientPath === '/v1/messages' && config.endpoints.messages !== defaultChannelConfig.endpoints.messages ? config.endpoints.messages : undefined;
+  const path = configuredPath ?? endpointPath ?? (protocol === 'anthropic' ? config.endpoints.messages : protocol === 'gemini' ? config.endpoints.generate : config.endpoints.chat);
+  const resolve = (base: URL) => clientPath && !configuredPath ? resolveClientApiUrl(base, clientPath) : resolveApiUrl(base, path, protocol, model, stream);
   const base = new URL(channel.endpoint);
   if (base.username || base.password) throw new RequestFailure('上游地址不能包含登录凭证；请使用渠道密钥管理');
-  const direct = resolveApiUrl(base, path, protocol, model, stream);
+  const direct = resolve(base);
   if (config.gatewayMode === 'ai-gateway') {
     if (!settings.aiGatewayEnabled || !settings.account || !settings.gateway || !config.customProviderSlug) throw new RequestFailure('请配置 Cloudflare Account、Gateway 和自定义服务商 slug', 503);
     return `https://gateway.ai.cloudflare.com/v1/${encodeURIComponent(settings.account)}/${encodeURIComponent(settings.gateway)}/custom-${encodeURIComponent(config.customProviderSlug.replace(/^custom-/, ''))}${direct.pathname}${direct.search}`;
@@ -153,7 +158,7 @@ export function upstreamUrl(channel: GatewayChannel, settings: GatewaySettings, 
   if (config.relayUrl) {
     const relay = new URL(config.relayUrl); if (relay.protocol !== 'https:' && relay.protocol !== 'http:') throw new RequestFailure('中继 URL 无效');
     if (relay.username || relay.password) throw new RequestFailure('中继地址不能包含登录凭证');
-    return resolveApiUrl(relay, path, protocol, model, stream).toString();
+    return resolve(relay).toString();
   }
   if (!['http:', 'https:'].includes(direct.protocol)) throw new RequestFailure('上游 URL 仅支持 HTTP(S)');
   return direct.toString();

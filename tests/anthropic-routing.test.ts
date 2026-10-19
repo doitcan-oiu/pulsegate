@@ -162,7 +162,7 @@ describe('public Anthropic Messages route authentication and routing', () => {
     expectNativeError(await call('/v1/messages', 'GET', undefined, { 'x-api-key': key.token }), 404, 'not_found_error');
     expectNativeError(await call('/v1/messages', 'PUT', message, { 'x-api-key': key.token }), 404, 'not_found_error');
     for (const path of ['/v1/responses', '/v1/v1/messages']) {
-      const result = await call(path, 'POST', message, { 'x-api-key': key.token });
+      const result = await call(path, 'GET', undefined, { 'x-api-key': key.token });
       expect(result.response.status).toBe(404); expect(result.json).toMatchObject({ error: { type: 'gateway_error', message: 'API endpoint not found' } });
     }
     await expectNoGatewayDispatch();

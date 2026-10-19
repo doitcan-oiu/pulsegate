@@ -2,7 +2,7 @@
 
 基于 **Cloudflare Workers + D1 + Durable Objects + Vue 3 + Vuetify 4** 的大模型网关。结合 HTTP 状态、SSE 首字延迟（TTFT）、非流式完整响应耗时、空响应及流中断判断上游质量，在 API Key 授权范围内重试和切换渠道。
 
-已接入真实后端、D1 持久化、Chat Completions 与 Anthropic Messages 原样转发入口、Cloudflare AI Gateway 自定义服务商和交互式测试场。新安装的数据为空；本地测试渠道需要主动创建，生产不会安装演示数据。前端已完整迁移为 Vue 单文件组件，使用 Vuetify 的 Material 组件体系与统一主题；[DESIGN.md](DESIGN.md) 保留为早期设计参考。
+已接入真实后端、D1 持久化、按客户端路径原样转发的模型请求入口（Chat Completions / Responses / Messages 等）、Cloudflare AI Gateway 自定义服务商和交互式测试场。新安装的数据为空；本地测试渠道需要主动创建，生产不会安装演示数据。前端已完整迁移为 Vue 单文件组件，使用 Vuetify 的 Material 组件体系与统一主题；[DESIGN.md](DESIGN.md) 保留为早期设计参考。
 
 ## 功能
 
@@ -123,7 +123,7 @@ npm run deploy:button -- https://github.com/your-name/pulsegate
 
 复制只复制配置，默认停用，不复制凭据；归档不参与调度，删除会删除上游密钥。客户端修改渠道时不能覆盖健康状态、计数等服务端指标。批量导入先完成所有校验和凭据加密，再以 D1 事务统一写入；失败会整批回滚。
 
-OpenAI SDK 的 `base_url` 使用 `https://你的worker地址/v1`。公开入口：`GET /v1/models`、`POST /v1/chat/completions` 和 `POST /v1/messages`。两种公开生成入口保持客户端请求路径与格式，不按渠道接口类型转换请求；调用方需使用上游支持的入口。Key Profile、别名、重试、健康及用量记录共用原有流程。
+OpenAI SDK 的 `base_url` 使用 `https://你的worker地址/v1`。`GET /v1/models` 返回授权模型列表；带有 `model` 的 JSON `POST /v1/*` 请求按客户端路径转发，例如 `/v1/chat/completions`、`/v1/responses`、`/v1/responses/compact` 和 `/v1/messages`，无需为新格式增加路由白名单。网关只读取 JSON 对象中的 `model` 供鉴权和渠道调度，不要求 `messages` 或 `input` 的特定结构；不按渠道接口类型转换请求，具体参数由上游校验。Key Profile、别名、重试、健康及用量记录共用原有流程。
 
 公开接口使用本程序「API Keys」创建时展示的完整 `pg_live_...` 调用方令牌。`Authorization: Bearer <令牌>` 的认证方案名称不区分大小写，支持空格或 Tab 分隔；`GET /v1/models` 与 `POST /v1/messages` 也支持 `x-api-key: <令牌>`。管理员令牌、渠道上游密钥和列表中的遮罩预览不能代替调用方令牌；已轮换的旧令牌、停用、撤销或过期的 Key 返回 401。模型列表仍按当前 Profile 的渠道及模型范围过滤。
 
@@ -146,7 +146,9 @@ curl https://你的worker地址/v1/messages \
   -d '{"model":"你的模型或映射名","max_tokens":1024,"messages":[{"role":"user","content":"你好"}],"stream":true}'
 ```
 
-Chat Completions 与 Messages 请求均原样转发，渠道选择 OpenAI、Anthropic 或 Gemini 不会触发公开请求的协议转换或参数检测。完整请求参数、内容块和未知扩展字段交由上游处理，包括 thinking、metadata、缓存控制、文档、服务端工具及后续新增字段。响应 JSON 的未知字段、SSE 事件名及内容也保留原样。
+Chat Completions、Responses、Messages 及其他带 `model` 的 JSON POST 请求均按原路径、查询参数与内容转发，渠道选择 OpenAI、Anthropic 或 Gemini 不会触发公开请求的协议转换或参数检测。完整请求参数、内容块和未知扩展字段交由上游处理，包括 input、instructions、previous_response_id、reasoning、thinking、metadata、缓存控制、文档、服务端工具及后续新增字段。未配置模型别名或请求覆盖时保留请求原文；响应 JSON 的未知字段、SSE 事件名和帧内容也保留原样，二进制响应按字节返回。Responses 的流事件仅用于旁路记录首字、终结和用量，不转换成 Chat Completions 事件；事件结构参考 [OpenAI Docs](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
+
+公开转发保留渠道 Base URL 的部署前缀，重叠版本路径只拼一次：`https://api.example.com` 或 `https://api.example.com/v1` 加 `/v1/responses` 都指向 `https://api.example.com/v1/responses`；`https://api.example.com/tenant/v1` 指向 `/tenant/v1/responses`。HTTPS 中继与 AI Gateway 使用同样规则。已显式配置的 Chat / Messages 端点覆盖仍生效，模型发现与控制台测试继续按其接口类型配置执行。
 
 网关仍执行路由鉴权、重试与监控，使用渠道密钥替换上游认证，应用明确配置的请求覆盖，并按已配置别名替换请求及 JSON/SSE 响应中的 `model`。Messages 请求的 Anthropic 版本与 beta 协议头继续传给上游。NewAPI 提供 `/v1/messages` 时，可直接通过网关的同名入口调用；余额监控仍独立选择 NewAPI。
 
@@ -194,7 +196,7 @@ https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/custom-{slug}/v1/
 
 D1 保存配置、加密凭据、Key SHA-256 哈希、Profile 计数、健康、尝试、日志、事件、短期路由状态；DO 串行协调健康/额度/轮询/限流。调用方 Token 明文不落库，日志不保存完整提示词或回复，错误写入前脱敏。
 
-公开生成入口仅有 `/v1/chat/completions` 和 `/v1/messages`，按客户端格式转发参数与响应，不设置参数白名单或转换协议。上游是否支持具体字段和内容由该上游决定；渠道接口类型只用于模型获取与渠道测试。当前没有 Responses、embeddings、独立音视频入口或 SMTP/Webhook；通知开关控制控制台提示。HTTP 中继是 HTTPS HTTP 转发地址，非 SOCKS/CONNECT。
+公开模型调用支持带 `model` 的 JSON `POST /v1/*`，可转发 Responses、Chat、Messages、embeddings 和使用 JSON 请求的音频等上游端点，不设置参数白名单或转换协议。上游是否支持具体路径、字段和内容由该上游决定；渠道接口类型只用于模型获取与渠道测试。当前不提供无 `model` 的资源查询/删除路由、multipart 文件上传、WebSocket、SMTP/Webhook；通知开关控制控制台提示。请求与响应沿用现有大小、超时及重试限制。HTTP 中继是 HTTPS HTTP 转发地址，非 SOCKS/CONNECT。
 
 已验证本地 Workers/D1/DO 和协议模拟。真实 Cloudflare 账户、Gateway 配置及真实上游凭据需部署后联调。生产不开放 Mock；费用按配置的每百万 Token 价格和上游 usage 计算，无 usage 时不推测准确费用。
 

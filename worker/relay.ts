@@ -11,10 +11,29 @@ const text = (value: unknown): value is string => typeof value === 'string' && v
 const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const initialUsage = (): UsageState => ({ usage: { inputTokens: 0, outputTokens: 0 }, anthropic: {}, gemini: {} });
 
-function observeUsage(value: unknown, state: UsageState): RelayUsage {
+function responseType(value: unknown, event = ''): string {
+  return object(value) && typeof value.type === 'string' && value.type.startsWith('response.') ? value.type : event.startsWith('response.') ? event : '';
+}
+const responseTerminals = new Set(['response.completed', 'response.failed', 'response.incomplete']);
+const responseControls = new Set(['response.created', 'response.in_progress', 'response.queued', ...responseTerminals]);
+function responseEnvelope(value: ObjectValue, event = ''): ObjectValue | undefined {
+  if (value.object === 'response') return value;
+  if (object(value.response) && (responseType(value, event) || value.response.object === 'response')) return value.response;
+  return undefined;
+}
+
+function observeUsage(value: unknown, state: UsageState, event = ''): RelayUsage {
   if (!object(value)) return { ...state.usage };
-  const usage = object(value.usage) ? value.usage : object(value.message?.usage) ? value.message.usage : undefined;
+  const response = responseEnvelope(value, event);
+  const responses = !!response || value.object === 'response' || !!responseType(value, event);
+  const usage = object(response?.usage) ? response.usage : object(value.usage) ? value.usage : object(value.message?.usage) ? value.message.usage : undefined;
   if (usage) {
+    if (responses) {
+      // Responses input/output totals already include cached input and reasoning output.
+      if (count(usage.input_tokens)) state.usage.inputTokens = usage.input_tokens;
+      if (count(usage.output_tokens)) state.usage.outputTokens = usage.output_tokens;
+      return { ...state.usage };
+    }
     if (count(usage.prompt_tokens)) state.usage.inputTokens = usage.prompt_tokens;
     if (count(usage.completion_tokens)) state.usage.outputTokens = usage.completion_tokens;
     let native = false;
@@ -64,18 +83,51 @@ function block(value: unknown, generic = true): boolean {
   return payload(value);
 }
 
+const responseMetadata = new Set(['sequence_number', 'item_id', 'output_index', 'content_index', 'summary_index', 'response_id', 'logprobs', 'obfuscation', 'phase']);
+function responsePayload(value: ObjectValue, extra: string[] = []): boolean {
+  return payload(Object.fromEntries(Object.entries(value).filter(([key]) => !responseMetadata.has(key) && !extra.includes(key))));
+}
+function responseOutput(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(responseOutput);
+  if (!object(value)) return payload(value);
+  if (value.type === 'output_text') return text(value.text);
+  if (value.type === 'refusal') return text(value.refusal);
+  if (value.type === 'message') return responseOutput(value.content) || responsePayload(value, ['role', 'content']);
+  if (typeof value.type === 'string' && /(?:function_call|tool|_call$)/.test(value.type)) return text(value.id) || text(value.call_id) || text(value.name) || payload(value);
+  return block(value);
+}
+const responseConfiguration = ['object', 'created_at', 'completed_at', 'background', 'billing', 'conversation', 'instructions', 'max_output_tokens', 'max_tool_calls', 'parallel_tool_calls', 'previous_response_id', 'prompt', 'prompt_cache_key', 'prompt_cache_retention', 'reasoning', 'safety_identifier', 'service_tier', 'store', 'temperature', 'text', 'tool_choice', 'tools', 'top_logprobs', 'top_p', 'truncation', 'user', 'incomplete_details', 'error', 'output', 'output_text'];
+
 function meaningfulJSON(value: unknown, raw: string): boolean {
   if (object(value)) {
+    // A queued/running JSON response confirms creation of an asynchronous task.
+    // Retrying it as "empty" could create the same background work twice.
+    if (value.object === 'response' && ['queued', 'in_progress'].includes(value.status)) return true;
+    if (value.object === 'response') return responseOutput(value.output) || text(value.output_text) || responsePayload(value, responseConfiguration);
+    if (object(value.response) && responseType(value)) return meaningfulStream(value, '');
     if (Array.isArray(value.choices)) return value.choices.some(choice => object(choice) && block(choice.message ?? choice.delta, false));
     if (Array.isArray(value.candidates)) return value.candidates.some(candidate => object(candidate) && block(candidate.content));
     if (Object.hasOwn(value, 'content')) return block({ content: value.content });
-    return payload(value);
+    // Unknown JSON schemas can be valid job acknowledgments containing only an id/status.
+    return Object.keys(value).length > 0;
   }
   return value === undefined ? raw.trim().length > 0 : payload(value);
 }
 
 function meaningfulStream(value: unknown, event: string): boolean {
   if (!object(value)) return payload(value);
+  const responseEvent = responseType(value, event);
+  if (responseEvent) {
+    if (responseEvent === 'response.completed' || responseEvent === 'response.incomplete') {
+      const response = responseEnvelope(value, event);
+      return !!response && (responseOutput(response.output) || text(response.output_text));
+    }
+    if (responseControls.has(responseEvent)) return false;
+    if (['response.output_text.delta', 'response.refusal.delta', 'response.function_call_arguments.delta'].includes(responseEvent)) return text(value.delta);
+    if (['response.output_item.added', 'response.output_item.done'].includes(responseEvent)) return responseOutput(value.item);
+    if (['response.content_part.added', 'response.content_part.done'].includes(responseEvent)) return responseOutput(value.part);
+    return responsePayload(value);
+  }
   if (Array.isArray(value.choices)) return value.choices.some(choice => object(choice) && block(choice.delta ?? choice.message, false));
   if (Array.isArray(value.candidates)) return value.candidates.some(candidate => object(candidate) && block(candidate.content));
   const type = typeof value.type === 'string' ? value.type : event;
@@ -87,6 +139,10 @@ function meaningfulStream(value: unknown, event: string): boolean {
 
 function diagnostic(value: unknown, event?: string): string | null {
   if (object(value) && value.error) return typeof value.error === 'string' ? value.error : typeof value.error.message === 'string' ? value.error.message : 'Upstream returned an error';
+  const response = object(value) ? responseEnvelope(value, event) : undefined;
+  if (response?.error) return typeof response.error === 'string' ? response.error : typeof response.error.message === 'string' ? response.error.message : 'Upstream returned an error';
+  const type = responseType(value, event);
+  if (type === 'response.failed' || response?.status === 'failed') return 'Upstream response failed';
   if (event === 'error' || object(value) && value.type === 'error') return object(value) && typeof value.message === 'string' ? value.message : typeof value === 'string' ? value : 'Upstream returned an error';
   return null;
 }
@@ -95,6 +151,7 @@ function models(value: unknown, clientModel: string, event?: string): { value: u
   if (!object(value)) return { value, changed: false };
   let result = value;
   if (Object.hasOwn(value, 'model') && value.model !== clientModel) result = { ...result, model: clientModel };
+  if (object(value.response) && responseEnvelope(value, event) === value.response && Object.hasOwn(value.response, 'model') && value.response.model !== clientModel) result = { ...result, response: { ...value.response, model: clientModel } };
   if ((value.type === 'message_start' || event === 'message_start') && object(value.message) && Object.hasOwn(value.message, 'model') && value.message.model !== clientModel) result = { ...result, message: { ...value.message, model: clientModel } };
   return { value: result, changed: result !== value };
 }
@@ -148,10 +205,11 @@ function observeFrame(bytes: Uint8Array, clientModel: string, rewriteModel: bool
     bytes = concatenate(parts);
   }
   const error = diagnostic(value, info.event);
-  const done = info.data?.trim() === '[DONE]' || info.event === 'message_stop' || object(value) && value.type === 'message_stop';
-  const controlEvent = ['message_start', 'message_delta', 'message_stop', 'ping', 'error'].includes(info.event) || /(?:metadata|signature|status)$/.test(info.event);
-  const meaningful = info.data !== undefined && !done && !controlEvent && (value === undefined ? info.data.trim().length > 0 : meaningfulStream(value, info.event));
-  return { bytes, usage: observeUsage(value, state), meaningful, done, ...(error !== null ? { error } : {}) };
+  const done = info.data?.trim() === '[DONE]' || info.event === 'message_stop' || object(value) && value.type === 'message_stop' || responseTerminals.has(responseType(value, info.event));
+  const controlEvent = ['message_start', 'message_delta', 'message_stop', 'ping', 'error'].includes(info.event) || responseControls.has(info.event) || /(?:metadata|signature|status)$/.test(info.event);
+  const terminalContent = done && object(value) && ['response.completed', 'response.incomplete'].includes(responseType(value, info.event)) && meaningfulStream(value, info.event);
+  const meaningful = info.data !== undefined && (terminalContent || !done && !controlEvent && (value === undefined ? info.data.trim().length > 0 : meaningfulStream(value, info.event)));
+  return { bytes, usage: observeUsage(value, state, info.event), meaningful, done, ...(error !== null ? { error } : {}) };
 }
 
 /** A byte scanner retains the complete original SSE framing, even for comments or non-JSON data.

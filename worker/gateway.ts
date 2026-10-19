@@ -81,6 +81,31 @@ async function boundedText(body: ReadableStream<Uint8Array> | null, max: number,
   } finally { signal?.removeEventListener('abort', abort); await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 
+async function boundedBytes(body: ReadableStream<Uint8Array> | null, max: number, signal?: AbortSignal): Promise<Uint8Array> {
+  if (!body) return new Uint8Array();
+  const reader = body.getReader(), chunks: Uint8Array[] = []; let size = 0;
+  const abort = () => { void reader.cancel(signal?.reason).catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    while (true) {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+      const { done, value } = await reader.read(); if (done) break;
+      size += value.byteLength;
+      if (size > max) throw new StreamFailure(`Upstream body exceeded ${max / 1024} KiB limit`);
+      chunks.push(value);
+    }
+    if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+    const bytes = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes;
+  } finally { signal?.removeEventListener('abort', abort); await reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
+
+function hasBinaryContentType(response: Response): boolean {
+  const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  return !!type && !type.startsWith('text/') && type !== 'application/json' && !type.endsWith('+json');
+}
+
 function redact(message: string, secrets: string[]): string {
   let result = message;
   for (const secret of secrets) if (secret.length > 3) result = result.split(secret).join('[REDACTED]');
@@ -102,7 +127,7 @@ function timeLabel(date: Date) { return date.toLocaleTimeString('zh-CN', { timeZ
 function usage(value: any) { return { inputTokens: Math.max(0, Number(value?.usage?.prompt_tokens) || 0), outputTokens: Math.max(0, Number(value?.usage?.completion_tokens) || 0) }; }
 function estimatedBudget(channel: GatewayChannel, body: ChatBody, passthrough = false): number {
   const effective = { ...body, ...channel.config.bodyOverrides };
-  const max = effective.max_completion_tokens ?? effective.max_tokens ?? effective.generationConfig?.maxOutputTokens ?? 4096;
+  const max = effective.max_completion_tokens ?? effective.max_tokens ?? (passthrough ? effective.max_output_tokens : undefined) ?? effective.generationConfig?.maxOutputTokens ?? 4096;
   if (!passthrough && (!Number.isSafeInteger(max) || max <= 0)) throw new RequestFailure('最大输出 Token 数必须为正整数');
   // Reserve the full submitted payload, including tool schemas; output is a reservation, usage logs remain provider-reported.
   return Math.ceil(JSON.stringify(effective).length / 3) + (Number.isSafeInteger(max) && max > 0 ? max : 4096);
@@ -234,7 +259,7 @@ export async function handleGateway(request: Request, context: GatewayContext, s
         const native = passthrough ? body : channel.config.protocol === 'anthropic' ? toAnthropic(body, channel) : channel.config.protocol === 'gemini' ? toGemini(body, channel) : body;
         payload = passthrough && candidate.model === original.model && !Object.keys(channel.config.bodyOverrides).length ? rawInput : JSON.stringify(native); estimatedTokens = estimatedBudget(channel, body, passthrough);
         if (channel.config.protocol !== 'mock') {
-          target = upstreamUrl(channel, context.settings, candidate.model, streaming, undefined, context.relayProtocol);
+          target = upstreamUrl(channel, context.settings, candidate.model, streaming, passthrough ? new URL(request.url).pathname : undefined, context.relayProtocol);
           if (passthrough) {
             const incomingSearch = new URL(request.url).search;
             if (incomingSearch) { const url = new URL(target); url.search += `${url.search ? '&' : '?'}${incomingSearch.slice(1)}`; target = url.toString(); }
@@ -288,6 +313,13 @@ export async function handleGateway(request: Request, context: GatewayContext, s
         }
         if (passthrough) streaming = response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') ?? false;
         if (!streaming) {
+          if (passthrough && hasBinaryContentType(response)) {
+            const bytes = await boundedBytes(response.body, MAX_RESPONSE, controller.signal);
+            if (!noResponseBody(response.status) && context.settings.emptyResponseDetection && !bytes.byteLength) throw new StreamFailure('Upstream returned an empty response', 502, 'empty');
+            cleanup(); await record(seconds(attemptStart) > context.settings.responseThreshold ? 'slow' : 'success', response.status, null);
+            await remember(channel, candidateIndex); await recordLog(response.status, null, true);
+            return new Response(noResponseBody(response.status) ? null : bytes, { status: response.status, statusText: response.statusText, headers: downstreamHeaders(false) });
+          }
           const raw = await boundedText(response.body, MAX_RESPONSE, controller.signal, true);
           if (passthrough) {
             const observed = relayJSON(raw, original.model, candidate.model !== original.model); currentUsage = observed.usage;
@@ -319,8 +351,9 @@ export async function handleGateway(request: Request, context: GatewayContext, s
           prefix.push(bytes);
           currentUsage = { inputTokens: Math.max(currentUsage.inputTokens, item.value.usage.inputTokens), outputTokens: Math.max(currentUsage.outputTokens, item.value.usage.outputTokens) };
           if (item.value.error) streamError = redact(item.value.error, secrets);
+          if (item.value.meaningful) { ttft = seconds(attemptStart); meaningful = true; }
           if (item.value.done) { terminalSeen = true; ended = !passthrough; break; }
-          if (item.value.meaningful) { ttft = seconds(attemptStart); meaningful = true; break; }
+          if (meaningful) break;
           if (streamError) break;
         }
         if (!meaningful && !streamError && context.settings.emptyResponseDetection) throw new StreamFailure('Upstream stream completed without content', 502, 'empty');

@@ -191,10 +191,12 @@ export default {
       const store = new Store(env);
       if (path.startsWith('/api/')) return await admin(request,env,ctx,store);
       if (path === '/v1/models' && request.method === 'GET') { const key = await authorizeApi(request,store,true); const models = modelsFor(await store.listChannels(),currentProfile(key)); return response({ object:'list',data:models.map(id => ({ id,object:'model',created:0,owned_by:'pulsegate' })) }); }
-      if (path === '/v1/chat/completions' && request.method === 'POST') { const key = await authorizeApi(request,store); return await handleGateway(request,{ ...await context(env,ctx,store,'api',key),relayProtocol:'openai' },store); }
-      if (path === '/v1/messages' && request.method === 'POST') {
-        const key = await authorizeApi(request,store,true);
-        return await handleAnthropicMessages(request,undefined,await context(env,ctx,store,'api',key),store);
+      if (path.startsWith('/v1/') && request.method === 'POST') {
+        const messages = path === '/v1/messages';
+        const key = await authorizeApi(request,store,messages);
+        const gateway = await context(env,ctx,store,'api',key);
+        if (messages) return await handleAnthropicMessages(request,undefined,gateway,store);
+        return await handleGateway(request,{ ...gateway,relayProtocol:'openai' },store);
       }
       if (path.startsWith('/v1/')) throw new HttpError(404,'API endpoint not found');
       return await env.ASSETS.fetch(request);
