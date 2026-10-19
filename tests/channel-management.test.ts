@@ -3,11 +3,14 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, createExecutionContext, createScheduledController, waitOnExecutionContext } from 'cloudflare:test';
 import worker from '../worker/index';
 import { decryptSecret } from '../worker/crypto';
-import { refreshAccountBalance, refreshDueAccounts } from '../worker/accounts';
+import { accountBase, refreshAccountBalance, refreshDueAccounts } from '../worker/accounts';
 import { Store } from '../worker/store';
 import { channel as parseChannel } from '../worker/validation';
-import type { Env } from '../worker/env';
+import { gatewayCandidates, orderedCandidates } from '../worker/gateway';
+import { prepareBody, prepareRelayBody, upstreamHeaders, upstreamUrl } from '../worker/protocols';
+import type { Env, GatewayContext } from '../worker/env';
 import type { GatewayChannel } from '../shared/types';
+import { defaultSettings } from '../shared/types';
 
 const testEnv = env as unknown as Env & { TEST_MIGRATIONS: Parameters<typeof applyD1Migrations>[1] };
 async function call(path: string, method = 'GET', data?: unknown, authenticated = true, customEnv: Env = testEnv) {
@@ -93,6 +96,99 @@ describe('display-only channel multiplier', () => {
     expect(imported.status).toBe(400);
     const store = new Store(testEnv); expect(await store.listChannels()).toHaveLength(1); expect(await store.listTags()).toEqual([]);
     expect(await store.getChannel(id)).toMatchObject({ name: input.name, displayMultiplier: 0.04 });
+  });
+});
+
+describe('display-only channel website', () => {
+  const input = { name: 'Website metadata', endpoint: 'https://upstream.example/v1', models: ['model-a'] };
+  const website = 'https://provider.example/docs/get-started/?source=console&lang=zh#pricing';
+
+  it('defaults to empty, trims a supplied URL, preserves omitted edits, and allows clearing', async () => {
+    const created = await call('/api/channels', 'POST', input), id = created.json.channel.id;
+    expect(created.status).toBe(201); expect(created.json.channel.website).toBe('');
+    const updated = await call(`/api/channels/${id}`, 'PATCH', { website: `  ${website}  ` });
+    expect(updated.status).toBe(200); expect(updated.json.channel.website).toBe(website);
+    const renamed = await call(`/api/channels/${id}`, 'PATCH', { name: 'Website renamed', weight: 3 });
+    expect(renamed.status).toBe(200); expect(renamed.json.channel.website).toBe(website);
+    const store = new Store(testEnv); expect((await store.listChannels())[0].website).toBe(website);
+    expect((await store.getChannel(id))?.website).toBe(website);
+    const row = await testEnv.DB.prepare('SELECT data FROM channels WHERE id=?').bind(id).first<{ data: string }>();
+    expect(JSON.parse(row!.data).website).toBe(website);
+    const cleared = await call(`/api/channels/${id}`, 'PATCH', { website: '' });
+    expect(cleared.status).toBe(200); expect(cleared.json.channel.website).toBe('');
+    expect((await store.getChannel(id))?.website).toBe('');
+  });
+
+  it('accepts HTTP and HTTPS independently of upstream URL restrictions and preserves URL components', async () => {
+    const longest = 'https://provider.example/' + 'a'.repeat(2048 - 'https://provider.example/'.length);
+    for (const value of [website, 'http://provider.example/', 'http://localhost:3000/docs?q=hello%20world#start', 'http://127.0.0.1:8000/?a=1#b', 'HTTPS://provider.example/docs/', longest, '   ']) {
+      expect(parseChannel({ ...input, website: value }, false).website).toBe(value.trim());
+    }
+    const created = await call('/api/channels', 'POST', { ...input, website: 'http://localhost:3000/docs?q=1#start' });
+    expect(created.status).toBe(201); expect(created.json.channel.website).toBe('http://localhost:3000/docs?q=1#start');
+  });
+
+  it('reads missing legacy websites as empty without rewriting the database', async () => {
+    const created = await call('/api/channels', 'POST', { ...input, website }), id = created.json.channel.id;
+    await testEnv.DB.prepare("UPDATE channels SET data=json_remove(data,'$.website') WHERE id=?").bind(id).run();
+    const store = new Store(testEnv);
+    expect((await store.getChannel(id))?.website).toBe(''); expect((await store.listChannels())[0].website).toBe('');
+    expect((await call('/api/bootstrap')).json.channels[0].website).toBe('');
+    const row = await testEnv.DB.prepare('SELECT data FROM channels WHERE id=?').bind(id).first<{ data: string }>();
+    expect(JSON.parse(row!.data)).not.toHaveProperty('website');
+    expect((await call(`/api/channels/${id}`, 'PATCH', { enabled: false })).json.channel.website).toBe('');
+  });
+
+  it('preserves imported and cloned websites, applies missing defaults, and retains metadata during bulk edits', async () => {
+    const imported = await call('/api/channels/import', 'POST', { channels: [{ ...input, website }, { ...input, name: 'No website' }] });
+    expect(imported.status).toBe(201); expect(imported.json.channels.map((channel: GatewayChannel) => channel.website)).toEqual([website, '']);
+    const original = imported.json.channels[0], clone = await call(`/api/channels/${original.id}/clone`, 'POST', {});
+    expect(clone.status).toBe(201); expect(clone.json.channel.website).toBe(website); expect(clone.json.channel.id).not.toBe(original.id);
+    await call('/api/channels/bulk', 'POST', { ids: [original.id, clone.json.channel.id], action: 'tags', tags: ['website'], mode: 'add' });
+    const store = new Store(testEnv);
+    expect((await store.getChannel(original.id))?.website).toBe(website);
+    expect((await store.getChannel(clone.json.channel.id))?.website).toBe(website);
+  });
+
+  it('rejects invalid website values before changing a channel or partially importing data', async () => {
+    const created = await call('/api/channels', 'POST', { ...input, website }), id = created.json.channel.id;
+    for (const value of [null, 123, false, [], {}, '/docs', '//provider.example', 'provider.example', 'https:provider.example', 'http:/provider.example', 'https:///provider.example', 'https://', 'ftp://provider.example', 'javascript:alert(1)', 'data:text/html,hello', 'https://private-user:private-password@provider.example', 'https://@provider.example', 'https://provider.example:invalid', 'https://provider.example/line\nbreak', 'https://provider.example/has space', 'https://provider.example\\path', 'https://provider.example/' + 'a'.repeat(2048)]) {
+      const invalid = await call('/api/channels', 'POST', { ...input, website: value });
+      expect(invalid.status).toBe(400); expect(invalid.content).not.toContain('private-password');
+      expect((await call(`/api/channels/${id}`, 'PATCH', { name: 'Must not save', website: value })).status).toBe(400);
+    }
+    const imported = await call('/api/channels/import', 'POST', { channels: [{ ...input, name: 'Must not import', tags: ['must-not-import'], website }, { ...input, website: 'javascript:alert(1)' }] });
+    expect(imported.status).toBe(400);
+    const store = new Store(testEnv); expect(await store.listChannels()).toHaveLength(1); expect(await store.listTags()).toEqual([]);
+    expect(await store.getChannel(id)).toMatchObject({ name: input.name, website });
+  });
+
+  it('does not forward the website or use it for upstream destinations, routing, or model prices', async () => {
+    const prices = [{ model: 'model-a', input: 2.5, output: 4.5 }];
+    const first = parseChannel({ ...input, website, priority: 10, config: { prices } }, false);
+    const second = parseChannel({ ...input, name: 'Priority channel', priority: 0, website: 'http://localhost:3000/' }, false);
+    const original = { model: 'model-a', messages: [{ role: 'user', content: 'hello' }], stream: false };
+    expect(prepareBody(first, original, 'model-a')).toEqual(original);
+    expect(prepareRelayBody(first, original, 'model-a')).toEqual(original);
+    expect(upstreamUrl(first, defaultSettings, 'model-a', false)).toBe('https://upstream.example/v1/chat/completions');
+    expect(upstreamHeaders(first, 'fake-website-inference-key', null).has('website')).toBe(false);
+    expect(accountBase(first, false)).toBe('https://upstream.example'); expect(first.config.prices).toEqual(prices);
+    const context: GatewayContext = { env: testEnv, ctx: createExecutionContext(), settings: { ...defaultSettings, strategy: 'failover', stickyMode: 'off' }, channels: [first, second], key: null, profile: null, source: 'api' };
+    expect((await orderedCandidates(gatewayCandidates(context, 'model-a'), context, new Store(testEnv), '')).map(candidate => candidate.channel.id)).toEqual([second.id, first.id]);
+  });
+
+  it('keeps encrypted balance credentials and the existing session when only the website changes', async () => {
+    const fetcher = vi.fn(async (target: RequestInfo | URL) => {
+      expect(String(target)).toBe('https://upstream.example/api/usage/token/');
+      return Response.json({ code: true, data: { total_available: 100000 } });
+    }); vi.stubGlobal('fetch', fetcher);
+    const created = await call('/api/channels', 'POST', { ...input, website, config: { integration: 'bbdevlab' }, accountCredentials: { accessToken: 'fake-website-balance-token' } }), id = created.json.channel.id;
+    await manualBalance(id);
+    const before = await testEnv.DB.prepare('SELECT credentials,auth_secret,balance,version FROM channel_accounts WHERE channel_id=?').bind(id).first();
+    const updated = await call(`/api/channels/${id}`, 'PATCH', { website: 'http://localhost:3000/new-site?from=console#start' });
+    expect(updated.status).toBe(200); expect(updated.json.channel.accountBalance).toMatchObject({ status: 'ok', amount: 1 });
+    expect(await testEnv.DB.prepare('SELECT credentials,auth_secret,balance,version FROM channel_accounts WHERE channel_id=?').bind(id).first()).toEqual(before);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });
 

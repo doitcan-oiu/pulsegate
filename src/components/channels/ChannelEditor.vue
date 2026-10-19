@@ -21,7 +21,7 @@ const isBalanceBackend = (value: string | undefined): value is BalanceBackend =>
 const initialBackend = isBalanceBackend(baseline.integration) ? baseline.integration : isBalanceBackend(props.channel?.accountIntegration) ? props.channel.accountIntegration : 'newapi';
 const editorTab = ref('connection');
 const connectionPanels = ref<string | undefined>(initialConnection !== 'direct' ? 'connection' : undefined);
-const draft = ref({ name: props.channel?.name ?? '', provider: props.channel?.provider ?? 'OpenAI', protocol: baseline.protocol, endpoint: props.channel?.endpoint ?? services[0]!.endpoint, models: [...(props.channel?.models ?? [])], model: props.channel?.model ?? '', tags: [...(props.channel?.tags ?? [])], priority: props.channel?.priority ?? 0, weight: props.channel?.weight ?? 1, displayMultiplier: props.channel?.displayMultiplier ?? 1, enabled: props.channel?.enabled ?? true, secrets: '', connection: initialConnection, relayUrl: baseline.relayUrl, slug: baseline.customProviderSlug, balance: isBalanceBackend(baseline.integration), backend: initialBackend as BalanceBackend });
+const draft = ref({ name: props.channel?.name ?? '', provider: props.channel?.provider ?? 'OpenAI', protocol: baseline.protocol, endpoint: props.channel?.endpoint ?? services[0]!.endpoint, models: [...(props.channel?.models ?? [])], model: props.channel?.model ?? '', tags: [...(props.channel?.tags ?? [])], priority: props.channel?.priority ?? 0, weight: props.channel?.weight ?? 1, displayMultiplier: props.channel?.displayMultiplier ?? 1, website: props.channel?.website ?? '', enabled: props.channel?.enabled ?? true, secrets: '', connection: initialConnection, relayUrl: baseline.relayUrl, slug: baseline.customProviderSlug, balance: isBalanceBackend(baseline.integration), backend: initialBackend as BalanceBackend });
 function accountDraft(backend: BalanceBackend): AccountDraft { return { mode: backend === 'bbdevlab' ? 'token' : props.channel?.accountIntegration === backend ? props.channel.accountAuthMode ?? 'password' : 'password', username: '', password: '', accessToken: '', userId: '', cookie: '' }; }
 const accounts = ref<Record<BalanceBackend, AccountDraft>>({ newapi: accountDraft('newapi'), sub2api: accountDraft('sub2api'), bbdevlab: accountDraft('bbdevlab') });
 const account = computed(() => accounts.value[draft.value.backend]);
@@ -43,7 +43,7 @@ function chooseProtocol(value: ProviderProtocol) {
   const service = services.find(item => item.value === value)!;
   const saved = modelDrafts.get(value);
   const provider = services.some(item => item.title === draft.value.provider) || draft.value.provider === 'Google Gemini' ? service.title : draft.value.provider;
-  const common = { name: draft.value.name, provider, tags: draft.value.tags, priority: draft.value.priority, weight: draft.value.weight, displayMultiplier: draft.value.displayMultiplier, enabled: draft.value.enabled, balance: draft.value.balance, backend: draft.value.backend };
+  const common = { name: draft.value.name, provider, tags: draft.value.tags, priority: draft.value.priority, weight: draft.value.weight, displayMultiplier: draft.value.displayMultiplier, website: draft.value.website, enabled: draft.value.enabled, balance: draft.value.balance, backend: draft.value.backend };
   draft.value = saved ? { ...clone(saved.draft), ...common } : { ...draft.value, ...common, protocol: value, endpoint: service.endpoint, models: [], model: '', secrets: '', connection: 'direct', relayUrl: '', slug: '' };
   modelInput.value = saved?.modelInput ?? ''; batchInput.value = saved?.batchInput ?? '';
 }
@@ -55,6 +55,19 @@ function endpointValid(value: string, label: string) {
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
   if (parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.protocol !== 'https:' && !(props.devMode && local && parsed.protocol === 'http:')) || (!props.devMode && local)) throw new Error(`${label}需使用 HTTPS，不能包含登录信息、查询参数或片段`);
   if (value.length > 2048) throw new Error(`${label}不能超过 2,048 个字符`);
+}
+function websiteValue(value: string): string {
+  const website = value.trim();
+  if (!website) return '';
+  if (website.length > 2048) throw new Error('官网地址不能超过 2,048 个字符');
+  if (!/^https?:\/\//i.test(website)) throw new Error('官网地址需以 http:// 或 https:// 开头');
+  if (/[\\\x00-\x20\x7f]/.test(website)) throw new Error('官网地址不能包含空白、控制字符或反斜杠；空格请使用 %20');
+  let parsed: URL;
+  try { parsed = new URL(website); } catch { throw new Error('官网地址无效，请填写完整的 HTTP/HTTPS 地址'); }
+  const authority = website.slice(website.indexOf('://') + 3).split(/[/?#]/, 1)[0];
+  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || !authority) throw new Error('官网地址需包含有效的域名或主机地址');
+  if (parsed.username || parsed.password || authority.includes('@')) throw new Error('官网地址不能包含用户名或密码');
+  return website;
 }
 const values = (text: string) => [...new Set(text.split(/[,，\n]+/).map(item => item.trim()).filter(Boolean))];
 function addModels(models: string[]) {
@@ -93,6 +106,8 @@ async function save() {
     try { endpointValid(d.endpoint.trim(), 'Base URL'); if (!simulated.value && d.connection === 'relay') endpointValid(d.relayUrl.trim(), '中继地址'); if (!simulated.value && d.connection === 'ai-gateway' && !/^[\w-]{1,128}$/.test(d.slug.trim())) throw new Error('slug 仅支持字母、数字、下划线与连字符'); } catch (error) { editorTab.value = 'connection'; connectionPanels.value = 'connection'; throw error; }
     if (!Number.isInteger(Number(d.priority)) || d.priority < -10000 || d.priority > 10000 || !Number.isFinite(Number(d.weight)) || d.weight < 0 || d.weight > 10000) { editorTab.value = 'models'; throw new Error('优先级须为 -10,000 至 10,000 的整数，权重为 0–10,000'); }
     if (d.displayMultiplier == null || String(d.displayMultiplier).trim() === '' || !Number.isFinite(Number(d.displayMultiplier)) || Number(d.displayMultiplier) < 0 || Number(d.displayMultiplier) > 1000000) { editorTab.value = 'models'; throw new Error('请填写 0–1,000,000 的有效倍率'); }
+    let website: string;
+    try { website = websiteValue(d.website ?? ''); } catch (error) { editorTab.value = 'models'; throw error; }
     const apiKeys = [...new Set(d.secrets.split(/\r?\n/).map(key => key.trim()).filter(Boolean))];
     if (apiKeys.length > 100 || apiKeys.some(key => key.length > 16000)) { editorTab.value = 'connection'; throw new Error('最多 100 个密钥，每个不超过 16,000 个字符'); }
     let accountCredentials: Record<string, string> | undefined;
@@ -122,7 +137,7 @@ async function save() {
       }
     }
     busy.value = true;
-    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), enabled: d.enabled, config: connectionConfig(), ...(apiKeys.length ? { apiKeys } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
+    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: connectionConfig(), ...(apiKeys.length ? { apiKeys } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
     d.secrets = ''; accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; accounts.value.bbdevlab.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
   } catch (error) { notify(error instanceof Error ? error.message : '保存失败', 'error'); }
   finally { busy.value = false; }
@@ -171,7 +186,7 @@ async function save() {
           <div class="model-add-line"><v-text-field v-model="tagInput" label="新增标签，逗号分隔" /><v-btn variant="tonal" @click="addTags">添加</v-btn></div>
           <v-switch v-model="draft.enabled" :disabled="channel?.archived" label="启用渠道" color="primary" hide-details />
           <v-divider class="my-4" /><div class="editor-section-heading"><h3>展示信息</h3></div>
-          <v-text-field v-model.number="draft.displayMultiplier" label="倍率" hint="仅用于列表展示" persistent-hint type="number" step="any" min="0" max="1000000" class="display-multiplier-field" />
+          <div class="editor-field-grid editor-field-grid--responsive"><v-text-field v-model.number="draft.displayMultiplier" label="倍率" hint="仅用于列表展示" persistent-hint type="number" step="any" min="0" max="1000000" class="display-multiplier-field" /><v-text-field v-model="draft.website" label="官网地址（可选）" hint="以 http:// 或 https:// 开头，留空可清除。" persistent-hint type="url" maxlength="2048" autocomplete="url" clearable /></div>
         </section>
         <section v-show="editorTab === 'account'">
           <div class="editor-section-heading"><h3>上游余额监控</h3><p>支持 NewAPI、Sub2API 和 BBDevLab，由 Worker 定时刷新。</p></div>

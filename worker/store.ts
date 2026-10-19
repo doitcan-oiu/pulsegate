@@ -12,7 +12,7 @@ type CredRow = { id: string; channel_id: string; label: string; preview: string;
 type CredentialInput = { label: string; secret: string };
 const decode = <T>(row: { data: string }): T => JSON.parse(row.data) as T;
 function decodeChannel(row: { data: string }): GatewayChannel {
-  const channel = decode<GatewayChannel>(row); channel.displayMultiplier ??= 1; return channel;
+  const channel = decode<GatewayChannel>(row); channel.displayMultiplier ??= 1; channel.website ??= ''; return channel;
 }
 const now = (): string => new Date().toISOString();
 function validateCredential({ label,secret }: CredentialInput): void {

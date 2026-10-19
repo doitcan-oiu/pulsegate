@@ -18,6 +18,17 @@ export function url(value: unknown, dev: boolean, fallback = '', optional = fals
   assert(dev || !local, 'Loopback endpoints are development only');
   return result.replace(/\/$/, '');
 }
+function channelWebsite(value: unknown, fallback = ''): string {
+  const result = text(value, fallback, 2048).trim();
+  if (!result) return '';
+  assert(/^https?:\/\//i.test(result) && !/[\\\x00-\x20\x7f]/.test(result), '官网须为有效的绝对 HTTP/HTTPS 地址');
+  let parsed: URL;
+  try { parsed = new URL(result); } catch { throw new HttpError(400, '官网须为有效的绝对 HTTP/HTTPS 地址'); }
+  const authority = result.slice(result.indexOf('://') + 3).split(/[/?#]/, 1)[0];
+  assert(['http:', 'https:'].includes(parsed.protocol) && parsed.hostname && authority, '官网须为有效的绝对 HTTP/HTTPS 地址');
+  assert(!parsed.username && !parsed.password && !authority.includes('@'), '官网地址不能包含登录凭据');
+  return result;
+}
 function pairArray(value: unknown, fallback: { from: string; to: string }[]): { from: string; to: string }[] { if (value === undefined) return fallback; assert(Array.isArray(value) && value.length <= 1000, 'Invalid model aliases'); return (value as unknown[]).map(v => { const p = object(v); const from = text(p.from); const to = text(p.to); assert(from && to, 'Alias names cannot be empty'); return { from, to }; }); }
 function statuses(value: unknown, fallback: number[]): number[] { if (value === undefined) return fallback; assert(Array.isArray(value) && value.length <= 100 && value.every(n => Number.isInteger(n) && n >= 400 && n <= 599), 'HTTP statuses must be 400–599'); return [...new Set(value as number[])]; }
 export function config(input: unknown, dev: boolean, previous = defaultChannelConfig): ChannelConfig {
@@ -57,7 +68,7 @@ export function channel(input: unknown, dev: boolean, previous?: GatewayChannel)
   const endpoint = cfg.protocol === 'mock' && (b.endpoint === undefined || b.endpoint === '') ? 'http://127.0.0.1/mock' : url(b.endpoint, dev, c.endpoint);
   assert(models.length, 'At least one model is required');
   const archived = bool(b.archived,c.archived);
-  return { ...c, name, provider: text(b.provider, c.provider, 128), model, models, tags: strings(b.tags, c.tags, 100), endpoint, displayMultiplier: number(b.displayMultiplier, c.displayMultiplier ?? 1), weight: number(b.weight, c.weight, 0, 10000), priority: Math.floor(number(b.priority, c.priority, -10000, 10000)), enabled: archived ? false : bool(b.enabled, c.enabled), archived, config: cfg };
+  return { ...c, name, provider: text(b.provider, c.provider, 128), model, models, tags: strings(b.tags, c.tags, 100), endpoint, website: channelWebsite(b.website, c.website ?? ''), displayMultiplier: number(b.displayMultiplier, c.displayMultiplier ?? 1), weight: number(b.weight, c.weight, 0, 10000), priority: Math.floor(number(b.priority, c.priority, -10000, 10000)), enabled: archived ? false : bool(b.enabled, c.enabled), archived, config: cfg };
 }
 export function profile(input: unknown): KeyProfile {
   const b = object(input); const scope = oneOf(b.scope, ['all', 'tags', 'channels'] as const, 'all');
