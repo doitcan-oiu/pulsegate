@@ -76,7 +76,7 @@ export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
       description="请求转发到上游模型，响应中的模型名仍使用公开名称。"
       icon={Tags}
       action={
-        <Button onClick={() => add()}>
+        <Button variant={config.aliases.length ? "secondary" : "primary"} onClick={() => add()}>
           <Plus size={15} />
           添加映射
         </Button>
@@ -87,11 +87,6 @@ export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
           icon={Tags}
           title="还没有模型别名"
           description="例如：客户端请求 assistant，上游实际使用 gpt-4.1。"
-          action={
-            <Button variant="primary" onClick={() => add()}>
-              添加第一条映射
-            </Button>
-          }
         />
       ) : (
         <div className="cmp-alias-editor">
@@ -199,8 +194,8 @@ export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
         </div>
       )}
       {models.length > 0 && (
-        <div className="cmp-suggestions">
-          <span>从渠道模型开始</span>
+        <details className="cmp-suggestions">
+          <summary>从渠道模型添加</summary>
           <div>
             {models.slice(0, 10).map((model) => (
               <Button
@@ -217,7 +212,7 @@ export function ModelAliasesPanel({ config, setConfig, models }: ModelProps) {
               <Chip size="sm">另有 {models.length - 10} 个模型</Chip>
             )}
           </div>
-        </div>
+        </details>
       )}
     </PanelSection>
   );
@@ -253,10 +248,10 @@ export function ModelPricesPanel({ config, setConfig, models }: ModelProps) {
     <div className="cmp-panels">
       <PanelSection
         title="模型单价"
-        description="以 USD / 百万 token 记录输入与输出价格，用于请求成本统计。"
+        description="单位：USD / 百万 token，用于请求成本统计。"
         icon={CircleDollarSign}
         action={
-          <Button onClick={() => add()}>
+          <Button variant={config.prices.length ? "secondary" : "primary"} onClick={() => add()}>
             <Plus size={15} />
             添加价格
           </Button>
@@ -266,12 +261,7 @@ export function ModelPricesPanel({ config, setConfig, models }: ModelProps) {
           <PanelEmpty
             icon={CircleDollarSign}
             title="还没有设置价格"
-            description="为上游模型填写输入与输出单价，用于用量分析中的成本计算。"
-            action={
-              <Button variant="primary" onClick={() => add()}>
-                添加模型价格
-              </Button>
-            }
+            description="填写模型的输入和输出单价即可开始统计成本。"
           />
         ) : (
           <div className="cmp-list">
@@ -282,72 +272,55 @@ export function ModelPricesPanel({ config, setConfig, models }: ModelProps) {
                   (other, i) =>
                     i !== index && other.model.trim() === price.model.trim(),
                 );
-              const cost =
-                (price.input * inputTokens + price.output * outputTokens) / 1e6;
               return (
-                <div className="cmp-entry" key={index}>
-                  <div className="cmp-entry-heading">
-                    <span>模型 {String(index + 1).padStart(2, "0")}</span>
-                    <Button
-                      variant="ghost"
-                      isIconOnly
-                      aria-label={`删除价格 ${index + 1}`}
-                      onClick={() =>
-                        setConfig((old) => ({
-                          ...old,
-                          prices: old.prices.filter((_, i) => i !== index),
-                        }))
-                      }
-                    >
-                      <Trash2 size={15} />
-                    </Button>
-                  </div>
+                <div className="cmp-price-row" key={index}>
                   <label className="cmp-field">
                     <span>上游模型名称</span>
                     <Input
                       aria-label={`价格模型名称 ${index + 1}`}
                       value={price.model}
-                      placeholder="填写上游实际模型名称"
+                      placeholder="上游模型名称"
                       onChange={(e) => update(index, { model: e.target.value })}
                       aria-invalid={Boolean(duplicate)}
                     />
                   </label>
-                  <div className="cmp-price-fields">
-                    <PanelNumber
-                      label={`输入单价 ${index + 1}`}
-                      value={price.input}
-                      onChange={(input) => update(index, { input })}
-                      min={0}
-                      max={1000000}
-                      step={0.1}
-                      unit="USD / 百万 token"
-                      formatOptions={{ maximumFractionDigits: 20 }}
-                    />
-                    <PanelNumber
-                      label={`输出单价 ${index + 1}`}
-                      value={price.output}
-                      onChange={(output) => update(index, { output })}
-                      min={0}
-                      max={1000000}
-                      step={0.1}
-                      unit="USD / 百万 token"
-                      formatOptions={{ maximumFractionDigits: 20 }}
-                    />
-                  </div>
+                  <PanelNumber
+                    label={`输入单价 ${index + 1}`}
+                    value={price.input}
+                    onChange={(input) => update(index, { input })}
+                    min={0}
+                    max={1000000}
+                    step={0.1}
+                    formatOptions={{ maximumFractionDigits: 20 }}
+                  />
+                  <PanelNumber
+                    label={`输出单价 ${index + 1}`}
+                    value={price.output}
+                    onChange={(output) => update(index, { output })}
+                    min={0}
+                    max={1000000}
+                    step={0.1}
+                    formatOptions={{ maximumFractionDigits: 20 }}
+                  />
+                  <Button
+                    className="cmp-row-delete"
+                    variant="ghost"
+                    isIconOnly
+                    aria-label={`删除价格 ${index + 1}`}
+                    onClick={() =>
+                      setConfig((old) => ({
+                        ...old,
+                        prices: old.prices.filter((_, i) => i !== index),
+                      }))
+                    }
+                  >
+                    <Trash2 size={15} />
+                  </Button>
                   {duplicate && (
                     <p className="cmp-error" role="alert">
                       该模型已有价格，请保留一条价格记录。
                     </p>
                   )}
-                  <div className="cmp-cost">
-                    <span>
-                      {inputTokens.toLocaleString()} 输入 +{" "}
-                      {outputTokens.toLocaleString()} 输出 token
-                    </span>
-                    <strong>
-                      {Number.isFinite(cost) ? dollars(cost) : "填写有效价格"}
-                    </strong>
-                  </div>
                 </div>
               );
             })}
@@ -356,8 +329,8 @@ export function ModelPricesPanel({ config, setConfig, models }: ModelProps) {
         {models.some(
           (model) => !config.prices.some((price) => price.model === model),
         ) && (
-          <div className="cmp-suggestions">
-            <span>快速添加渠道模型</span>
+          <details className="cmp-suggestions">
+            <summary>从渠道模型添加</summary>
             <div>
               {models
                 .filter(
@@ -377,14 +350,14 @@ export function ModelPricesPanel({ config, setConfig, models }: ModelProps) {
                   </Button>
                 ))}
             </div>
-          </div>
+          </details>
         )}
       </PanelSection>
-      <PanelSection
-        title="单次请求成本预览"
-        description="调整预估用量，上方每个模型会实时显示成本；预览用量不会保存。"
-        icon={Calculator}
-      >
+      <details className="cmp-details">
+        <summary>
+          <Calculator size={15} />单次请求成本试算
+        </summary>
+        <p className="cmp-row-note">调整用量查看预估成本，试算用量不会保存。</p>
         <div className="cmp-price-fields">
           <PanelNumber
             label="预估输入 token"
@@ -403,11 +376,19 @@ export function ModelPricesPanel({ config, setConfig, models }: ModelProps) {
             step={100}
           />
         </div>
-        <p className="cmp-row-note">
-          成本 = 输入 token × 输入单价 ÷ 1,000,000 + 输出 token × 输出单价 ÷
-          1,000,000
-        </p>
-      </PanelSection>
+        {config.prices.map((price, index) => {
+          const cost =
+            (price.input * inputTokens + price.output * outputTokens) / 1e6;
+          return (
+            <div className="cmp-cost" key={index}>
+              <span>{price.model || `模型 ${index + 1}`}</span>
+              <strong>
+                {Number.isFinite(cost) ? dollars(cost) : "填写有效价格"}
+              </strong>
+            </div>
+          );
+        })}
+      </details>
     </div>
   );
 }
@@ -600,7 +581,7 @@ function OverrideRows({
       description={
         headers
           ? "添加项目标识或上游需要的非敏感请求头。"
-          : "转发时用这些值覆盖同名参数；每一行独立设置值的类型。"
+          : "转发时覆盖同名参数，按所选类型保存。"
       }
       icon={headers ? FileKey2 : Settings2}
       action={
@@ -635,21 +616,6 @@ function OverrideRows({
             const issue = rowIssue(row, rows, headers);
             return (
               <div className="cmp-entry" key={row.id}>
-                <div className="cmp-entry-heading">
-                  <span>
-                    {label} {String(index + 1).padStart(2, "0")}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    isIconOnly
-                    aria-label={`删除${label} ${index + 1}`}
-                    onClick={() =>
-                      setRows((old) => old.filter((item) => item.id !== row.id))
-                    }
-                  >
-                    <Trash2 size={15} />
-                  </Button>
-                </div>
                 <div
                   className={
                     headers ? "cmp-header-fields" : "cmp-override-fields"
@@ -739,6 +705,17 @@ function OverrideRows({
                       />
                     )}
                   </label>
+                  <Button
+                    className="cmp-row-delete"
+                    variant="ghost"
+                    isIconOnly
+                    aria-label={`删除${label} ${index + 1}`}
+                    onClick={() =>
+                      setRows((old) => old.filter((item) => item.id !== row.id))
+                    }
+                  >
+                    <Trash2 size={15} />
+                  </Button>
                 </div>
                 {issue && (
                   <p className="cmp-error" role="alert">
@@ -753,7 +730,7 @@ function OverrideRows({
       <p className="cmp-row-note">
         {headers
           ? "Authorization、API Key、Cookie 等认证与传输头由网关管理。"
-          : "model、stream、消息与系统提示由网关管理。数字 0、布尔值 false 与 null 会按原类型保存。"}
+          : "model、stream、消息与系统提示由网关管理。"}
       </p>
     </PanelSection>
   );

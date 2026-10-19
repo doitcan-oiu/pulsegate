@@ -923,10 +923,9 @@ export default function ChannelManager({
       {confirmation && (
         <ChannelDialog
           title={confirmation.title}
+          size="compact"
           onClose={() => !busy && setConfirmation(null)}
-        >
-          <p className="cx-hint">{confirmation.description}</p>
-          <footer className="cx-footer">
+          footer={<div className="gx-dialog-actions">
             <Button
               variant="secondary"
               disabled={busy}
@@ -944,9 +943,11 @@ export default function ChannelManager({
                   .catch(() => undefined);
               }}
             >
-              确认
+              {busy ? "处理中…" : confirmation.title === "删除标签" ? "删除标签" : "确认"}
             </Button>
-          </footer>
+          </div>}
+        >
+          <p className="cx-hint">{confirmation.description}</p>
         </ChannelDialog>
       )}
       {modal && (
@@ -966,7 +967,7 @@ export default function ChannelManager({
           }
           onClose={() => closeModal()}
           className="gx-management-dialog"
-          wide={modal === "strategy"}
+          size={modal === "weights" ? "compact" : modal === "strategy" || modal === "import" ? "wide" : "default"}
           footer={modal !== "strategy" ? <div className="gx-dialog-actions">
             <Button variant="secondary" disabled={busy} onClick={() => closeModal()}>{modal === "settings" || modal === "tags" ? "完成" : "取消"}</Button>
             {modal === "import" && <Button variant="primary" disabled={busy || readingImport || !importText.trim()} onClick={importChannels}>{busy ? "导入中…" : readingImport ? "正在读取…" : "导入渠道"}</Button>}
@@ -977,7 +978,7 @@ export default function ChannelManager({
           {modal === "settings" && (
             <>
               <p className="cx-hint">
-                显示偏好仅保存在当前浏览器，不影响网关调度。
+                显示偏好仅保存在当前浏览器。
               </p>
               <label className="cx-field">
                 <span>默认每页行数</span>
@@ -1013,9 +1014,7 @@ export default function ChannelManager({
           {modal === "import" && (
             <>
               <p className="cx-hint">
-                导入 JSON 数组，或包含 channels 数组的对象。支持
-                config、tags、models 与
-                apiKeys。上游原始密钥只提交到后端，导入后清空输入。
+                粘贴 JSON 数组或选择文件（最大 1 MB），也支持包含 channels 数组的对象。
               </p>
               <label className="cx-field">
                 <span>读取 JSON 文件</span>
@@ -1041,25 +1040,24 @@ export default function ChannelManager({
               <label className="cx-field">
                 <span>渠道 JSON</span>
                 <TextArea
-                  rows={14}
+                  rows={8}
                   disabled={busy}
                   className="cx-code"
                   value={importText}
                   spellCheck={false}
                   onChange={(e) => { ++importReadRevision.current; setReadingImport(false); setImportText(e.target.value); }}
                   placeholder={
-                    '[{"name":"OpenAI 主渠道","provider":"OpenAI","endpoint":"https://api.openai.com/v1","models":["gpt-4.1"],"tags":["production"],"weight":1,"apiKeys":[{"label":"主密钥","secret":"sk-…"}]}]'
+                    '[{"name":"主渠道","endpoint":"https://api.example.com/v1","models":["model-name"],"apiKeys":["sk-…"]}]'
                   }
                 />
               </label>
+              <small className="cx-help">可包含 config、tags 和模型配置。密钥提交后会清空输入。</small>
             </>
           )}
           {modal === "weights" && (
             <>
               <p className="cx-hint">
-                将所选 {selected.length}{" "}
-                个渠道设为同一权重。加权策略使用此值分配流量，0
-                作为最低权重处理。
+                为所选 {selected.length} 个渠道设置相同权重，0 按最低权重处理。
               </p>
               <label className="cx-field">
                 <span>权重</span>
@@ -1076,8 +1074,7 @@ export default function ChannelManager({
           {modal === "assign" && (
             <>
               <p className="cx-hint">
-                标签用于 API Key
-                的渠道权限。此操作将影响匹配这些标签的请求范围。
+                调整所选 {selected.length} 个渠道的标签，会影响 API Key 的匹配范围。
               </p>
               {assignMode === "replace" && <p className="gx-assignment-warning" role="status">将覆盖所选渠道的全部标签。未选择标签时，会清空这些渠道的标签。</p>}
               <label className="cx-field">
@@ -1116,10 +1113,10 @@ export default function ChannelManager({
           {modal === "tags" && (
             <>
               <p className="cx-hint">
-                重命名会同步更新渠道和 API Key 策略。被 API Key
-                引用的标签不能删除。
+                重命名会同步更新引用；API Key 使用中的标签不能删除。
               </p>
               <form
+                className="gx-tag-form"
                 onSubmit={(e) => {
                   e.preventDefault();
                   void editTag();
@@ -1240,7 +1237,7 @@ export default function ChannelManager({
             ))}
         </ChannelDialog>
       )}
-      {discardModal && <ChannelDialog title="放弃未保存的内容？" subtitle="当前修改尚未保存，关闭后需要重新填写。" onClose={() => setDiscardModal(false)} className="gx-discard-dialog" footer={<div className="gx-dialog-actions"><Button variant="secondary" onClick={() => setDiscardModal(false)}>继续编辑</Button><Button variant="danger" onClick={() => closeModal(true)}>放弃并关闭</Button></div>}><p className="cx-hint">确认后仅关闭当前编辑窗口。</p></ChannelDialog>}
+      {discardModal && <ChannelDialog title="放弃未保存的内容？" size="compact" onClose={() => setDiscardModal(false)} className="gx-discard-dialog" footer={<div className="gx-dialog-actions"><Button variant="secondary" onClick={() => setDiscardModal(false)}>继续编辑</Button><Button variant="danger" onClick={() => closeModal(true)}>放弃并关闭</Button></div>}><p className="cx-hint">当前修改尚未保存，放弃后需重新填写。</p></ChannelDialog>}
     </div>
   );
 }

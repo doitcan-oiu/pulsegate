@@ -10,18 +10,22 @@
   .cpp-two-columns {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
+    gap: 16px;
     min-width: 0;
+  }
+  .cpp-two-columns > .cp-section + .cp-section {
+    padding-top: 0;
+    border-top: 0;
   }
   .cpp-choice {
     width: 100%;
     display: flex;
     align-items: flex-start;
     justify-content: flex-start;
-    gap: 12px;
+    gap: 10px;
     height: auto;
-    min-height: 95px;
-    padding: 17px;
+    min-height: 68px;
+    padding: 12px;
     white-space: normal;
     text-align: left;
   }
@@ -32,7 +36,7 @@
   .cpp-choice > span {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 3px;
     min-width: 0;
     flex: 1;
   }
@@ -42,7 +46,7 @@
   }
   .cpp-choice small {
     font-size: 13px;
-    line-height: 1.65;
+    line-height: 1.55;
   }
   .cpp-choice .cpp-choice-check {
     margin-left: auto;
@@ -50,21 +54,20 @@
   .cpp-field {
     display: flex;
     flex-direction: column;
-    gap: 9px;
-    margin-top: 20px;
+    gap: 7px;
     font-size: 14px;
   }
   .cpp-field small,
   .cpp-helper {
+    margin: 0;
     font-size: 13px;
-    line-height: 1.7;
+    line-height: 1.65;
     color: var(--muted);
   }
   .cpp-address {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    margin-top: 18px;
+    gap: 6px;
     font-size: 13px;
   }
   .cpp-address > span {
@@ -76,10 +79,9 @@
   .cpp-notice {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
-    margin-top: 16px;
+    gap: 8px;
     font-size: 13px;
-    line-height: 1.7;
+    line-height: 1.65;
     color: var(--muted);
   }
   .cpp-notice > svg {
@@ -89,106 +91,70 @@
   .cpp-notice p {
     margin: 0;
   }
-  .cpp-route {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
-    gap: 12px;
-    align-items: center;
-  }
-  .cpp-route-node {
-    padding: 18px;
-    gap: 8px;
-    align-items: center;
-    text-align: center;
-    box-shadow: none;
-  }
-  .cpp-route-node strong {
-    font-size: 14px;
-  }
-  .cpp-route-node small {
+  .cpp-details > summary {
+    width: fit-content;
+    color: var(--muted);
     font-size: 13px;
-    color: var(--muted);
+    cursor: pointer;
   }
-  .cpp-route-arrow {
-    color: var(--muted);
-    justify-self: center;
+  .cpp-details > summary:hover {
+    color: var(--foreground);
+  }
+  .cpp-details > .cpp-helper {
+    margin-top: 8px;
   }
   .cpp-preview {
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    padding: 16px 0 0;
+    padding-top: 10px;
     font-size: 13px;
   }
   .cpp-preview code {
     overflow-wrap: anywhere;
-    line-height: 1.8;
+    line-height: 1.7;
   }
   .cpp-preview .chip {
     flex-shrink: 0;
   }
   .cpp-presets {
     display: flex;
-    gap: 7px;
+    gap: 6px;
     flex-wrap: wrap;
-    margin-top: 12px;
   }
   .cpp-presets > button {
     flex: 1;
-    min-width: 54px;
+    min-width: 48px;
   }
-  .cpp-limit-summary,
-  .cpp-protocol-summary {
+  .cpp-limit-note {
     display: flex;
-    flex-direction: row;
-    align-items: flex-start;
-    gap: 14px;
-    padding: 18px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
   }
-  .cpp-limit-summary > svg,
-  .cpp-protocol-summary > svg {
-    flex-shrink: 0;
-    margin-top: 2px;
-  }
-  .cpp-limit-summary > div,
-  .cpp-protocol-summary > div {
-    flex: 1;
-    min-width: 0;
-  }
-  .cpp-limit-summary strong,
-  .cpp-protocol-summary strong {
-    font-size: 14px;
-  }
-  .cpp-limit-summary p,
-  .cpp-protocol-summary p {
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.7;
-    margin: 7px 0 0;
-  }
-  .cpp-limit-summary > button,
-  .cpp-protocol-summary > .chip {
+  .cpp-limit-note > button {
     flex-shrink: 0;
   }
   .cpp-endpoint-list {
-    display: flex;
-    flex-direction: column;
-    gap: 21px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+  .cpp-endpoint-list > .cpp-endpoint:only-child {
+    grid-column: 1 / -1;
   }
   .cpp-endpoint {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     min-width: 0;
-  }
-  .cpp-endpoint + .cpp-endpoint {
-    padding-top: 21px;
-    border-top: 1px solid var(--border);
   }
   .cpp-endpoint-title {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: wrap;
   }
   .cpp-endpoint-title > strong {
@@ -198,45 +164,33 @@
   .cpp-endpoint-title > button {
     margin-left: auto;
   }
-  .cpp-endpoint > small {
+  .cpp-endpoint-preview code {
+    display: block;
+    margin-top: 8px;
     font-size: 13px;
     line-height: 1.7;
-    color: var(--muted);
-  }
-  .cpp-endpoint-preview {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    padding: 12px;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-lg);
-  }
-  .cpp-endpoint-preview > span {
-    font-size: 13px;
-    color: var(--muted);
-  }
-  .cpp-endpoint-preview code {
-    font-size: 13px;
-    line-height: 1.8;
     overflow-wrap: anywhere;
+  }
+  .cpp-policy-fields {
+    margin-top: 4px;
   }
   .cpp-status-grid {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 8px;
+    gap: 7px;
   }
   .cpp-status-choice {
     width: 100%;
     height: auto;
-    min-height: 74px;
-    flex-direction: column;
-    gap: 5px;
-    padding: 12px 6px;
+    min-height: 42px;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 7px;
+    padding: 9px;
     white-space: normal;
-    position: relative;
   }
   .cpp-status-choice strong {
-    font-size: 16px;
+    font-size: 14px;
     font-variant-numeric: tabular-nums;
   }
   .cpp-status-choice span {
@@ -244,27 +198,23 @@
     line-height: 1.5;
   }
   .cpp-status-choice > svg {
-    position: absolute;
-    top: 7px;
-    right: 7px;
+    flex-shrink: 0;
+    margin-left: auto;
   }
   .cpp-custom-statuses {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
     align-items: center;
-    margin-top: 14px;
   }
   .cpp-custom-statuses > small {
     color: var(--muted);
     font-size: 13px;
-    width: 100%;
   }
   .cpp-add-status {
     display: flex;
     gap: 10px;
     align-items: center;
-    margin-top: 16px;
   }
   .cpp-add-status > .input {
     flex: 1;
@@ -276,77 +226,41 @@
   .cpp-error {
     font-size: 13px;
     color: var(--danger);
-    margin: 8px 0 0;
+    margin: 0;
   }
-  .cpp-policy-flow {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
-    margin-top: 19px;
-  }
-  .cpp-policy-step {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 9px;
-    padding: 15px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    min-width: 0;
-  }
-  .cpp-step-number {
-    position: absolute;
-    right: 11px;
-    top: 11px;
-    color: var(--muted);
-    font-size: 13px;
-  }
-  .cpp-policy-step > strong {
-    font-size: 13px;
-    line-height: 1.6;
-  }
-  .cpp-policy-step > small {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.7;
+  .cpp-recovery {
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
   }
   @media (max-width: 700px) {
-    .cpp-two-columns {
+    .cpp-endpoint-list {
       grid-template-columns: 1fr;
     }
-    .cpp-choice {
-      min-height: 82px;
+    .cpp-endpoint + .cpp-endpoint {
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
     }
     .cpp-status-grid {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
-    .cpp-policy-flow {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  @media (max-width: 560px) {
+    .cpp-two-columns {
+      grid-template-columns: 1fr;
     }
-    .cpp-limit-summary {
+    .cpp-two-columns > .cp-section + .cp-section {
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    .cpp-limit-note {
+      align-items: flex-start;
       flex-wrap: wrap;
-    }
-    .cpp-limit-summary > button {
-      margin-left: 34px;
+      gap: 8px;
     }
   }
   @media (max-width: 440px) {
-    .cpp-route {
-      gap: 5px;
-      grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
-    }
-    .cpp-route-node {
-      padding: 14px 9px;
-    }
     .cpp-status-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .cpp-protocol-summary {
-      flex-wrap: wrap;
-    }
-    .cpp-protocol-summary > .chip {
-      margin-left: 34px;
     }
   }
 }

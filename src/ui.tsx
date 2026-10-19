@@ -261,6 +261,7 @@ export function Dialog({
   children,
   close,
   wide = false,
+  size,
   footer,
   className,
 }: {
@@ -269,9 +270,11 @@ export function Dialog({
   children: ReactNode;
   close: () => void;
   wide?: boolean;
+  size?: "compact" | "default" | "wide";
   footer?: ReactNode;
   className?: string;
 }) {
+  const dialogSize = size ?? (wide ? "wide" : "default");
   return (
     <HeroModal.Backdrop
       isOpen
@@ -280,15 +283,15 @@ export function Dialog({
       }}
     >
       <HeroModal.Container
-        size={wide ? "lg" : "md"}
+        size={dialogSize === "wide" ? "lg" : dialogSize === "compact" ? "sm" : "md"}
+        className="pg-dialog-container"
         placement="center"
         scroll="inside"
       >
         <HeroModal.Dialog
           aria-label={title}
           className={
-            [wide ? "dialog-wide" : "", className].filter(Boolean).join(" ") ||
-            undefined
+            ["pg-dialog", `dialog-${dialogSize}`, className].filter(Boolean).join(" ")
           }
         >
           <HeroModal.CloseTrigger aria-label="关闭弹窗" />

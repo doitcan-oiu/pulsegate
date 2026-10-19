@@ -53,6 +53,7 @@ export function ChannelDialog({
   wide = false,
   footer,
   className,
+  size,
 }: {
   title: string;
   subtitle?: string;
@@ -61,6 +62,7 @@ export function ChannelDialog({
   wide?: boolean;
   footer?: ReactNode;
   className?: string;
+  size?: "compact" | "default" | "wide";
 }) {
   return (
     <Dialog
@@ -70,6 +72,7 @@ export function ChannelDialog({
       wide={wide}
       footer={footer}
       className={className}
+      size={size}
     >
       {children}
     </Dialog>
@@ -228,6 +231,8 @@ export default function ChannelActions({
   onPlayground?: (channelId?: string) => void;
 }) {
   const configFormId = useId();
+  const credentialsFormId = useId();
+  const deleteFormId = useId();
   const [panel, setPanel] = useState<Panel>(null);
   const [busy, setBusy] = useState(false);
   const operationPending = useRef(false);
@@ -496,12 +501,11 @@ export default function ChannelActions({
         <Dialog
           title="删除上游密钥"
           subtitle={channel.name}
+          size="compact"
           close={() => !busy && setPendingCredential(null)}
           className="cp-dialog"
           footer={
-            <div className="cp-dialog-footer">
-              <span>删除后无法恢复密钥原文</span>
-              <div>
+            <div className="cp-discard-actions">
                 <Button
                   variant="secondary"
                   disabled={busy}
@@ -527,25 +531,16 @@ export default function ChannelActions({
                 >
                   {busy ? "删除中…" : "删除密钥"}
                 </Button>
-              </div>
             </div>
           }
         >
-          <PanelSection
-            title="确认删除此密钥"
-            description="该密钥将从渠道中移除，后续请求使用其他可用密钥。"
-            icon={KeyRound}
-          >
-            <div className="cp-confirm-detail">
-              <Chip color="danger" size="sm">
-                永久删除
-              </Chip>
+            <div className="cx-credential-confirm">
               <div>
                 <strong>{pendingCredential.label}</strong>
                 <code>{pendingCredential.preview}</code>
               </div>
+              <p>此密钥将被永久删除，后续请求使用其他可用密钥。</p>
             </div>
-          </PanelSection>
         </Dialog>
       )}
       {panel && (
@@ -553,7 +548,7 @@ export default function ChannelActions({
           title={titles[panel]}
           subtitle={`${channel.name} · ${channel.provider}`}
           onClose={close}
-          wide={panel !== "delete"}
+          wide={!["delete", "test", "relay", "rateLimit", "autoDisable"].includes(panel)}
           className="cp-dialog"
           footer={
             hasConfig ? (
@@ -572,6 +567,28 @@ export default function ChannelActions({
                     {busy ? "保存中…" : "保存配置"}
                   </Button>
                 </div>
+              </div>
+            ) : panel === "delete" ? (
+              <div className="cp-discard-actions">
+                <Button variant="secondary" disabled={busy} onClick={() => close()}>取消</Button>
+                <Button variant="danger" type="submit" form={deleteFormId} disabled={busy || deleteConfirm !== channel.name}>
+                  {busy ? "删除中…" : "删除渠道"}
+                </Button>
+              </div>
+            ) : panel === "test" ? (
+              <div className="cp-discard-actions">
+                {onPlayground && <Button variant="secondary" disabled={busy} onClick={() => { close(); onPlayground(channel.id); }}>打开测试场</Button>}
+                <Button variant="primary" disabled={busy || !testModel} onClick={() => runTest()}><Play size={15} />{busy ? "测试中…" : "发送测试请求"}</Button>
+              </div>
+            ) : panel === "credentials" ? (
+              <div className="cp-discard-actions">
+                <Button variant="secondary" disabled={busy} onClick={() => {
+                  if (rotating) { setRotating(null); setSecret(""); setLabel(""); }
+                  else close();
+                }}>{rotating ? "取消轮换" : "关闭"}</Button>
+                <Button variant="primary" type="submit" form={credentialsFormId} disabled={busy || !label.trim() || !secret.trim()}>
+                  {busy ? "保存中…" : rotating ? "确认轮换" : "添加密钥"}
+                </Button>
               </div>
             ) : undefined
           }
@@ -658,6 +675,7 @@ export default function ChannelActions({
           )}
           {panel === "credentials" && (
             <ChannelCredentialsPanel
+              formId={credentialsFormId}
               credentials={credentials}
               busy={busy}
               label={label}
@@ -679,11 +697,6 @@ export default function ChannelActions({
                 }, "密钥状态已更新").catch(() => undefined);
               }}
               onDelete={setPendingCredential}
-              onCancelRotate={() => {
-                setRotating(null);
-                setSecret("");
-                setLabel("");
-              }}
               onSubmit={() => {
                 if (!label.trim() || !secret.trim()) {
                   toast.error("请填写密钥名称和上游 API Key");
@@ -722,25 +735,16 @@ export default function ChannelActions({
               onStreamChange={setTestStream}
               busy={busy}
               result={result}
-              onTest={() => runTest()}
-              onPlayground={
-                onPlayground
-                  ? () => {
-                      close();
-                      onPlayground(channel.id);
-                    }
-                  : undefined
-              }
             />
           )}
           {panel === "history" && <TestHistory result={result} busy={busy} />}
           {panel === "delete" && (
             <ChannelDeletePanel
+              formId={deleteFormId}
               channel={channel}
               confirmation={deleteConfirm}
               onConfirmationChange={setDeleteConfirm}
               busy={busy}
-              onClose={close}
               onDelete={() => {
                 if (deleteConfirm !== channel.name) return;
                 void operation(
@@ -754,7 +758,7 @@ export default function ChannelActions({
           )}
         </ChannelDialog>
       )}
-      {discardOpen && <Dialog title="放弃未保存的配置？" subtitle={`${channel.name} · ${panel ? titles[panel] : "渠道配置"}`} close={dismissDiscard} className="cp-dialog" footer={<div className="cp-discard-actions"><Button variant="secondary" onClick={dismissDiscard}>继续编辑</Button><Button variant="danger" onClick={confirmDiscard}>{discardContinuation.current ? "放弃并切换" : "放弃并关闭"}</Button></div>}><p className="cx-hint">当前配置和凭据草稿尚未保存，关闭后需要重新填写。</p></Dialog>}
+      {discardOpen && <Dialog title="放弃未保存的更改？" size="compact" close={dismissDiscard} className="cp-dialog" footer={<div className="cp-discard-actions"><Button variant="secondary" onClick={dismissDiscard}>继续编辑</Button><Button variant="danger" onClick={confirmDiscard}>{discardContinuation.current ? "放弃并切换" : "放弃并关闭"}</Button></div>}><p className="cx-hint">本次更改将丢失。</p></Dialog>}
     </div>
   );
 }

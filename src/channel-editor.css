@@ -1,45 +1,16 @@
 @layer theme, base, components, utilities, app-layout;
 
 @layer app-layout {
-  .ce-dialog.dialog-wide {
-    width: min(1080px, calc(100vw - 40px));
-    max-width: min(1080px, calc(100vw - 40px));
-    max-height: calc(100dvh - 32px);
-    overflow: hidden;
-  }
-  .ce-dialog .modal__header {
-    padding-bottom: 18px;
-  }
-  .ce-dialog .modal__heading {
-    font-size: 20px;
-    font-weight: 600;
-    line-height: 1.5;
-  }
-  .ce-dialog .dialog-description {
-    color: var(--muted);
-    font-size: 14px;
-    line-height: 1.6;
-    margin-top: 5px;
-  }
   .ce-dialog .modal__body {
     overflow: hidden;
-    padding-top: 0;
-    padding-bottom: 0;
     min-height: 0;
-  }
-  .ce-dialog .modal__footer {
-    border-top: 1px solid var(--border);
-    margin-top: 0;
-    flex-shrink: 0;
-    background: var(--surface);
-    padding-block: var(--console-space-4, 16px);
   }
   .ce-layout {
     display: grid;
-    grid-template-columns: 184px minmax(0, 1fr);
-    gap: var(--console-space-6, 24px);
+    grid-template-columns: 148px minmax(0, 1fr);
+    gap: 20px;
     min-width: 0;
-    height: min(70dvh, 680px);
+    height: min(64dvh, 600px);
     max-height: calc(100dvh - 230px);
   }
   .ce-services {
@@ -68,14 +39,14 @@
   .ce-service {
     width: 100%;
     height: auto;
-    min-height: 59px;
+    min-height: 44px;
     padding: 10px 12px;
     justify-content: flex-start;
     gap: 10px;
     white-space: normal;
     flex-shrink: 0;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: 6px;
     background: transparent;
     color: var(--foreground);
     box-shadow: none;
@@ -126,33 +97,10 @@
     font-weight: 500;
     line-height: 20px;
   }
-  .ce-service-copy small {
-    display: none;
-    font-size: 13px;
-    line-height: 18px;
+  .ce-service-hint {
+    font-size: 12px;
     color: var(--muted);
-  }
-  .ce-dialog .ce-service-note {
-    padding: 16px 0 0;
-    gap: 8px;
-    margin-top: 4px;
-    border: 0;
-    border-top: 1px solid var(--border);
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-  }
-  .ce-service-note > svg {
-    color: var(--muted);
-  }
-  .ce-service-note strong {
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .ce-service-note p {
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.8;
+    line-height: 1.6;
   }
   .ce-config {
     min-width: 0;
@@ -165,7 +113,7 @@
     flex-direction: column;
     gap: 12px;
     min-width: 0;
-    padding: var(--console-space-5, 20px) 0;
+    padding: 16px 0;
     border-top: 1px solid var(--border);
   }
   .ce-section:first-child {
@@ -196,31 +144,6 @@
     font-weight: 600;
     line-height: 1.5;
   }
-  .ce-section-title p {
-    margin-top: 3px;
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.7;
-  }
-  .ce-format {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 20px;
-    text-align: right;
-    max-width: 230px;
-  }
-  .ce-format strong {
-    color: var(--foreground);
-    font-size: 14px;
-    font-weight: 500;
-  }
-  .ce-format small {
-    font-size: 12px;
-    line-height: 1.5;
-  }
   .ce-section-heading > .switch {
     flex-shrink: 0;
     margin-top: 2px;
@@ -240,9 +163,6 @@
     font-weight: 400;
   }
   .ce-account {
-    padding: 14px;
-    border-radius: 10px;
-    background: var(--surface-secondary);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -530,9 +450,7 @@
     display: flex;
     align-items: center;
     gap: 9px;
-    padding: 17px;
-    border: 1px dashed var(--border);
-    border-radius: 10px;
+    padding: 8px 0;
     color: var(--muted);
     font-size: 13px;
     line-height: 1.7;
@@ -565,7 +483,7 @@
     flex-wrap: wrap;
   }
   .ce-enable {
-    padding: 15px;
+    padding: 0;
     display: flex;
     flex-direction: row;
     justify-content: space-between;
@@ -573,27 +491,22 @@
     gap: 15px;
   }
   .ce-advanced-heading {
-    padding: 20px 0 12px;
+    padding: 12px 0 4px;
   }
   .ce-advanced-heading h3 {
     font-size: 14px;
     font-weight: 600;
   }
-  .ce-advanced-heading p {
-    color: var(--muted);
-    font-size: 13px;
-    margin-top: 3px;
-  }
   .ce-advanced {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 0 14px;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
   }
   .ce-advanced-trigger {
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 49px;
+    min-height: 44px;
     padding: 12px 0;
   }
   .ce-advanced-trigger > svg {
@@ -650,8 +563,7 @@
     flex-shrink: 0;
   }
   .ce-discard-actions { display: flex; justify-content: flex-end; gap: 8px; width: 100%; flex-wrap: wrap; }
-  .ce-discard-dialog .modal__footer { border-top: 1px solid var(--border); }
-  .ce-discard-description { color: var(--muted); font-size: 14px; line-height: 1.8; }
+  .ce-discard-description { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
   .ce-spinning {
     animation: ce-spin 1s linear infinite;
   }
@@ -662,7 +574,7 @@
   }
   @media (max-width: 900px) {
     .ce-layout {
-      grid-template-columns: 162px minmax(0, 1fr);
+      grid-template-columns: 148px minmax(0, 1fr);
       gap: 20px;
     }
     .ce-service {
@@ -671,11 +583,6 @@
     }
   }
   @media (max-width: 680px) {
-    .ce-dialog.dialog-wide {
-      width: calc(100vw - 24px);
-      max-width: calc(100vw - 24px);
-      max-height: calc(100dvh - 24px);
-    }
     .ce-dialog .modal__body {
       overflow-y: auto;
     }
@@ -709,9 +616,8 @@
     .ce-service-copy strong {
       font-size: 13px;
     }
-    .ce-service-copy small,
     .ce-service-radio,
-    .ce-services > .ce-service-note {
+    .ce-service-hint {
       display: none;
     }
     .ce-config {
@@ -737,11 +643,6 @@
     .ce-section-heading {
       flex-wrap: wrap;
       gap: 10px;
-    }
-    .ce-format {
-      text-align: left;
-      max-width: none;
-      margin-left: 26px;
     }
     .ce-model-actions {
       justify-content: space-between;

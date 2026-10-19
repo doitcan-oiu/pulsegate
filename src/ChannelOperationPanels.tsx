@@ -1,28 +1,18 @@
 import { useEffect, useState } from "react";
-import { Card, Chip, Spinner, Table } from "@heroui/react";
+import { Chip, Spinner, Table } from "@heroui/react";
 import {
   Activity,
-  ArrowRight,
   Check,
-  CheckCheck,
   CircleAlert,
-  Clock3,
   Eye,
   EyeOff,
   FileClock,
   History,
   KeyRound,
-  Layers,
-  LockKeyhole,
-  MessageSquare,
-  Play,
   RefreshCw,
-  ShieldCheck,
   Trash2,
-  Waves,
   X,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import type {
   AttemptRecord,
   CredentialMeta,
@@ -88,29 +78,6 @@ function errorText(value: unknown) {
     .replace(/\s+/g, " ")
     .slice(0, 300);
 }
-function Metric({
-  label,
-  value,
-  hint,
-  icon: Icon,
-}: {
-  label: string;
-  value: string | number;
-  hint?: string;
-  icon: LucideIcon;
-}) {
-  return (
-    <Card className="cop-metric">
-      <span>
-        <Icon size={15} />
-        {label}
-      </span>
-      <strong>{value}</strong>
-      {hint && <small>{hint}</small>}
-    </Card>
-  );
-}
-
 export function TestResult({ result }: { result: unknown }) {
   if (!result || typeof result !== "object")
     return (
@@ -161,26 +128,11 @@ export function TestResult({ result }: { result: unknown }) {
           <Chip.Label>{outcome}</Chip.Label>
         </Chip>
       </div>
-      <div className="cop-metrics">
-        <Metric
-          icon={ShieldCheck}
-          label="HTTP 状态"
-          value={httpStatus(data.status)}
-          hint="上游响应状态"
-        />
-        <Metric
-          icon={Waves}
-          label="有效首字延迟"
-          value={seconds(ttft, nonStream ? "不适用" : "未检测到")}
-          hint={nonStream ? "非流式请求查看完成耗时" : "从请求开始到有效内容"}
-        />
-        <Metric
-          icon={Clock3}
-          label="请求完成耗时"
-          value={seconds(data.duration)}
-          hint="包含本次请求的全部尝试"
-        />
-      </div>
+      <dl className="cop-result-metrics">
+        <div><dt>HTTP 状态</dt><dd>{httpStatus(data.status)}</dd></div>
+        <div><dt>有效首字</dt><dd>{seconds(ttft, nonStream ? "不适用" : "未检测到")}</dd></div>
+        <div><dt>完成耗时</dt><dd>{seconds(data.duration)}</dd></div>
+      </dl>
       {error && (
         <div className="cop-error-note">
           <CircleAlert size={16} />
@@ -188,12 +140,8 @@ export function TestResult({ result }: { result: unknown }) {
         </div>
       )}
       {!!attempts.length && (
-        <div className="cop-attempts">
-          <div className="cop-title-inline">
-            <Layers size={15} />
-            <h4>请求轨迹</h4>
-            <Chip size="sm">{attempts.length} 次尝试</Chip>
-          </div>
+        <details className="cop-attempts">
+          <summary>请求轨迹 · {attempts.length} 次尝试</summary>
           <ol>
             {attempts.map((attempt, index) => (
               <li key={attempt.id || index}>
@@ -230,7 +178,7 @@ export function TestResult({ result }: { result: unknown }) {
               </li>
             ))}
           </ol>
-        </div>
+        </details>
       )}
       {data.requestId && (
         <p className="cop-request-id">
@@ -249,8 +197,6 @@ export function ChannelTestPanel({
   onStreamChange,
   busy,
   result,
-  onTest,
-  onPlayground,
 }: {
   channel: GatewayChannel;
   model: string;
@@ -259,25 +205,10 @@ export function ChannelTestPanel({
   onStreamChange: (stream: boolean) => void;
   busy: boolean;
   result: unknown;
-  onTest: () => void;
-  onPlayground?: () => void;
 }) {
   return (
     <div className="cop-panel">
-      <PanelSection
-        title="测试请求"
-        description="使用这个渠道的真实配置发送请求，记录响应状态、有效首字与完成耗时。"
-        icon={Play}
-      >
-        <div className="cop-channel-summary">
-          <div>
-            <strong>{channel.name}</strong>
-            <small>
-              {channel.provider} · {channel.models.length} 个模型
-            </small>
-          </div>
-          <Chip size="sm">渠道直测</Chip>
-        </div>
+      <div className="cop-test-fields">
         <label className="cop-field">
           <span>测试模型</span>
           <Select
@@ -293,59 +224,20 @@ export function ChannelTestPanel({
             ))}
           </Select>
         </label>
-        <div className="cop-mode-grid" role="group" aria-label="测试响应模式">
-          <Button
-            className="cop-mode"
-            variant={stream ? "primary" : "secondary"}
-            aria-pressed={stream}
+        <label className="cop-field">
+          <span>响应模式</span>
+          <Select
+            aria-label="测试响应模式"
+            value={stream ? "stream" : "complete"}
             disabled={busy}
-            onClick={() => onStreamChange(true)}
+            onChange={(event) => onStreamChange(event.target.value === "stream")}
           >
-            <Waves size={20} />
-            <span>
-              <strong>SSE 流式</strong>
-              <small>检测有效首字与完整输出</small>
-            </span>
-            {stream && <Check size={15} />}
-          </Button>
-          <Button
-            className="cop-mode"
-            variant={!stream ? "primary" : "secondary"}
-            aria-pressed={!stream}
-            disabled={busy}
-            onClick={() => onStreamChange(false)}
-          >
-            <MessageSquare size={20} />
-            <span>
-              <strong>非流式</strong>
-              <small>检测整段响应与完成耗时</small>
-            </span>
-            {!stream && <Check size={15} />}
-          </Button>
-        </div>
-      </PanelSection>
-      <PanelSection
-        title="检测流程"
-        description="渠道直测会在当前渠道内重试，不跨渠道回退。"
-        icon={Activity}
-      >
-        <div className="cop-process">
-          <span>
-            <LockKeyhole size={16} />
-            协议与密钥
-          </span>
-          <ArrowRight size={15} />
-          <span>
-            <Waves size={16} />
-            {stream ? "首字检测" : "响应检测"}
-          </span>
-          <ArrowRight size={15} />
-          <span>
-            <FileClock size={16} />
-            记录日志
-          </span>
-        </div>
-      </PanelSection>
+            <option value="stream">SSE 流式</option>
+            <option value="complete">非流式</option>
+          </Select>
+        </label>
+      </div>
+      <p className="cop-help">使用当前渠道配置测试并记录日志，不跨渠道回退。</p>
       {busy ? (
         <div className="cop-loading" role="status">
           <Spinner size="sm" />
@@ -356,25 +248,7 @@ export function ChannelTestPanel({
         </div>
       ) : result != null ? (
         <TestResult result={result} />
-      ) : (
-        <PanelEmpty
-          icon={Activity}
-          title="等待测试"
-          description="发送请求后，在这里查看检测结果和每次尝试的轨迹。"
-        />
-      )}
-      <footer className="cop-footer">
-        {onPlayground && (
-          <Button variant="secondary" disabled={busy} onClick={onPlayground}>
-            <MessageSquare size={15} />
-            打开测试场
-          </Button>
-        )}
-        <Button variant="primary" disabled={busy || !model} onClick={onTest}>
-          {busy ? <Spinner size="sm" /> : <Play size={15} />}
-          {busy ? "测试中…" : "发送测试请求"}
-        </Button>
-      </footer>
+      ) : null}
     </div>
   );
 }
@@ -422,34 +296,7 @@ export function TestHistory({
     );
   return (
     <div className="cop-panel cop-history">
-      <div className="cop-metrics">
-        <Metric
-          icon={History}
-          label="测试记录"
-          value={data?.total ?? logs.length}
-          hint="来自真实渠道请求日志"
-        />
-        <Metric
-          icon={CheckCheck}
-          label="本页成功率"
-          value={
-            logs.length
-              ? `${Math.round((succeeded / logs.length) * 100)}%`
-              : "—"
-          }
-          hint={
-            logs.length
-              ? `${succeeded} / ${logs.length} 次完成`
-              : "暂无测试记录"
-          }
-        />
-        <Metric
-          icon={Waves}
-          label="本页平均首字"
-          value={seconds(average)}
-          hint={`${measured.length} 个有效流式样本`}
-        />
-      </div>
+      {logs.length > 0 && <p className="cop-help">共 {data?.total ?? logs.length} 条 · 本页成功 {succeeded}/{logs.length} · 平均首字 {seconds(average)}</p>}
       {logs.length ? (
         <Table variant="secondary">
           <Table.ScrollContainer>
@@ -559,14 +406,12 @@ export function TestHistory({
           />
         </PanelSection>
       )}
-      <p className="cop-help">
-        历史记录包含成功、异常和慢响应。首字只统计有效的流式内容。
-      </p>
     </div>
   );
 }
 
 export function ChannelCredentialsPanel({
+  formId,
   credentials,
   busy,
   label,
@@ -577,9 +422,9 @@ export function ChannelCredentialsPanel({
   onRotate,
   onToggle,
   onDelete,
-  onCancelRotate,
   onSubmit,
 }: {
+  formId: string;
   credentials: CredentialMeta[];
   busy: boolean;
   label: string;
@@ -590,7 +435,6 @@ export function ChannelCredentialsPanel({
   onRotate: (key: CredentialMeta) => void;
   onToggle: (key: CredentialMeta) => void;
   onDelete: (key: CredentialMeta) => void;
-  onCancelRotate: () => void;
   onSubmit: () => void;
 }) {
   const [showSecret, setShowSecret] = useState(false);
@@ -601,50 +445,22 @@ export function ChannelCredentialsPanel({
     if (!secret) setShowSecret(false);
   }, [secret]);
   const available = credentials.filter((key) => key.enabled).length;
-  const totalFailures = credentials.reduce(
-    (count, key) => count + key.failureCount,
-    0,
-  );
   const current = credentials.find((key) => key.id === rotating);
   return (
     <div className="cop-panel">
-      <div className="cop-metrics">
-        <Metric
-          icon={KeyRound}
-          label="上游密钥"
-          value={credentials.length}
-          hint="独立管理每一把密钥"
-        />
-        <Metric
-          icon={ShieldCheck}
-          label="当前启用"
-          value={available}
-          hint={`${credentials.length - available} 把已停用`}
-        />
-        <Metric
-          icon={CircleAlert}
-          label="连续失败合计"
-          value={totalFailures}
-          hint="各密钥当前失败计数之和"
-        />
-      </div>
       <PanelSection
-        title="密钥列表"
-        description="密钥加密保存在 D1，只显示掩码，保存后无法读取原文。复制渠道不会复制密钥。"
-        icon={LockKeyhole}
+        title={`密钥列表 · ${available}/${credentials.length} 已启用`}
+        description="保存后仅显示掩码，复制渠道不会复制密钥。"
       >
         <div className="cop-credentials">
           {credentials.length ? (
             credentials.map((key) => (
-              <Card
+              <article
                 className="cop-credential"
                 key={key.id}
                 data-rotating={rotating === key.id || undefined}
               >
                 <div className="cop-credential-heading">
-                  <span className="cop-credential-icon">
-                    <KeyRound size={18} />
-                  </span>
                   <div>
                     <strong>{key.label}</strong>
                     <code>{key.preview}</code>
@@ -700,7 +516,7 @@ export function ChannelCredentialsPanel({
                     删除
                   </Button>
                 </div>
-              </Card>
+              </article>
             ))
           ) : (
             <PanelEmpty
@@ -713,21 +529,10 @@ export function ChannelCredentialsPanel({
       </PanelSection>
       <PanelSection
         title={rotating ? "轮换上游密钥" : "添加上游密钥"}
-        description={
-          rotating
-            ? `替换「${current?.label || label}」的密钥原文，保留同一密钥记录。`
-            : "为密钥设置易识别的名称，方便区分环境或用途。"
-        }
-        icon={rotating ? RefreshCw : KeyRound}
-        action={
-          rotating ? (
-            <Chip color="accent" size="sm">
-              轮换模式
-            </Chip>
-          ) : undefined
-        }
+        description={rotating ? `替换「${current?.label || label}」的密钥，保留原记录。` : undefined}
       >
         <form
+          id={formId}
           onSubmit={(event) => {
             event.preventDefault();
             if (!busy && label.trim() && secret.trim()) onSubmit();
@@ -774,36 +579,6 @@ export function ChannelCredentialsPanel({
               </div>
             </label>
           </div>
-          <p className="cop-help">
-            <LockKeyhole size={13} />
-            显示按钮只用于本次输入的内容；已保存的密钥保持掩码。
-          </p>
-          <footer className="cop-footer">
-            {rotating && (
-              <Button
-                type="button"
-                variant="secondary"
-                disabled={busy}
-                onClick={onCancelRotate}
-              >
-                取消轮换
-              </Button>
-            )}
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={busy || !label.trim() || !secret.trim()}
-            >
-              {busy ? (
-                <Spinner size="sm" />
-              ) : rotating ? (
-                <RefreshCw size={15} />
-              ) : (
-                <KeyRound size={15} />
-              )}
-              {busy ? "保存中…" : rotating ? "确认轮换" : "添加密钥"}
-            </Button>
-          </footer>
         </form>
       </PanelSection>
     </div>
@@ -811,75 +586,31 @@ export function ChannelCredentialsPanel({
 }
 
 export function ChannelDeletePanel({
+  formId,
   channel,
   confirmation,
   onConfirmationChange,
   busy,
   onDelete,
-  onClose,
 }: {
+  formId: string;
   channel: GatewayChannel;
   confirmation: string;
   onConfirmationChange: (value: string) => void;
   busy: boolean;
   onDelete: () => void;
-  onClose: () => void;
 }) {
   const matches = confirmation === channel.name;
   return (
-    <div className="cop-panel">
-      <Card className="cop-delete-summary">
-        <div className="cop-title-inline">
-          <Trash2 size={21} />
-          <div>
-            <h3>永久删除这个渠道</h3>
-            <p>此操作无法撤销，请确认影响范围。</p>
-          </div>
-        </div>
-        <strong>{channel.name}</strong>
-        <div className="cop-delete-tags">
-          <Chip size="sm">{channel.provider}</Chip>
-          <Chip size="sm">{channel.models.length} 个模型</Chip>
-          {channel.tags.map((tag) => (
-            <Chip key={tag} size="sm">
-              {tag}
-            </Chip>
-          ))}
-        </div>
-      </Card>
-      <PanelSection title="删除后的影响" icon={CircleAlert}>
-        <ul className="cop-impact">
-          <li>
-            <Trash2 size={17} />
-            <div>
-              <strong>移除渠道配置</strong>
-              <small>该渠道将退出路由候选列表，不能继续接收请求。</small>
-            </div>
-          </li>
-          <li>
-            <KeyRound size={17} />
-            <div>
-              <strong>移除 {channel.credentialCount} 把上游密钥</strong>
-              <small>密钥将随渠道删除，重新创建渠道时需要重新添加。</small>
-            </div>
-          </li>
-          <li>
-            <FileClock size={17} />
-            <div>
-              <strong>保留历史请求日志</strong>
-              <small>已产生的请求记录保留，可用于后续排查和追溯。</small>
-            </div>
-          </li>
-        </ul>
-      </PanelSection>
-      <PanelSection
-        title="确认渠道名称"
-        description="输入下方显示的完整名称，名称必须完全一致。"
-        icon={ShieldCheck}
-      >
-        <code className="cop-confirm-name">{channel.name}</code>
+    <form id={formId} className="cop-delete-form" onSubmit={(event) => {
+      event.preventDefault();
+      if (!busy && matches) onDelete();
+    }}>
+      <p className="cop-delete-impact">
+        渠道配置和 {channel.credentialCount} 把上游密钥将被永久删除，历史请求日志保留。此操作无法撤销。
+      </p>
         <label className="cop-field">
-          <span>渠道名称</span>
+          <span>输入渠道名称以确认删除</span>
           <Input
             aria-label="确认删除的渠道名称"
             aria-invalid={!!confirmation && !matches}
@@ -887,30 +618,20 @@ export function ChannelDeletePanel({
             value={confirmation}
             onChange={(event) => onConfirmationChange(event.target.value)}
             autoComplete="off"
-            placeholder="请输入完整渠道名称"
+            placeholder={channel.name}
           />
         </label>
         <div
           className={`cop-match ${matches ? "cop-match-success" : confirmation ? "cop-match-danger" : ""}`}
           role="status"
         >
-          {matches ? <Check size={15} /> : <CircleAlert size={15} />}
+          {matches ? <Check size={15} /> : confirmation ? <CircleAlert size={15} /> : null}
           {matches
-            ? "名称匹配，可以确认删除"
+            ? "名称已匹配"
             : confirmation
               ? "名称尚未匹配，请检查大小写和空格"
-              : "填写渠道名称后才能删除"}
+              : "名称须完全一致，包括大小写和空格"}
         </div>
-      </PanelSection>
-      <footer className="cop-footer">
-        <Button variant="secondary" disabled={busy} onClick={onClose}>
-          取消
-        </Button>
-        <Button variant="danger" disabled={busy || !matches} onClick={onDelete}>
-          {busy ? <Spinner size="sm" /> : <Trash2 size={15} />}
-          {busy ? "删除中…" : "永久删除渠道"}
-        </Button>
-      </footer>
-    </div>
+    </form>
   );
 }

@@ -111,8 +111,8 @@ function availableChannel(channel: Channel) {
   return channel.enabled && !channel.archived && !channel.health.autoDisabled && channel.status === "healthy"
     && (channel.config.protocol === "mock" || channel.credentialCount !== 0);
 }
-function Modal({ title, subtitle, children, onClose, wide = false, footer }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean; footer?: ReactNode }) {
-  return <Dialog title={title} subtitle={subtitle} close={onClose} wide={wide} footer={footer} className="ak-dialog">{children}</Dialog>;
+function Modal({ title, subtitle, children, onClose, wide = false, size, footer }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean; size?: "compact" | "default" | "wide"; footer?: ReactNode }) {
+  return <Dialog title={title} subtitle={subtitle} close={onClose} wide={wide} size={size} footer={footer} className="ak-dialog">{children}</Dialog>;
 }
 function ScopePreview({
   profile,
@@ -134,17 +134,12 @@ function ScopePreview({
         ? "仅允许选定的渠道"
         : "允许所有现有渠道，以及后续新增渠道";
   return (
-    <Card className="ak-preview">
-      <div className="ak-preview-title">
-        <ShieldCheck size={19} />
-        <h3>权限预览</h3>
-        <span>实时</span>
-      </div>
+    <section className="ak-preview" aria-label="授权渠道与模型">
       <p className="ak-preview-rule">{label}</p>
       <div className="ak-preview-counts">
         <div>
           <strong>{scope.length}</strong>
-          <span>授权范围内渠道</span>
+          <span>授权渠道</span>
         </div>
         <div>
           <strong>{healthy.length}</strong>
@@ -202,9 +197,9 @@ function ScopePreview({
       </div>
       <p className="ak-preview-foot">
         <LockKeyhole size={15} />{" "}
-        自动故障切换只发生在相同授权范围内。停用和降级状态不会改变授权范围。
+        故障切换仅在授权范围内进行。
       </p>
-    </Card>
+    </section>
   );
 }
 
@@ -613,7 +608,6 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
         <Modal
           wide
           title={editor.id ? "编辑 API Key" : "创建 API Key"}
-          subtitle="设置名称与渠道权限，即可开始使用。"
           onClose={() => closeEditor()}
           footer={<div className="ak-editor-footer"><span className={formError ? "ak-form-error" : "ak-footer-hint"} role={formError ? "alert" : undefined}>{formError || (hasEditorChanges ? "有未保存的更改" : "仅当前生效策略参与请求授权")}</span><div><Button variant="secondary" type="button" disabled={busy} onClick={() => closeEditor()}>取消</Button><Button variant="primary" type="submit" form={editorFormId} disabled={busy}>{busy ? "正在保存…" : editor.id ? "保存配置" : "创建 API Key"}</Button></div></div>}
         >
@@ -622,7 +616,6 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
             <div className="ak-editor-layout">
               <div className="ak-editor-fields">
                 <section className="ak-form-section">
-                  <h3>基本信息</h3>
                   <div className="ak-two-columns">
                     <label className="ak-field">
                       <span>名称 <em>*</em></span>
@@ -654,7 +647,7 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                   <label className="ak-field">
                     <span>备注 <small>可选</small></span>
                     <Input
-                      placeholder="说明用途，便于后续管理（可选）"
+                      placeholder="用途说明"
                       maxLength={300}
                       value={editor.draft.note}
                       onChange={(event) =>
@@ -891,7 +884,7 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
                         updateProfile({ requestLimit: event.target.value })
                       }
                     />
-                    <small>累计额度由网关原子检查，达到上限后返回 429。</small>
+                    <small>达到累计上限后，请求返回 429。</small>
                   </label>
                     </Accordion.Body></Accordion.Panel>
                   </Accordion.Item>
@@ -1105,19 +1098,17 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
           </form>
         </Modal>
       )}
-      {editor && discardOpen && <Dialog title="放弃凭证更改？" subtitle="当前修改尚未保存，关闭后需要重新填写。" close={() => { if (!busy) setDiscardOpen(false); }} className="ak-discard-dialog" footer={<div className="ak-discard-actions"><Button variant="secondary" disabled={busy} onClick={() => setDiscardOpen(false)}>继续编辑</Button><Button variant="danger" disabled={busy} onClick={() => closeEditor(true)}>放弃并关闭</Button></div>}><p className="ak-discard-description">凭证信息、授权范围和策略草稿将一并清除。</p></Dialog>}
+      {editor && discardOpen && <Dialog title="放弃凭证更改？" size="compact" close={() => { if (!busy) setDiscardOpen(false); }} className="ak-discard-dialog" footer={<div className="ak-discard-actions"><Button variant="secondary" disabled={busy} onClick={() => setDiscardOpen(false)}>继续编辑</Button><Button variant="danger" disabled={busy} onClick={() => closeEditor(true)}>放弃并关闭</Button></div>}><p className="ak-discard-description">尚未保存的凭证信息和权限设置将丢失。</p></Dialog>}
       {secret && (
         <Modal
           title="请保存 API Key"
           subtitle={secret.name}
           onClose={() => setSecret(null)}
+          footer={<Button variant="primary" type="button" onClick={() => setSecret(null)}>已保存，关闭</Button>}
         >
           <div className="ak-secret-body">
-            <span className="ak-secret-icon">
-              <KeyRound size={27} />
-            </span>
             <p>
-              此密钥可以调用网关，只显示这一次。请保存到应用配置中，关闭后无法再次查看完整值。
+              密钥仅显示一次，请妥善保存。关闭后无法再次查看。
             </p>
             <div className="ak-secret-value">
               <code>{secret.value}</code>
@@ -1131,57 +1122,30 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
               </Button>
             </div>
           </div>
-          <div className="ak-modal-foot">
-            <Button
-              variant="primary" className="ak-button ak-primary"
-              type="button"
-              onClick={() => setSecret(null)}
-            >
-              已保存，关闭
-            </Button>
-          </div>
         </Modal>
       )}
       {revoke && (
-        <Modal title="撤销 API Key" onClose={() => setRevoke(null)}>
+        <Modal title="撤销 API Key？" size="compact" onClose={() => !busy && setRevoke(null)} footer={<><Button variant="secondary" type="button" disabled={busy} onClick={() => setRevoke(null)}>取消</Button><Button variant="danger" type="button" disabled={busy} onClick={confirmRevoke}>{busy ? "正在撤销…" : "确认撤销"}</Button></>}>
           <div className="ak-confirm-body">
             <p>
-              撤销「{revoke.name}
-              」后，该凭证将无法重新启用。你可以创建新的凭证来替代它。
+              「{revoke.name}」将立即失效，且无法重新启用。
             </p>
             <div className="ak-confirm-key">
               <KeyRound size={18} />
               <code>{revoke.preview}</code>
             </div>
           </div>
-          <div className="ak-modal-foot">
-            <Button
-              variant="secondary" className="ak-button"
-              type="button"
-              onClick={() => setRevoke(null)}
-            >
-              取消
-            </Button>
-            <Button
-              variant="danger" className="ak-button ak-danger"
-              type="button"
-              disabled={busy}
-              onClick={confirmRevoke}
-            >
-              确认撤销
-            </Button>
-          </div>
         </Modal>
       )}
-      {rotate && <Modal title="轮换 API Key" onClose={() => !busy && setRotate(null)}>
-        <div className="ak-confirm-body"><p>轮换「{rotate.name}」后，旧密钥立即失效。权限和累计用量保持不变；请将新密钥更新到应用中。</p><div className="ak-confirm-key"><KeyRound size={18} /><code>{rotate.preview}</code></div></div>
-        <div className="ak-modal-foot"><Button variant="secondary" className="ak-button" type="button" disabled={busy} onClick={() => setRotate(null)}>取消</Button><Button variant="primary" className="ak-button ak-primary" type="button" disabled={busy} onClick={confirmRotate}>{busy ? "正在轮换…" : "确认轮换"}</Button></div>
+      {rotate && <Modal title="轮换 API Key？" size="compact" onClose={() => !busy && setRotate(null)} footer={<><Button variant="secondary" type="button" disabled={busy} onClick={() => setRotate(null)}>取消</Button><Button variant="primary" type="button" disabled={busy} onClick={confirmRotate}>{busy ? "正在轮换…" : "确认轮换"}</Button></>}>
+        <div className="ak-confirm-body"><p>「{rotate.name}」的旧密钥将立即失效，请将新密钥更新到应用中。权限和累计用量保留。</p><div className="ak-confirm-key"><KeyRound size={18} /><code>{rotate.preview}</code></div></div>
       </Modal>}
       {preview && (
         <Modal
-          title={`${preview.name} · 权限预览`}
-          subtitle={`当前策略：${currentProfile(preview).name}${preview.status !== "active" ? " · 凭证未启用" : ""}`}
+          title="凭证详情"
+          subtitle={`${preview.name} · ${currentProfile(preview).name}`}
           onClose={() => setPreviewKey(null)}
+          footer={<><Button variant="secondary" type="button" onClick={() => setPreviewKey(null)}>关闭</Button>{preview.status !== "revoked" && <Button variant="primary" type="button" onClick={() => { setPreviewKey(null); startEdit(preview); }}>编辑权限</Button>}</>}
         >
           <div className="ak-standalone-preview">
             <dl className="ak-key-details">
@@ -1198,27 +1162,6 @@ export default function ApiKeys({ channels, keys, tags, onChange }: { channels: 
               profile={currentProfile(preview)}
               channels={channels}
             />
-          </div>
-          <div className="ak-modal-foot">
-            <Button
-              variant="secondary" className="ak-button"
-              type="button"
-              onClick={() => setPreviewKey(null)}
-            >
-              关闭
-            </Button>
-            {preview.status !== "revoked" && (
-              <Button
-                variant="primary" className="ak-button ak-primary"
-                type="button"
-                onClick={() => {
-                  setPreviewKey(null);
-                  startEdit(preview);
-                }}
-              >
-                编辑权限
-              </Button>
-            )}
           </div>
         </Modal>
       )}

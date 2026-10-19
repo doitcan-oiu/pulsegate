@@ -982,7 +982,7 @@ export default function App() {
         />
       )}
       {logDetail && (
-        <Modal title="请求追踪" close={() => setLogDetail(null)} wide>
+        <Modal title="请求追踪" close={() => setLogDetail(null)} wide footer={<Button onClick={() => setLogDetail(null)}>关闭</Button>}>
           <div className="fn-detail">
             <div className="fn-detail-summary">
               <code>{logDetail.log.id}</code>
@@ -1028,15 +1028,14 @@ export default function App() {
         </Modal>
       )}
       {guide && (
-        <Modal title="开始使用 PulseGate" close={() => setGuide(false)}>
+        <Modal title="开始使用 PulseGate" close={() => setGuide(false)} footer={<Button variant="primary" onClick={() => setGuide(false)}>知道了</Button>}>
           <div className="fn-guide">
             <ol>
               <li>
-                在渠道管理添加上游，选择模型获取与渠道测试的接口类型，填写基础 URL、模型 ID 与上游密钥。
+                添加渠道，填写上游地址、模型和密钥。
               </li>
-              <li>创建 API Key，通过标签、指定渠道和模型白名单限制访问。</li>
-              <li>配置首字健康阈值、超时、重试次数和自动恢复。</li>
-              <li>在测试场测试单渠道或 API Key 的完整路由，展开请求追踪。</li>
+              <li>创建 API Key，设置允许访问的渠道与模型。</li>
+              <li>在测试场验证请求，按需调整重试和健康策略。</li>
             </ol>
             <div className="fn-code">
               <code>{location.origin}/v1/chat/completions</code>
@@ -1048,21 +1047,24 @@ export default function App() {
                 <Copy size={16} />
               </Button>
             </div>
-            <p>
-              OpenAI Chat Completions 使用 Authorization: Bearer pg_live_…；
-              Anthropic Messages 使用 /v1/messages 和 x-api-key: pg_live_…。
-              完整 API Key 仅创建或轮换时显示一次。
-            </p>
-            <p>
-              公开调用保持客户端入口路径和请求格式，不按渠道接口类型转换参数；
-              NewAPI / Sub2API 余额监控独立开启。
-            </p>
-            {session.devMode && (
+            <details className="fn-guide-details">
+              <summary>接口与测试说明</summary>
               <p>
-                本地测试渠道可模拟延迟、HTTP
-                错误、空响应、暂时失败与流中断，不会调用真实模型。
+                OpenAI Chat Completions 使用 Authorization: Bearer pg_live_…；
+                Anthropic Messages 使用 /v1/messages 和 x-api-key: pg_live_…。
+                完整 API Key 仅创建或轮换时显示一次。
               </p>
-            )}
+              <p>
+                公开调用保持客户端入口路径和请求格式，不按渠道接口类型转换参数；
+                NewAPI / Sub2API 余额监控独立开启。
+              </p>
+              {session.devMode && (
+                <p>
+                  本地测试渠道可模拟延迟、HTTP
+                  错误、空响应、暂时失败与流中断，不会调用真实模型。
+                </p>
+              )}
+            </details>
           </div>
         </Modal>
       )}

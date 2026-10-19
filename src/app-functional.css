@@ -283,10 +283,10 @@
     color: var(--muted);
   }
   .fn-attempts {
-    margin: 22px 0;
+    margin: 16px 0 0;
     padding-left: 22px;
     display: grid;
-    gap: 20px;
+    gap: 16px;
     list-style: decimal;
   }
   .fn-attempts li {
@@ -307,26 +307,28 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     font-size: 13px;
-    padding: 16px;
+    padding: 12px;
     background: var(--surface-secondary);
     color: var(--danger);
-    border-radius: 12px;
+    border-radius: 4px;
     max-height: 200px;
     overflow: auto;
     margin-top: 10px;
   }
   .fn-guide ol {
     display: grid;
-    gap: 14px;
+    gap: 10px;
     padding-left: 20px;
     list-style: decimal;
-    margin-bottom: 24px;
+    margin-bottom: 18px;
   }
   .fn-guide p {
     color: var(--muted);
     font-size: 14px;
-    margin-top: 20px;
+    margin-top: 12px;
   }
+  .fn-guide-details { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .fn-guide-details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   @media (max-width: 950px) {
     .fn-analytics-grid {
       grid-template-columns: 1fr;

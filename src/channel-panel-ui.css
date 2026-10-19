@@ -3,27 +3,27 @@
   .cp-config-form {
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 20px;
     min-width: 0;
   }
   .cp-dialog.dialog-wide {
-    width: min(880px, calc(100vw - 32px));
+    width: min(860px, calc(100vw - 48px));
   }
   .cp-dialog .modal__body {
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 20px;
   }
   .cp-dialog .modal__header {
-    padding-bottom: 20px;
+    padding-bottom: 16px;
   }
   .cp-dialog .modal__heading {
-    font-size: 20px;
+    font-size: 18px;
   }
   .cp-dialog .dialog-description {
     font-size: 13px;
     color: var(--muted);
-    margin-top: 5px;
+    margin-top: 0;
     overflow-wrap: anywhere;
   }
   .cp-dialog .modal__footer {
@@ -51,11 +51,17 @@
   .cp-discard-actions { display: flex; justify-content: flex-end; gap: 8px; width: 100%; flex-wrap: wrap; }
   .cp-section {
     min-width: 0;
-    padding: var(--console-space-4, 16px);
-    gap: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 0;
+  }
+  .cp-section + .cp-section {
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
   }
   .cp-section-header {
-    flex-direction: row;
+    display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 16px;
@@ -76,16 +82,21 @@
     flex-shrink: 0;
     padding-top: 2px;
   }
-  .cp-section .card__title {
+  .cp-section-title {
+    margin: 0;
+    font-weight: 550;
     font-size: 14px;
     line-height: 1.6;
   }
-  .cp-section .card__description {
+  .cp-section-description {
     font-size: 13px;
-    line-height: 1.7;
-    margin-top: 4px;
+    line-height: 1.6;
+    margin: 4px 0 0;
+    color: var(--muted);
   }
   .cp-section-content {
+    display: flex;
+    flex-direction: column;
     gap: 12px;
     min-width: 0;
   }
@@ -101,17 +112,15 @@
     flex-direction: column;
     text-align: center;
     gap: 9px;
-    padding: 30px 16px;
+    padding: 18px 12px;
   }
   .cp-empty-icon {
     display: grid;
     place-items: center;
-    width: 48px;
-    height: 48px;
-    background: var(--surface-tertiary);
+    width: 32px;
+    height: 32px;
     color: var(--muted);
     border-radius: var(--radius-lg);
-    margin-bottom: 4px;
   }
   .cp-empty > strong {
     font-size: 14px;
@@ -201,9 +210,6 @@
     color: var(--muted);
   }
   @media (max-width: 600px) {
-    .cp-section {
-      padding: 14px;
-    }
     .cp-section-header {
       flex-wrap: wrap;
       gap: 10px;

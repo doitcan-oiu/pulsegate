@@ -130,12 +130,17 @@
   .gx-table .gx-actions-cell { position: sticky; right: 0; z-index: 2; background: var(--surface); border-left: 1px solid var(--border); }
   .gx-table th.gx-actions-cell { background: #f8f9fa; z-index: 3; }
 
-  .modal__dialog { border-radius: 8px; box-shadow: 0 12px 60px #171c2426, 0 0 0 1px #171c2408; border: 1px solid var(--border); }
-  .modal__header { padding: 22px 24px 18px; border-bottom: 1px solid var(--border); gap: 6px; }
+  .pg-dialog-container { width: 100%; padding: 24px; }
+  .modal__dialog.pg-dialog { width: min(560px, calc(100vw - 48px)); max-width: none; max-height: calc(100dvh - 48px); min-height: 0; padding: 0; overflow: hidden; border-radius: 8px; box-shadow: 0 12px 60px #171c2426, 0 0 0 1px #171c2408; border: 1px solid var(--border); }
+  .modal__dialog.pg-dialog.dialog-wide { width: min(860px, calc(100vw - 48px)); max-width: none; }
+  .modal__dialog.pg-dialog.dialog-compact { width: min(440px, calc(100vw - 48px)); }
+  .pg-dialog .modal__header { flex-shrink: 0; padding: 20px 52px 16px 24px; border-bottom: 1px solid var(--border); gap: 4px; }
   .modal__heading { font-size: 18px; line-height: 1.5; font-weight: 550; letter-spacing: -.3px; }
-  .dialog-description { font-size: 12px; line-height: 1.7; margin: 0; max-width: 90%; }
-  .modal__body { padding: 24px; overscroll-behavior: contain; scrollbar-width: thin; }
-  .modal__footer { gap: 8px; padding: 14px 24px; border-top: 1px solid var(--border); background: var(--surface); }
+  .pg-dialog .dialog-description { font-size: 13px; line-height: 1.6; margin: 0; max-width: 100%; overflow-wrap: anywhere; }
+  .pg-dialog .modal__body { flex: 0 1 auto; margin: 0; padding: 20px 24px; color: var(--foreground); overscroll-behavior: contain; scrollbar-width: thin; }
+  .pg-dialog .modal__footer { flex-shrink: 0; margin: 0; gap: 8px; padding: 14px 24px; border-top: 1px solid var(--border); background: var(--surface); }
+  .pg-dialog .modal__body > :first-child { margin-top: 0; }
+  .pg-dialog .modal__body > :last-child { margin-bottom: 0; }
   .modal__close-trigger { border-radius: 4px; }
   .dropdown__popover, .popover__content, .select__popover { border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 25px #20232912; }
   .dropdown__item { font-size: 13px; min-height: 32px; border-radius: 3px; }
@@ -226,9 +231,11 @@
     .topbar-actions { gap: 12px; }
     .fn-environment { display: none; }
     .console-env-label { border: 0; padding: 0; font-size: 12px; }
-    .modal__header { padding: 20px 18px 16px; }
-    .modal__body { padding: 18px; }
-    .modal__footer { padding: 14px 18px; }
+    .pg-dialog-container { padding: 12px; }
+    .modal__dialog.pg-dialog, .modal__dialog.pg-dialog.dialog-wide, .modal__dialog.pg-dialog.dialog-compact { width: calc(100vw - 24px); max-width: none; max-height: calc(100dvh - 24px); }
+    .pg-dialog .modal__header { padding: 18px 48px 14px 18px; }
+    .pg-dialog .modal__body { padding: 18px; }
+    .pg-dialog .modal__footer { padding: 12px 18px; }
     .dialog-wide { max-width: calc(100vw - 24px); }
     .console-save-bar { align-items: stretch; }
     .console-save-bar > div { margin-left: auto; }

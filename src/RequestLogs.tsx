@@ -179,10 +179,10 @@ export default function RequestLogs({ logs, total, query, result, page, loading,
         </div>
       </Card>
       {confirmClear && (
-        <Dialog title="清空全部请求日志" subtitle="清空后无法恢复，请确认不再需要这些记录。" close={() => { if (!clearing) setConfirmClear(false); }} className="rl-clear-dialog" footer={
+        <Dialog title="清空全部请求日志？" size="compact" close={() => { if (!clearing) setConfirmClear(false); }} className="rl-clear-dialog" footer={
           <><Button disabled={clearing} onClick={() => setConfirmClear(false)}>取消</Button><Button variant="danger" disabled={clearing} onClick={() => void clear()}>{clearing ? <Spinner size="sm" /> : <Trash2 size={15} />}{clearing ? "正在清空…" : "确认清空"}</Button></>
         }>
-          <div className="rl-clear-notice"><span><Trash2 size={21} /></span><div><strong>删除所有日志和请求追踪详情</strong><p>包括当前筛选之外的记录。基于日志生成的用量统计也会清空。</p></div></div>
+          <p className="rl-clear-notice">所有日志、请求追踪及相关用量统计将被永久清空，包括筛选之外的记录。此操作无法撤销。</p>
         </Dialog>
       )}
     </>

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Plus, Minus, Settings2 } from "lucide-react";
-import { Card, Label, NumberField } from "@heroui/react";
+import { Label, NumberField } from "@heroui/react";
 import { Switch } from "./ui";
 import "./channel-panel-ui.css";
 
@@ -19,8 +19,8 @@ export function PanelSection({
   children: ReactNode;
 }) {
   return (
-    <Card variant="secondary" className="cp-section">
-      <Card.Header className="cp-section-header">
+    <section className="cp-section" aria-label={title}>
+      <header className="cp-section-header">
         <div className="cp-section-heading">
           {Icon && (
             <span className="cp-section-icon">
@@ -28,14 +28,14 @@ export function PanelSection({
             </span>
           )}
           <div>
-            <Card.Title>{title}</Card.Title>
-            {description && <Card.Description>{description}</Card.Description>}
+            <h3 className="cp-section-title">{title}</h3>
+            {description && <p className="cp-section-description">{description}</p>}
           </div>
         </div>
         {action && <div className="cp-section-action">{action}</div>}
-      </Card.Header>
-      <Card.Content className="cp-section-content">{children}</Card.Content>
-    </Card>
+      </header>
+      <div className="cp-section-content">{children}</div>
+    </section>
   );
 }
 

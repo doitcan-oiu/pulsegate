@@ -1,20 +1,16 @@
 import { useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
-import { Card, Chip } from "@heroui/react";
+import { Chip } from "@heroui/react";
 import {
-  ArrowRight,
   Check,
   CircleGauge,
-  Clock3,
   Globe,
   Info,
   KeyRound,
-  Link,
   Network,
   Plus,
   RotateCcw,
   Server,
-  Shield,
   ShieldAlert,
   Sparkles,
   X,
@@ -233,11 +229,7 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
   const activeKey = activeEndpoint(config);
   return (
     <div className="cpp-root">
-      <PanelSection
-        title="连接方式"
-        icon={Network}
-        description="选择网关连接这个渠道的方式。"
-      >
+      <PanelSection title="连接方式" icon={Network}>
         <div className="cpp-two-columns">
           <ChoiceCard
             title="直连上游"
@@ -252,7 +244,7 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
           />
           <ChoiceCard
             title="HTTPS API 中继"
-            description="使用支持客户端调用入口的中继服务"
+            description="通过中继地址转发请求"
             icon={Network}
             selected={relayMode}
             disabled={aiGateway || simulated}
@@ -264,14 +256,10 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
         </div>
         {aiGateway ? (
           <Notice>
-            当前使用 Cloudflare AI Gateway，实际请求经全局 Account / Gateway
-            和此渠道的自定义服务商路由。这里的 HTTPS
-            中继配置会保留，但在此模式下不生效。
+            当前通过 Cloudflare AI Gateway 转发，中继配置暂不生效。
           </Notice>
         ) : simulated ? (
-          <Notice>
-            当前渠道使用本地模拟，不发送真实上游请求。
-          </Notice>
+          <Notice>当前渠道使用本地模拟，不发送真实上游请求。</Notice>
         ) : relayMode ? (
           <label className="cpp-field">
             <span>中继 API Base URL</span>
@@ -286,11 +274,7 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
                 setConfig((old) => ({ ...old, relayUrl: event.target.value }));
               }}
             />
-            <small>
-              中继需支持客户端实际调用的入口和请求格式，并接收渠道认证头。
-              仅支持 HTTPS API 中继；模型获取与渠道测试只填域名时默认补
-              {config.protocol === "gemini" ? " /v1beta" : " /v1"}。
-            </small>
+            <small>需支持客户端请求格式和渠道认证头。</small>
           </label>
         ) : (
           <div className="cpp-address">
@@ -298,51 +282,24 @@ function RelayPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
             <code>{channel.endpoint}</code>
           </div>
         )}
-      </PanelSection>
-      <PanelSection
-        title="渠道测试路径预览"
-        icon={Link}
-        description={
-          aiGateway
-            ? "Account 与 Gateway 使用全局设置中的实际值。"
-            : "按当前接口类型预览渠道测试；公开请求保持客户端入口和格式。"
-        }
-      >
-        <div className="cpp-route">
-          <Card className="cpp-route-node">
-            <Server size={19} />
-            <strong>PulseGate</strong>
-            <small>智能网关</small>
-          </Card>
-          <ArrowRight size={18} className="cpp-route-arrow" />
-          <Card className="cpp-route-node">
-            <Network size={19} />
-            <strong>
-              {aiGateway
-                ? "AI Gateway"
-                : simulated
-                  ? "本地模拟"
-                  : relayMode
-                    ? "HTTPS 中继"
-                    : "上游 API"}
-            </strong>
-            <small>
-              {aiGateway
-                ? "Cloudflare 自定义服务商"
-                : protocolName[config.protocol]}
-            </small>
-          </Card>
-        </div>
-        <div className="cpp-preview">
-          <Chip size="sm">POST</Chip>
-          <code>
-            {simulated
-              ? "本地模拟响应，不访问外部 API"
-              : relayMode && !draftUrl && !aiGateway
-                ? "填写中继地址后显示完整请求路径"
-                : addressPreview(config, channel, activeKey)}
-          </code>
-        </div>
+        <details className="cpp-details">
+          <summary>渠道测试地址与拼接规则</summary>
+          <div className="cpp-preview">
+            <Chip size="sm">POST</Chip>
+            <code>
+              {simulated
+                ? "本地模拟响应，不访问外部 API"
+                : relayMode && !draftUrl && !aiGateway
+                  ? "填写中继地址后显示完整请求路径"
+                  : addressPreview(config, channel, activeKey)}
+            </code>
+          </div>
+          <p className="cpp-helper">
+            {aiGateway
+              ? "Account 与 Gateway 使用全局设置。"
+              : `模型获取与渠道测试只填域名时默认补 ${config.protocol === "gemini" ? "/v1beta" : "/v1"}；公开请求保持客户端入口和格式。`}
+          </p>
+        </details>
       </PanelSection>
     </div>
   );
@@ -352,16 +309,7 @@ function RateLimitPanel({ config, setConfig }: Omit<Props, "panel">) {
   return (
     <div className="cpp-root">
       <div className="cpp-two-columns">
-        <PanelSection
-          title="请求额度"
-          icon={CircleGauge}
-          description="限制渠道每分钟可承接的请求。"
-          action={
-            <Chip size="sm">
-              {config.rateLimit.requestsPerMinute === 0 ? "不限" : "已限制"}
-            </Chip>
-          }
-        >
+        <PanelSection title="请求额度" icon={CircleGauge}>
           <PanelNumber
             label="每分钟请求数"
             value={config.rateLimit.requestsPerMinute}
@@ -375,7 +323,7 @@ function RateLimitPanel({ config, setConfig }: Omit<Props, "panel">) {
             max={1000000}
             step={1}
             unit="请求 / 分钟"
-            description="0 表示不限，最大 1,000,000。"
+            description="0 表示不限。"
           />
           <div className="cpp-presets">
             {[0, 60, 120, 600].map((value) => (
@@ -398,16 +346,7 @@ function RateLimitPanel({ config, setConfig }: Omit<Props, "panel">) {
             ))}
           </div>
         </PanelSection>
-        <PanelSection
-          title="Token 额度"
-          icon={Sparkles}
-          description="限制渠道每分钟的预估 token 使用量。"
-          action={
-            <Chip size="sm">
-              {config.rateLimit.tokensPerMinute === 0 ? "不限" : "已限制"}
-            </Chip>
-          }
-        >
+        <PanelSection title="Token 额度" icon={Sparkles}>
           <PanelNumber
             label="每分钟 token 数"
             value={config.rateLimit.tokensPerMinute}
@@ -421,7 +360,7 @@ function RateLimitPanel({ config, setConfig }: Omit<Props, "panel">) {
             max={1000000000}
             step={1000}
             unit="token / 分钟"
-            description="0 表示不限，按请求预估量预留额度。"
+            description="0 表示不限，使用请求预估量。"
           />
           <div className="cpp-presets">
             {[0, 10000, 100000, 1000000].map((value) => (
@@ -451,15 +390,8 @@ function RateLimitPanel({ config, setConfig }: Omit<Props, "panel">) {
           </div>
         </PanelSection>
       </div>
-      <Card className="cpp-limit-summary">
-        <CircleGauge size={20} />
-        <div>
-          <strong>超出额度时，尝试其他可用渠道</strong>
-          <p>
-            限制按渠道、每个自然分钟计数，流式与非流式请求共用额度。Token
-            限制使用发送前的预估量，不代表精确计费。
-          </p>
-        </div>
+      <div className="cpp-limit-note">
+        <p className="cpp-helper">每个自然分钟重置，流式与非流式共用；超额后尝试其他渠道。</p>
         <Button
           variant="ghost"
           onClick={() =>
@@ -472,7 +404,7 @@ function RateLimitPanel({ config, setConfig }: Omit<Props, "panel">) {
           <RotateCcw size={14} />
           恢复不限
         </Button>
-      </Card>
+      </div>
     </div>
   );
 }
@@ -482,35 +414,15 @@ function EndpointsPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
   const simulated = config.protocol === "mock";
   return (
     <div className="cpp-root">
-      <Card className="cpp-protocol-summary">
-        <Network size={20} />
-        <div>
-          <strong>接口类型：{protocolName[config.protocol]}</strong>
-          <p>
-            {simulated
-              ? "本地模拟不访问以下外部端点。"
-              : "接口类型用于模型发现与渠道测试；公开请求按客户端入口使用对应路径，保持原始格式。"}
-          </p>
-        </div>
-        <Chip size="sm">
-          {config.gatewayMode === "ai-gateway"
-            ? "AI Gateway"
-            : config.relayUrl
-              ? "HTTPS 中继"
-              : "直连"}
-        </Chip>
-      </Card>
+      <p className="cpp-helper">
+        {simulated ? "本地模拟不访问外部端点。" : `当前测试接口：${protocolName[config.protocol]}。公开请求使用各自入口的路径与格式。`}
+      </p>
       {endpointGroups.map((group) => (
         <PanelSection
           key={group.protocol}
           title={group.title}
           description={group.description}
           icon={Network}
-          action={
-            <Chip size="sm">
-              {config.protocol === group.protocol ? "当前测试接口" : "其他端点"}
-            </Chip>
-          }
         >
           <div className="cpp-endpoint-list">
             {group.items.map((item) => {
@@ -558,11 +470,11 @@ function EndpointsPanel({ config, setConfig, channel }: Omit<Props, "panel">) {
                     }
                     placeholder={defaultChannelConfig.endpoints[item.key]}
                   />
-                  <small>{item.description}</small>
-                  <div className="cpp-endpoint-preview">
-                    <span>地址预览</span>
+                  <details className="cpp-details cpp-endpoint-preview">
+                    <summary>地址预览与说明</summary>
                     <code>{addressPreview(config, channel, item.key)}</code>
-                  </div>
+                    <p className="cpp-helper">{item.description}</p>
+                  </details>
                 </div>
               );
             })}
@@ -622,52 +534,15 @@ function AutoDisablePanel({ config, setConfig }: Omit<Props, "panel">) {
     setCustomStatus("");
     setStatusError("");
   };
-  const steps: { icon: LucideIcon; title: string; description: string }[] = [
-    {
-      icon: ShieldAlert,
-      title: "错误触发",
-      description: `连续 ${policy.threshold} 次匹配状态码`,
-    },
-    {
-      icon: policy.target === "key" ? KeyRound : Server,
-      title: policy.target === "key" ? "禁用上游密钥" : "禁用整个渠道",
-      description: "暂停参与请求调度",
-    },
-    {
-      icon: Clock3,
-      title: "等待冷却",
-      description: `${policy.cooldown.toLocaleString()} 秒`,
-    },
-    {
-      icon: policy.recover ? RotateCcw : Shield,
-      title: policy.recover ? "自动探测恢复" : "手动恢复",
-      description: policy.recover
-        ? "通过全局恢复规则后启用"
-        : "保留禁用，等待人工处理",
-    },
-  ];
   return (
     <div className="cpp-root">
-      <PanelSection
-        title="渠道专属策略"
-        icon={Shield}
-        description="开启后使用下面的配置；关闭时跟随全局自动禁用策略。"
-        action={
-          <Chip size="sm">{policy.enabled ? "渠道覆盖" : "跟随全局"}</Chip>
-        }
-      >
-        <PanelToggle
-          title="覆盖全局自动禁用策略"
-          checked={policy.enabled}
-          onChange={(checked) => update({ enabled: checked })}
-          description="该配置针对上游 HTTP 错误；首字延迟和健康窗口仍由全局健康策略判断。"
-        />
-      </PanelSection>
-      <PanelSection
-        title="禁用对象"
-        icon={KeyRound}
-        description="指定错误达到阈值后，选择暂停哪一部分。"
-      >
+      <PanelToggle
+        title="覆盖全局自动禁用策略"
+        checked={policy.enabled}
+        onChange={(checked) => update({ enabled: checked })}
+        description="关闭时跟随全局策略。此处仅配置 HTTP 错误，不影响全局健康策略。"
+      />
+      <PanelSection title="禁用规则" icon={KeyRound}>
         <div className="cpp-two-columns">
           <ChoiceCard
             title="上游密钥"
@@ -686,11 +561,35 @@ function AutoDisablePanel({ config, setConfig }: Omit<Props, "panel">) {
             onClick={() => update({ target: "channel" })}
           />
         </div>
+        <div className="cpp-two-columns cpp-policy-fields">
+          <PanelNumber
+            label="连续错误次数"
+            value={policy.threshold}
+            onChange={(value) => update({ threshold: value })}
+            min={1}
+            max={100}
+            step={1}
+            unit="次"
+            disabled={disabled}
+            description="成功或未匹配状态码会重置计数。"
+          />
+          <PanelNumber
+            label="冷却时间"
+            value={policy.cooldown}
+            onChange={(value) => update({ cooldown: value })}
+            min={1}
+            max={86400}
+            step={1}
+            unit="秒"
+            disabled={disabled}
+            description="支持 1–86,400 秒。"
+          />
+        </div>
       </PanelSection>
       <PanelSection
         title="触发状态码"
         icon={ShieldAlert}
-        description="点击选择需要累计失败次数的 HTTP 错误；未匹配的状态码会重置连续计数。"
+        description="选择需要计入连续错误的 HTTP 状态码。"
         action={<Chip size="sm">已选 {policy.statuses.length}</Chip>}
       >
         <div className="cpp-status-grid">
@@ -767,69 +666,15 @@ function AutoDisablePanel({ config, setConfig }: Omit<Props, "panel">) {
           </small>
         )}
       </PanelSection>
-      <div className="cpp-two-columns">
-        <PanelSection
-          title="连续失败阈值"
-          icon={ShieldAlert}
-          description="匹配错误累计到这个次数时禁用。"
-        >
-          <PanelNumber
-            label="连续错误次数"
-            value={policy.threshold}
-            onChange={(value) => update({ threshold: value })}
-            min={1}
-            max={100}
-            step={1}
-            unit="次"
-            disabled={disabled}
-            description="支持 1–100 次，成功或未匹配状态码会重置计数。"
-          />
-        </PanelSection>
-        <PanelSection
-          title="冷却时间"
-          icon={Clock3}
-          description="禁用后等待多久再尝试恢复。"
-        >
-          <PanelNumber
-            label="冷却时间"
-            value={policy.cooldown}
-            onChange={(value) => update({ cooldown: value })}
-            min={1}
-            max={86400}
-            step={1}
-            unit="秒"
-            disabled={disabled}
-            description="支持 1–86,400 秒。"
-          />
-        </PanelSection>
-      </div>
-      <PanelSection
-        title="恢复流程"
-        icon={RotateCcw}
-        description={
-          policy.enabled
-            ? "流程随上面的配置实时更新，保存后生效。"
-            : "以下是渠道专属策略的预览，当前执行全局策略。"
-        }
-      >
+      <div className="cpp-recovery">
         <PanelToggle
           title="冷却后自动探测与恢复"
           checked={policy.recover}
           onChange={(checked) => update({ recover: checked })}
           disabled={disabled}
-          description="启用后由定时探测检查，达到全局连续恢复次数后重新启用；关闭后需人工处理。"
+          description="通过全局恢复规则后重新启用；关闭后需手动恢复。"
         />
-        <div className="cpp-policy-flow">
-          {steps.map((step, index) => (
-            <div className="cpp-policy-step" key={step.title}>
-              <span className="cpp-step-number">{index + 1}</span>
-              <step.icon size={18} />
-              <strong>{step.title}</strong>
-              <small>{step.description}</small>
-            </div>
-          ))}
-        </div>
-      </PanelSection>
+      </div>
     </div>
   );
 }

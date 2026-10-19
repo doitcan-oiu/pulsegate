@@ -73,7 +73,6 @@
   .pg-outline { width: 100%; }
   .pg-curl-hint { font-size: 13px; line-height: 1.7; color: var(--muted); }
   .pg-curl-result { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px 0; border-block: 1px solid var(--border); font: 12px/1.8 ui-monospace, monospace; }
-  .pg-curl-footer { display: flex; justify-content: flex-end; margin-top: 16px; }
   @media (max-width: 1050px) {
     .pg-route-selects { grid-template-columns: 120px minmax(120px, 1fr) minmax(120px, 1fr); }
     .pg-controls-expanded .pg-workspace { grid-template-columns: 214px minmax(0, 1fr); }

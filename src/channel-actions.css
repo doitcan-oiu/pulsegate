@@ -24,6 +24,28 @@
     line-height: 1.75;
     overflow-wrap: anywhere;
   }
+  .cx-hint {
+    margin: 0;
+  }
+  .cx-credential-confirm,
+  .cx-credential-confirm > div {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+  .cx-credential-confirm strong,
+  .cx-credential-confirm code {
+    overflow-wrap: anywhere;
+  }
+  .cx-credential-confirm code,
+  .cx-credential-confirm p {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  .cx-credential-confirm p {
+    margin: 4px 0 0;
+  }
   .cx-help {
     display: block;
     font-size: 13px;

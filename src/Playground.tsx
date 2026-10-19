@@ -779,26 +779,17 @@ export default function Playground({
         </section>
       </div>
       {curlOpen && (
-        <Dialog title="导出网关 cURL" close={() => setCurlOpen(false)}>
+        <Dialog title="导出网关 cURL" wide close={() => setCurlOpen(false)} footer={
+          <Button variant="primary" onClick={() => {
+            void navigator.clipboard.writeText(curl)
+              .then(() => toast.success("cURL 已复制"))
+              .catch(() => toast.error("无法访问剪贴板"));
+          }}><Copy size={14} />复制 cURL</Button>
+        }>
           <p className="pg-curl-hint">
-            将 PULSEGATE_API_KEY
-            替换为你的网关密钥。密钥原文不会出现在此导出中；渠道直测配置在此转换为公开网关请求。
+            将 PULSEGATE_API_KEY 替换为网关密钥。导出使用公开网关接口，不包含密钥原文。
           </p>
           <pre className="pg-curl-result">{curl}</pre>
-          <footer className="pg-curl-footer">
-            <Button
-              className="pg-curl-copy"
-              variant="primary"
-              onClick={() => {
-                void navigator.clipboard
-                  .writeText(curl)
-                  .then(() => toast.success("cURL 已复制"))
-                  .catch(() => toast.error("无法访问剪贴板"));
-              }}
-            >
-              <Copy size={14} /> 复制 cURL
-            </Button>
-          </footer>
         </Dialog>
       )}
     </div>

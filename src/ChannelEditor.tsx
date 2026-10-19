@@ -81,7 +81,6 @@ const services: {
   name: string;
   format: string;
   endpoint: string;
-  description: string;
 }[] = [
   {
     id: "openai",
@@ -89,7 +88,6 @@ const services: {
     name: "OpenAI",
     format: "OpenAI (Chat Completions)",
     endpoint: "https://api.openai.com",
-    description: "OpenAI 模型列表与测试",
   },
   {
     id: "anthropic",
@@ -97,7 +95,6 @@ const services: {
     name: "Anthropic",
     format: "Anthropic (Messages)",
     endpoint: "https://api.anthropic.com",
-    description: "Anthropic 模型列表与测试",
   },
   {
     id: "gemini",
@@ -105,7 +102,6 @@ const services: {
     name: "Gemini",
     format: "Gemini (Contents)",
     endpoint: "https://generativelanguage.googleapis.com",
-    description: "Gemini 模型列表与测试",
   },
 ];
 
@@ -126,13 +122,11 @@ const modelDocs: Record<NativeService, string> = {
 
 function Section({
   title,
-  description,
   icon,
   action,
   children,
 }: {
   title: string;
-  description: string;
   icon: ReactNode;
   action?: ReactNode;
   children: ReactNode;
@@ -142,10 +136,7 @@ function Section({
       <div className="ce-section-heading">
         <div className="ce-section-title">
           {icon}
-          <div>
-            <h3>{title}</h3>
-            {description && <p>{description}</p>}
-          </div>
+          <h3>{title}</h3>
         </div>
         {action}
       </div>
@@ -778,9 +769,6 @@ export default function ChannelEditor({
     <>
     <Dialog
       title={channel ? "编辑渠道" : "添加渠道"}
-      subtitle={
-        channel ? "管理上游连接、模型和调度设置" : "连接一个新的 AI 模型服务商"
-      }
       close={() => closeEditor()}
       wide
       className="ce-dialog"
@@ -831,43 +819,18 @@ export default function ChannelEditor({
                 />
                 <span className="ce-service-copy">
                   <strong>{item.name}</strong>
-                  <small>{item.description}</small>
                 </span>
                 <span className="ce-service-radio" aria-hidden="true" />
               </Button>
             ))}
           </div>
-          {simulated ? (
-            <Card className="ce-service-note">
-              <Server size={18} />
-              <strong>本地模拟渠道</strong>
-              <p>保留模拟协议与故障场景，无法启用上游余额监控。</p>
-            </Card>
-          ) : (
-            <Card className="ce-service-note">
-              <Info size={18} />
-              <strong>模型发现与渠道测试</strong>
-              <p>
-                {channel
-                  ? "切换接口类型保留连接、模型与密钥。公开请求保持客户端格式，余额监控独立配置。"
-                  : "每种接口类型保留连接与模型草稿。公开请求保持客户端格式，余额监控独立配置。"}
-              </p>
-            </Card>
-          )}
+          <p className="ce-service-hint">用于模型发现与渠道测试。</p>
         </aside>
 
         <div className="ce-config">
           <Section
-            title="基本信息与连接"
-            description="定义渠道名称，填写上游服务地址和认证信息"
+            title="连接与密钥"
             icon={<Globe size={16} />}
-            action={
-              <div className="ce-format">
-                <span>上游接口类型</span>
-                <strong>{format}</strong>
-                <small>用于模型发现与渠道测试</small>
-              </div>
-            }
           >
             {simulated && (
               <Notice>
@@ -907,7 +870,7 @@ export default function ChannelEditor({
                 <small>
                   {simulated
                     ? "路径在「端点配置」中调整。"
-                    : `Base URL 可只填域名；模型获取与渠道测试默认补 ${protocol === "gemini" ? "/v1beta" : "/v1"}，已有版本或自定义路径会保留。`}
+                    : `只填域名时，模型获取与测试补 ${protocol === "gemini" ? "/v1beta" : "/v1"}；已有路径保留。`}
                 </small>
               </label>
             </div>
@@ -936,220 +899,12 @@ export default function ChannelEditor({
               </small>
             </label>
             {!simulated && credentialCount + enteredKeys.length === 0 && (
-              <Notice>暂无上游密钥，此渠道暂时无法接收真实请求。可先关闭「启用渠道」，稍后在密钥管理中补充。</Notice>
+              <Notice>未配置密钥，暂时无法接收真实请求。</Notice>
             )}
           </Section>
 
           <Section
-            title="上游余额监控"
-            description="独立选择后台类型和凭据，用于自动刷新账户余额"
-            icon={<CircleDollarSign size={16} />}
-            action={
-              <Switch
-                aria-label="启用上游余额监控"
-                checked={requiresAccount}
-                disabled={simulated || busy}
-                onChange={(event) => setBalanceEnabled(event.target.checked)}
-              />
-            }
-          >
-            {!requiresAccount && (
-              <p className="ce-balance-hint">
-                {simulated
-                  ? "本地模拟渠道不读取上游账户余额。"
-                  : "开启后可选择 NewAPI 或 Sub2API；关闭后停止余额刷新，已保存的后台凭据仍保留。"}
-              </p>
-            )}
-            {requiresAccount && (
-              <div className="ce-account">
-                <label className="ce-field">
-                  <span>后台类型</span>
-                  <Select
-                    aria-label="余额监控后台类型"
-                    value={balanceBackend}
-                    disabled={busy}
-                    onChange={(event) =>
-                      setBalanceBackend(event.target.value as BalanceBackend)
-                    }
-                  >
-                    <option value="newapi">NewAPI</option>
-                    <option value="sub2api">Sub2API</option>
-                  </Select>
-                </label>
-                <div className="ce-account-heading">
-                  <KeyRound size={16} />
-                  <strong>{balanceBackendName} 账户</strong>
-                  {hasSavedAccount && (
-                    <Chip size="sm">已保存</Chip>
-                  )}
-                </div>
-                <label className="ce-field">
-                  <span>余额刷新认证</span>
-                  <Select
-                    aria-label={`${balanceBackendName} 余额刷新认证方式`}
-                    value={accountAuth}
-                    onChange={(event) =>
-                      updateAccount({
-                        accountAuth: event.target.value as AccountDraft["accountAuth"],
-                      })
-                    }
-                  >
-                    <option value="password">账号密码</option>
-                    {balanceBackend === "newapi" ? (
-                      <option value="token">后台访问令牌</option>
-                    ) : (
-                      <option value="cookie">Cookie / 浏览器会话</option>
-                    )}
-                  </Select>
-                </label>
-                <div className="ce-fields">
-                  {useAccountCookie ? (
-                    <>
-                      <label className="ce-field ce-full">
-                        <span>
-                          浏览器 Cookie（可选）
-                        </span>
-                        <Input
-                          aria-label="Sub2API 浏览器 Cookie"
-                          type="password"
-                          maxLength={16000}
-                          autoComplete="new-password"
-                          value={cookie}
-                          onChange={(event) =>
-                            updateAccount({ cookie: event.target.value })
-                          }
-                          placeholder={hasSavedAccount ? "全部留空保留会话；Cookie 与 Token 至少一个" : "name=value; name=value；也可只填后台登录 Token"}
-                        />
-                        <small>
-                          在浏览器登录 Sub2API 并完成人机验证，在开发者工具「网络」中找到个人信息或余额请求，复制请求头 Cookie 的值。
-                        </small>
-                      </label>
-                      <label className="ce-field ce-full">
-                        <span>后台登录 Token（可选）</span>
-                        <Input
-                          aria-label="Sub2API 后台登录 Token"
-                          type="password"
-                          maxLength={4096}
-                          autoComplete="new-password"
-                          value={accessToken}
-                          onChange={(event) =>
-                            updateAccount({ accessToken: event.target.value })
-                          }
-                          placeholder={hasSavedAccount ? "全部留空保留会话；填写新值替换已保存会话" : "登录后的 JWT，可带 Bearer 前缀"}
-                        />
-                        <small>
-                          标准 Sub2API 可只填登录后的 Bearer Token，从个人信息请求的 Authorization 或本地存储中的 auth_token 复制。若请求还需要人机验证 Cookie，请同时填写；使用 Cookie 登录的定制站点可不填 Token。
-                        </small>
-                      </label>
-                    </>
-                  ) : useAccountToken ? (
-                    <>
-                      <label className="ce-field ce-full">
-                        <span>
-                          后台访问令牌<em>{hasSavedAccount ? "" : " *"}</em>
-                        </span>
-                        <Input
-                          aria-label="NewAPI 后台访问令牌"
-                          type="password"
-                          maxLength={4096}
-                          autoComplete="new-password"
-                          value={accessToken}
-                          onChange={(event) =>
-                            updateAccount({ accessToken: event.target.value })
-                          }
-                          placeholder={hasSavedAccount ? "留空保留已保存令牌" : "填写后台个人访问令牌"}
-                        />
-                        <small>
-                          在 NewAPI 后台「个人设置 → 安全设置」中生成访问令牌，用于读取账户余额。
-                        </small>
-                      </label>
-                      <label className="ce-field ce-full">
-                        <span>用户 ID（旧版站点必填）</span>
-                        <Input
-                          aria-label="NewAPI 后台用户 ID"
-                          inputMode="numeric"
-                          maxLength={20}
-                          autoComplete="off"
-                          value={accountUserId}
-                          onChange={(event) =>
-                            updateAccount({ accountUserId: event.target.value })
-                          }
-                          placeholder={hasSavedAccount ? "留空保留；修改时请同时填写令牌" : "个人资料中的数字用户 ID；新版可留空"}
-                        />
-                      </label>
-                    </>
-                  ) : (
-                    <>
-                      <label className="ce-field">
-                        <span>
-                          {balanceBackend === "sub2api" ? "邮箱 / 账号" : "账号"}
-                          <em>{hasSavedAccount ? "" : " *"}</em>
-                        </span>
-                        <Input
-                          aria-label={`${balanceBackendName} 账号`}
-                          maxLength={256}
-                          autoComplete="off"
-                          value={username}
-                          onChange={(event) =>
-                            updateAccount({ username: event.target.value })
-                          }
-                          placeholder={
-                            hasSavedAccount
-                              ? "留空保留已保存账号"
-                              : balanceBackend === "sub2api"
-                                ? "name@example.com"
-                                : "用户名"
-                          }
-                        />
-                      </label>
-                      <label className="ce-field">
-                        <span>
-                          密码<em>{hasSavedAccount ? "" : " *"}</em>
-                        </span>
-                        <Input
-                          aria-label={`${balanceBackendName} 密码`}
-                          type="password"
-                          maxLength={4096}
-                          autoComplete="new-password"
-                          value={password}
-                          onChange={(event) =>
-                            updateAccount({ password: event.target.value })
-                          }
-                          placeholder={hasSavedAccount ? "留空保留已保存密码" : "输入账户密码"}
-                        />
-                      </label>
-                    </>
-                  )}
-                </div>
-                <small>
-                  用于自动刷新后台余额；推理与模型获取使用 API Key。
-                  {hasSavedAccount
-                    ? useAccountCookie
-                      ? "全部留空保留已保存会话。"
-                      : "留空保留原凭据，修改时请完整填写。"
-                    : "后台凭据加密保存，不回显。"}
-                  {channel?.hasAccountCredentials && !hasSavedAccount &&
-                    "切换后台类型或认证方式后，须填写对应的完整凭据。"}
-                  {balanceBackend === "newapi" &&
-                    !useAccountToken &&
-                    "开启人机验证的站点请使用后台访问令牌。"}
-                  {balanceBackend === "sub2api" &&
-                    !useAccountCookie &&
-                    "开启人机验证的站点可切换到 Cookie / 浏览器会话。"}
-                  {useAccountCookie &&
-                    "Cookie 与后台登录 Token 至少填写一个；填写新会话会替换已保存 Cookie 和 Token，请提供所需的完整会话。会话过期或失效后，请重新登录并更新。"}
-                </small>
-              </div>
-            )}
-          </Section>
-
-          <Section
-            title="支持的模型"
-            description={
-              simulated
-                ? "添加用于本地模拟的模型 ID"
-                : "从上游获取列表，选中需要开放的模型"
-            }
+            title="模型"
             icon={<Layers3 size={16} />}
             action={
               <div className="ce-model-actions">
@@ -1410,7 +1165,7 @@ export default function ChannelEditor({
                   ))}
                 </div>
                 <small>
-                  模型示例，可填写上游自定义 ID；请以该上游实际支持的模型为准。
+                  示例仅供参考，请以上游实际支持的模型 ID 为准。
                 </small>
               </div>
             )}
@@ -1432,22 +1187,225 @@ export default function ChannelEditor({
                 ))}
               </Select>
               <small>
-                用于渠道测试与健康探测。客户端请求仍按传入的模型路由。
+                用于测试与健康探测，不影响请求模型。
               </small>
             </label>
           </Section>
 
           <div className="ce-advanced-heading">
             <h3>其他设置</h3>
-            <p>标签、连接方式与调度参数，可按需调整</p>
           </div>
           <Accordion
             className="ce-advanced"
             allowsMultipleExpanded
-            defaultExpandedKeys={
-              initialConnection !== "direct" ? ["connection"] : []
-            }
+            defaultExpandedKeys={[
+              ...(initialConnection !== "direct" ? ["connection"] : []),
+              ...(balanceEnabled ? ["balance"] : []),
+            ]}
           >
+            <FoldedSection
+              id="balance"
+              title="上游余额监控"
+              summary={requiresAccount ? balanceBackendName : "未启用"}
+              icon={<CircleDollarSign size={16} />}
+            >
+              <div className="ce-enable">
+                <span>自动刷新账户余额</span>
+                <Switch
+                  aria-label="启用上游余额监控"
+                  checked={requiresAccount}
+                  disabled={simulated || busy}
+                  onChange={(event) => setBalanceEnabled(event.target.checked)}
+                />
+              </div>
+              {!requiresAccount && (
+                <p className="ce-balance-hint">
+                  {simulated
+                    ? "本地模拟渠道不读取上游账户余额。"
+                    : "支持 NewAPI / Sub2API。关闭后保留已保存的凭据。"}
+                </p>
+              )}
+              {requiresAccount && (
+                <div className="ce-account">
+                  <label className="ce-field">
+                    <span>后台类型</span>
+                    <Select
+                      aria-label="余额监控后台类型"
+                      value={balanceBackend}
+                      disabled={busy}
+                      onChange={(event) =>
+                        setBalanceBackend(event.target.value as BalanceBackend)
+                      }
+                    >
+                      <option value="newapi">NewAPI</option>
+                      <option value="sub2api">Sub2API</option>
+                    </Select>
+                  </label>
+                  <div className="ce-account-heading">
+                    <KeyRound size={16} />
+                    <strong>{balanceBackendName} 账户</strong>
+                    {hasSavedAccount && (
+                      <Chip size="sm">已保存</Chip>
+                    )}
+                  </div>
+                  <label className="ce-field">
+                    <span>余额刷新认证</span>
+                    <Select
+                      aria-label={`${balanceBackendName} 余额刷新认证方式`}
+                      value={accountAuth}
+                      onChange={(event) =>
+                        updateAccount({
+                          accountAuth: event.target.value as AccountDraft["accountAuth"],
+                        })
+                      }
+                    >
+                      <option value="password">账号密码</option>
+                      {balanceBackend === "newapi" ? (
+                        <option value="token">后台访问令牌</option>
+                      ) : (
+                        <option value="cookie">Cookie / 浏览器会话</option>
+                      )}
+                    </Select>
+                  </label>
+                  <div className="ce-fields">
+                    {useAccountCookie ? (
+                      <>
+                        <label className="ce-field ce-full">
+                          <span>
+                            浏览器 Cookie（可选）
+                          </span>
+                          <Input
+                            aria-label="Sub2API 浏览器 Cookie"
+                            type="password"
+                            maxLength={16000}
+                            autoComplete="new-password"
+                            value={cookie}
+                            onChange={(event) =>
+                              updateAccount({ cookie: event.target.value })
+                            }
+                            placeholder={hasSavedAccount ? "全部留空保留会话；Cookie 与 Token 至少一个" : "name=value; name=value；也可只填后台登录 Token"}
+                          />
+                          <small>
+                            登录并完成验证后，从开发者工具「网络」中的个人信息或余额请求复制 Cookie。
+                          </small>
+                        </label>
+                        <label className="ce-field ce-full">
+                          <span>后台登录 Token（可选）</span>
+                          <Input
+                            aria-label="Sub2API 后台登录 Token"
+                            type="password"
+                            maxLength={4096}
+                            autoComplete="new-password"
+                            value={accessToken}
+                            onChange={(event) =>
+                              updateAccount({ accessToken: event.target.value })
+                            }
+                            placeholder={hasSavedAccount ? "全部留空保留会话；填写新值替换已保存会话" : "登录后的 JWT，可带 Bearer 前缀"}
+                          />
+                          <small>
+                            从个人信息请求的 Authorization 或本地存储 auth_token 复制。需要人机验证的站点还须填写 Cookie。
+                          </small>
+                        </label>
+                      </>
+                    ) : useAccountToken ? (
+                      <>
+                        <label className="ce-field ce-full">
+                          <span>
+                            后台访问令牌<em>{hasSavedAccount ? "" : " *"}</em>
+                          </span>
+                          <Input
+                            aria-label="NewAPI 后台访问令牌"
+                            type="password"
+                            maxLength={4096}
+                            autoComplete="new-password"
+                            value={accessToken}
+                            onChange={(event) =>
+                              updateAccount({ accessToken: event.target.value })
+                            }
+                            placeholder={hasSavedAccount ? "留空保留已保存令牌" : "填写后台个人访问令牌"}
+                          />
+                          <small>
+                            在 NewAPI 后台「个人设置 → 安全设置」中生成访问令牌，用于读取账户余额。
+                          </small>
+                        </label>
+                        <label className="ce-field ce-full">
+                          <span>用户 ID（旧版站点必填）</span>
+                          <Input
+                            aria-label="NewAPI 后台用户 ID"
+                            inputMode="numeric"
+                            maxLength={20}
+                            autoComplete="off"
+                            value={accountUserId}
+                            onChange={(event) =>
+                              updateAccount({ accountUserId: event.target.value })
+                            }
+                            placeholder={hasSavedAccount ? "留空保留；修改时请同时填写令牌" : "个人资料中的数字用户 ID；新版可留空"}
+                          />
+                        </label>
+                      </>
+                    ) : (
+                      <>
+                        <label className="ce-field">
+                          <span>
+                            {balanceBackend === "sub2api" ? "邮箱 / 账号" : "账号"}
+                            <em>{hasSavedAccount ? "" : " *"}</em>
+                          </span>
+                          <Input
+                            aria-label={`${balanceBackendName} 账号`}
+                            maxLength={256}
+                            autoComplete="off"
+                            value={username}
+                            onChange={(event) =>
+                              updateAccount({ username: event.target.value })
+                            }
+                            placeholder={
+                              hasSavedAccount
+                                ? "留空保留已保存账号"
+                                : balanceBackend === "sub2api"
+                                  ? "name@example.com"
+                                  : "用户名"
+                            }
+                          />
+                        </label>
+                        <label className="ce-field">
+                          <span>
+                            密码<em>{hasSavedAccount ? "" : " *"}</em>
+                          </span>
+                          <Input
+                            aria-label={`${balanceBackendName} 密码`}
+                            type="password"
+                            maxLength={4096}
+                            autoComplete="new-password"
+                            value={password}
+                            onChange={(event) =>
+                              updateAccount({ password: event.target.value })
+                            }
+                            placeholder={hasSavedAccount ? "留空保留已保存密码" : "输入账户密码"}
+                          />
+                        </label>
+                      </>
+                    )}
+                  </div>
+                  <small>
+                    {hasSavedAccount
+                      ? useAccountCookie
+                        ? "全部留空保留会话；填写新值将替换完整会话。"
+                        : "留空保留原凭据，更换时请完整填写。"
+                      : "后台凭据加密保存。"}
+                    {channel?.hasAccountCredentials && !hasSavedAccount &&
+                      "切换后台或认证方式后，请填写完整凭据。"}
+                    {balanceBackend === "newapi" &&
+                      !useAccountToken &&
+                      "开启人机验证的站点请使用后台访问令牌。"}
+                    {balanceBackend === "sub2api" &&
+                      !useAccountCookie &&
+                      "开启人机验证的站点可切换到 Cookie / 浏览器会话。"}
+                    {useAccountCookie &&
+                      "Cookie 与 Token 至少填写一个。会话失效后需重新登录并更新。"}
+                  </small>
+                </div>
+              )}
+            </FoldedSection>
             <FoldedSection
               id="tags"
               title="标签与访问范围"
@@ -1545,7 +1503,7 @@ export default function ChannelEditor({
                   </small>
                 </label>
               </div>
-              <Card className="ce-enable">
+              <div className="ce-enable">
                 <div>
                   <strong>启用渠道</strong>
                   <p>
@@ -1560,7 +1518,7 @@ export default function ChannelEditor({
                   disabled={channel?.archived}
                   onChange={(event) => setEnabled(event.target.checked)}
                 />
-              </Card>
+              </div>
             </FoldedSection>
             <FoldedSection
               id="connection"
@@ -1645,7 +1603,7 @@ export default function ChannelEditor({
         </div>
       </form>
     </Dialog>
-    {discardOpen && <Dialog title="放弃渠道更改？" subtitle="当前修改尚未保存，关闭后需要重新填写。" close={() => setDiscardOpen(false)} className="ce-discard-dialog" footer={<div className="ce-discard-actions"><Button variant="secondary" onClick={() => setDiscardOpen(false)}>继续编辑</Button><Button variant="danger" onClick={() => closeEditor(true)}>放弃并关闭</Button></div>}><p className="ce-discard-description">渠道连接、模型和凭据草稿将一并清除。</p></Dialog>}
+    {discardOpen && <Dialog title="放弃渠道更改？" size="compact" close={() => setDiscardOpen(false)} className="ce-discard-dialog" footer={<div className="ce-discard-actions"><Button variant="secondary" onClick={() => setDiscardOpen(false)}>继续编辑</Button><Button variant="danger" onClick={() => closeEditor(true)}>放弃并关闭</Button></div>}><p className="ce-discard-description">尚未保存的渠道设置和密钥将丢失。</p></Dialog>}
     </>
   );
 }
