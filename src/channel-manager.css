@@ -66,7 +66,9 @@
   .gx-models > code { max-width: 100%; overflow: hidden; color: var(--foreground); font: 13px/18px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
   .gx-models > .button { height: 20px; min-height: 20px; padding: 0; font-size: 12px; color: var(--muted); }
   .gx-model-cell { min-width: 180px; }
-  .gx-health-cell { min-width: 180px; }
+  .gx-health-cell { min-width: 240px; max-width: 320px; }
+  .gx-channel-health { min-width: 0; }
+  .gx-channel-health-compact { margin-top: 6px; }
   .gx-health-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .gx-health-status { display: flex; align-items: center; gap: 7px; color: var(--foreground); font-size: 13px; line-height: 20px; white-space: nowrap; }
   .gx-health-status > i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
@@ -78,6 +80,10 @@
   .gx-health-bars { display: flex; align-items: center; gap: 3px; height: 12px; width: 100%; max-width: 148px; }
   .gx-health-bars i { flex: 1; min-width: 0; height: 12px; border-radius: 1px; }
   .gx-health-empty { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 14px; }
+  .gx-health-reason { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; white-space: normal; }
+  .gx-health-recovery { display: flex; align-items: center; gap: 4px 10px; margin-top: 5px; flex-wrap: wrap; }
+  .gx-health-cooldown { color: var(--warning-soft-foreground); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
+  .gx-health-recovery .gx-health-reset { height: 24px; min-height: 24px; padding: 0 5px; color: var(--foreground); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
   .gx-unknown { background: var(--border); }
   .gx-good { background: var(--success); }
   .gx-slow { background: var(--warning); }

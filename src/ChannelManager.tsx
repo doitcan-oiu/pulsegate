@@ -27,6 +27,7 @@ import ChannelActions, { ChannelDialog } from "./ChannelActions";
 import RetrySettings from "./RetrySettings";
 import ProviderIcon from "./ProviderIcon";
 import ChannelTagTree from "./ChannelTagTree";
+import { channelHealthView, matchesChannelHealthStatus } from "./channel-health";
 import "./channel-manager.css";
 
 type Props = {
@@ -59,17 +60,12 @@ const columns: { key: Column; label: string }[] = [
   { key: "createdAt", label: "创建时间" },
 ];
 const defaultColumns: Column[] = ["enabled", "priority", "models", "health", "tags"];
-const columnWidths: Record<Column, number> = { provider: 120, enabled: 64, priority: 84, tags: 112, models: 180, health: 180, weight: 64, createdAt: 100 };
+const columnWidths: Record<Column, number> = { provider: 120, enabled: 64, priority: 84, tags: 112, models: 180, health: 240, weight: 64, createdAt: 100 };
 const viewStorageKey = "pulsegate.channel-view.v3";
 type Modal =
   "settings" | "import" | "weights" | "tags" | "assign" | "strategy" | null;
-const statusName = { healthy: "健康", degraded: "延迟异常", offline: "不可用" };
 function channelStatusLabel(channel: GatewayChannel) {
-  if (!channel.enabled) return "已停用";
-  if (channel.health.autoDisabled) return "自动停用";
-  if (channel.config.protocol !== "mock" && channel.credentialCount === 0) return "待配置密钥";
-  if (channel.config.protocol !== "mock" && channel.health.samples === 0) return "待检测";
-  return statusName[channel.status];
+  return channelHealthView(channel).label;
 }
 function HealthHistory({ channel }: { channel: GatewayChannel }) {
   const recent = channel.history.slice(-14).filter(value => value === 0 || value === 1 || value === 2);
@@ -87,6 +83,40 @@ function HealthHistory({ channel }: { channel: GatewayChannel }) {
       })}
     </div>
     {!recent.length && <span className="gx-health-empty">暂无历史</span>}
+  </div>;
+}
+function ChannelHealthSummary({ channel, busy, resetHealth, compact = false }: {
+  channel: GatewayChannel;
+  busy: boolean;
+  resetHealth: () => void;
+  compact?: boolean;
+}) {
+  const [nowMs, setNowMs] = useState(Date.now);
+  const cooldownUntil = channel.health.cooldownUntil;
+  useEffect(() => {
+    setNowMs(Date.now());
+    const deadline = Date.parse(cooldownUntil ?? "");
+    if (!Number.isFinite(deadline) || deadline <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setNowMs(now);
+      if (now >= deadline) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [cooldownUntil]);
+  const health = channelHealthView(channel, nowMs);
+  const reason = channel.health.reason || (channel.status !== "healthy" || channel.health.autoDisabled ? health.reason : null);
+  return <div className={compact ? "gx-channel-health gx-channel-health-compact" : "gx-channel-health"}>
+    <div className="gx-health-summary">
+      <span className={`gx-health-status gx-health-${health.color}`}><i aria-hidden="true" />{health.label}</span>
+      {!compact && <span className="gx-health-latency" title="平均首字耗时（TTFT）">首字 {channel.health.averageTtft != null ? `${channel.health.averageTtft.toFixed(2)} s` : "—"}</span>}
+    </div>
+    {!compact && <HealthHistory channel={channel} />}
+    {reason && <span className="gx-health-reason">{reason}</span>}
+    {(health.cooldownLabel || health.canReset) && <div className="gx-health-recovery">
+      {health.cooldownLabel && <span className="gx-health-cooldown" title={health.cooldownTitle}>{health.cooldownLabel}</span>}
+      {health.canReset && <Button variant="ghost" size="sm" className="gx-health-reset" disabled={busy} aria-label={`${health.resetLabel} ${channel.name}`} title="清除冷却和健康异常，立即恢复渠道参与路由" onClick={resetHealth}>{busy ? "处理中…" : health.resetLabel}</Button>}
+    </div>}
   </div>;
 }
 function ChannelBalance({ channel, refresh }: { channel: GatewayChannel; refresh: () => void | Promise<void> }) {
@@ -210,6 +240,14 @@ export default function ChannelManager({
   const [search, setSearch] = useState(initialSearch);
   const [providers, setProviders] = useState<string[]>([]);
   const [statuses, setStatuses] = useState<string[]>([]);
+  const [filterNowMs, setFilterNowMs] = useState(Date.now);
+  const filterByCooldown = statuses.includes("冷却中") || statuses.includes("等待恢复");
+  useEffect(() => {
+    if (!filterByCooldown) return;
+    setFilterNowMs(Date.now());
+    const timer = window.setInterval(() => setFilterNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [filterByCooldown]);
   const [filterTags, setFilterTags] = useState<string[]>([]);
   const [untaggedOnly, setUntaggedOnly] = useState(false);
   const [tagSearch, setTagSearch] = useState("");
@@ -337,8 +375,7 @@ export default function ChannelManager({
                 ...channel.tags,
               ].some((value) => value.toLowerCase().includes(query))) &&
             (!providers.length || providers.includes(channel.provider)) &&
-            (!statuses.length ||
-                statuses.includes(channelStatusLabel(channel))) &&
+            matchesChannelHealthStatus(channel, statuses, filterNowMs) &&
             (!filterTags.length ||
               filterTags.some((tag) => channel.tags.some(value => value === tag || value.startsWith(`${tag}/`)))) &&
             (!untaggedOnly || !channel.tags.length) &&
@@ -361,6 +398,7 @@ export default function ChannelManager({
       search,
       providers,
       statuses,
+      filterNowMs,
       filterTags,
       untaggedOnly,
       filterModels,
@@ -562,7 +600,7 @@ export default function ChannelManager({
           </label>
           <div className="gx-filter-controls" aria-label="筛选渠道">
             <Filter label="服务商" values={availableProviders} selected={providers} onChange={setProviders} />
-            <Filter label="状态" values={["健康", "待检测", "待配置密钥", "延迟异常", "不可用", "自动停用", "已停用"]} selected={statuses} onChange={setStatuses} />
+            <Filter label="状态" values={["健康", "待检测", "待配置密钥", "延迟异常", "不可用", "自动停用", "冷却中", "等待恢复", "已停用", "已归档"]} selected={statuses} onChange={setStatuses} />
             <Filter label="模型" values={models} selected={filterModels} onChange={setFilterModels} />
             <Popover isOpen={tagFilterOpen} onOpenChange={setTagFilterOpen}>
               <Button variant="secondary" size="sm" className={filterTags.length || untaggedOnly ? "gx-filter-trigger is-active" : "gx-filter-trigger"}>
@@ -774,6 +812,12 @@ export default function ChannelManager({
                       show,
                       colSpan: 4 + visibleColumns.length,
                       busy,
+                      resetHealth: () => {
+                        void perform(async () => {
+                          const result = await api<{ channel: GatewayChannel }>(`/api/channels/${encodeURIComponent(channel.id)}/reset-health`, { method: "POST" });
+                          setChannels((old) => old.map((item) => item.id === channel.id ? result.channel : item));
+                        }, "冷却和健康异常已清除，渠道已恢复参与路由，等待重新检测");
+                      },
                       toggleEnabled: () => {
                         void perform(
                           () =>
@@ -1210,6 +1254,7 @@ function ChannelRows({
   show,
   colSpan,
   busy,
+  resetHealth,
   toggleEnabled,
   onEdit,
   refresh,
@@ -1224,14 +1269,12 @@ function ChannelRows({
   show: (column: Column) => boolean;
   colSpan: number;
   busy: boolean;
+  resetHealth: () => void;
   toggleEnabled: () => void;
   onEdit: (channel: GatewayChannel) => void;
   refresh: () => Promise<void>;
   onPlayground?: (channelId?: string) => void;
 }) {
-  const missingCredential = channel.config.protocol !== "mock" && channel.credentialCount === 0;
-  const healthLabel = channelStatusLabel(channel);
-  const healthColor = !channel.enabled ? "default" : channel.health.autoDisabled || missingCredential ? "warning" : channel.health.samples === 0 && channel.config.protocol !== "mock" ? "default" : channel.status === "healthy" ? "success" : channel.status === "degraded" ? "warning" : "danger";
   const rows = [
     <Table.Row
       key={channel.id}
@@ -1269,6 +1312,7 @@ function ChannelRows({
           <div className="gx-channel-info">
             <strong className="gx-channel-title" title={channel.name}>{channel.name}</strong>
             {!show("provider") && <small className="gx-provider-subtitle" title={channel.provider}>{channel.provider}</small>}
+            {!show("health") && <ChannelHealthSummary channel={channel} busy={busy} resetHealth={resetHealth} compact />}
             {['newapi', 'sub2api'].includes(channel.config.integration ?? '') && <div className="gx-name-meta">
               <div className="gx-account-summary">
                 <span className="gx-balance-provider" title={`${channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'} 余额监控`}>{channel.config.integration === 'newapi' ? 'NewAPI' : 'Sub2API'}</span>
@@ -1291,8 +1335,7 @@ function ChannelRows({
       )}
       {show("health") && (
         <Table.Cell className="gx-health-cell">
-          <div className="gx-health-summary"><div className={`gx-health-status gx-health-${healthColor}`} title={channel.health.reason ?? undefined}><i aria-hidden="true" />{healthLabel}</div><span className="gx-health-latency" title="平均首字耗时（TTFT）">首字 {channel.health.averageTtft != null ? `${channel.health.averageTtft.toFixed(2)} s` : "—"}</span></div>
-          <HealthHistory channel={channel} />
+          <ChannelHealthSummary channel={channel} busy={busy} resetHealth={resetHealth} />
         </Table.Cell>
       )}
       {show("models") && (
@@ -1380,7 +1423,7 @@ function ChannelRows({
             </div>
             <div>
               <small>健康判定</small>
-              <strong>{channel.health.reason || "暂无异常记录"}</strong>
+              <strong>{channelStatusLabel(channel)} · {channelHealthView(channel).reason}</strong>
               <HealthHistory channel={channel} />
               <small>
                 {channel.health.samples} 个样本 · 失败{" "}

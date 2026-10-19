@@ -201,33 +201,38 @@ export class Store implements GatewayStore {
     }
     const c = await this.getChannel(clean.channelId); if (!c) return;
     const s = await this.getSettings(); const recent = await this.getRecentAttempts(c.id,clean.stream,s.window,s.windowSeconds);
-    const matchingRecoveryMode = c.health.reason?.includes('首字') ? clean.stream : c.health.reason?.includes('响应耗时') ? !clean.stream : true;
-    const allowRecovery = c.health.autoDisabled ? (c.config.autoDisable.enabled ? c.config.autoDisable.recover : s.autoDisableRecover) : s.autoRecover;
-    const decision = evaluateHealth(c,{ ...s,autoRecover:allowRecovery && matchingRecoveryMode },recent,clean);
-    if (decision.status === 'healthy' && c.status !== 'healthy') {
-      await this.env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind(`health-window:${c.id}:${clean.stream ? 1 : 0}`,clean.startedAt).run();
-      decision.patch.samples = 1; if (clean.stream) decision.patch.averageTtft = clean.ttft; else decision.patch.averageDuration = clean.duration;
-    }
-    if (decision.status === 'healthy' && c.health.autoDisabled) decision.patch.autoDisabled = false;
-    await this.updateHealth(c.id,decision.patch,decision.status);
-    if (decision.event) await this.recordEvent(decision.event);
-    const cred = clean.credentialId ? await this.env.DB.prepare('SELECT failure_count,recovery_count,enabled,disabled_at,reason FROM credentials WHERE id=? AND channel_id=?').bind(clean.credentialId,c.id).first<CredRow>() : null;
-    const target = autoDisableDecision(c,s,clean.status,0,Date.now()).target;
-    const channelFailures = target === 'channel' ? await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=?').bind('auto-disable:'+c.id).first<{ value:string }>() : null;
-    const prior = target === 'key' ? cred?.failure_count ?? 0 : Number(channelFailures?.value ?? 0);
-    const ad = autoDisableDecision(c,s,clean.status,prior,Date.now());
-    if (target === 'channel') await this.env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('auto-disable:'+c.id,String(ad.failureCount)).run();
-    if (clean.credentialId && cred && !cred.enabled) {
-      if (credentialRecoveryAllowed(c,s,{ enabled:false,reason:cred.reason,disabledAt:cred.disabled_at })) {
-        const recovery = clean.result === 'success' ? cred.recovery_count+1 : 0;
-        const recovered = recovery >= s.recovery;
-        // A concurrent manual disable clears reason/disabled_at, so it wins even
-        // when an already-running automatic recovery probe has just succeeded.
-        await this.env.DB.prepare('UPDATE credentials SET recovery_count=?,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=0 AND reason IS NOT NULL AND disabled_at<=?').bind(recovery,ad.failureCount,recovered ? 1 : 0,recovered ? null : cred.disabled_at,recovered ? null : cred.reason,clean.credentialId,now()).run();
+    const reset = await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=?').bind('health-reset:'+c.id).first<{ value:string }>();
+    // Requests that began before a manual reset still count toward statistics,
+    // but cannot immediately restore the isolation or old failure streak.
+    if (!reset || clean.startedAt > reset.value) {
+      const matchingRecoveryMode = c.health.reason?.includes('首字') ? clean.stream : c.health.reason?.includes('响应耗时') ? !clean.stream : true;
+      const allowRecovery = c.health.autoDisabled ? (c.config.autoDisable.enabled ? c.config.autoDisable.recover : s.autoDisableRecover) : s.autoRecover;
+      const decision = evaluateHealth(c,{ ...s,autoRecover:allowRecovery && matchingRecoveryMode },recent,clean);
+      if (decision.status === 'healthy' && c.status !== 'healthy') {
+        await this.env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind(`health-window:${c.id}:${clean.stream ? 1 : 0}`,clean.startedAt).run();
+        decision.patch.samples = 1; if (clean.stream) decision.patch.averageTtft = clean.ttft; else decision.patch.averageDuration = clean.duration;
       }
-    } else if (ad.target === 'key' && clean.credentialId && cred) {
-      await this.env.DB.prepare('UPDATE credentials SET recovery_count=0,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=1').bind(ad.failureCount,ad.disable ? 0 : 1,ad.disable ? ad.cooldownUntil : null,ad.disable ? `HTTP ${clean.status}` : null,clean.credentialId).run();
-    } else if (ad.disable) { await this.updateHealth(c.id,{ autoDisabled: true,cooldownUntil: ad.cooldownUntil,reason: `HTTP ${clean.status}`,failureCount:ad.failureCount },'offline'); }
+      if (decision.status === 'healthy' && c.health.autoDisabled) decision.patch.autoDisabled = false;
+      await this.updateHealth(c.id,decision.patch,decision.status);
+      if (decision.event) await this.recordEvent(decision.event);
+      const cred = clean.credentialId ? await this.env.DB.prepare('SELECT failure_count,recovery_count,enabled,disabled_at,reason FROM credentials WHERE id=? AND channel_id=?').bind(clean.credentialId,c.id).first<CredRow>() : null;
+      const target = autoDisableDecision(c,s,clean.status,0,Date.now()).target;
+      const channelFailures = target === 'channel' ? await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=?').bind('auto-disable:'+c.id).first<{ value:string }>() : null;
+      const prior = target === 'key' ? cred?.failure_count ?? 0 : Number(channelFailures?.value ?? 0);
+      const ad = autoDisableDecision(c,s,clean.status,prior,Date.now());
+      if (target === 'channel') await this.env.DB.prepare('INSERT INTO gateway_state(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind('auto-disable:'+c.id,String(ad.failureCount)).run();
+      if (clean.credentialId && cred && !cred.enabled) {
+        if (credentialRecoveryAllowed(c,s,{ enabled:false,reason:cred.reason,disabledAt:cred.disabled_at })) {
+          const recovery = clean.result === 'success' ? cred.recovery_count+1 : 0;
+          const recovered = recovery >= s.recovery;
+          // A concurrent manual disable clears reason/disabled_at, so it wins even
+          // when an already-running automatic recovery probe has just succeeded.
+          await this.env.DB.prepare('UPDATE credentials SET recovery_count=?,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=0 AND reason IS NOT NULL AND disabled_at<=?').bind(recovery,ad.failureCount,recovered ? 1 : 0,recovered ? null : cred.disabled_at,recovered ? null : cred.reason,clean.credentialId,now()).run();
+        }
+      } else if (ad.target === 'key' && clean.credentialId && cred) {
+        await this.env.DB.prepare('UPDATE credentials SET recovery_count=0,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=1').bind(ad.failureCount,ad.disable ? 0 : 1,ad.disable ? ad.cooldownUntil : null,ad.disable ? `HTTP ${clean.status}` : null,clean.credentialId).run();
+      } else if (ad.disable) { await this.updateHealth(c.id,{ autoDisabled: true,cooldownUntil: ad.cooldownUntil,reason: `HTTP ${clean.status}`,failureCount:ad.failureCount },'offline'); }
+    }
     for (let retry = 0; retry < 5; retry++) {
       const stored = await this.env.DB.prepare('SELECT data,health_version FROM channels WHERE id=?').bind(c.id).first<DataRow>();
       if (!stored) return;
@@ -241,7 +246,26 @@ export class Store implements GatewayStore {
   }
   async recordLog(log: GatewayLog): Promise<void> { const clean = { ...log,error: redact(log.error) }; await this.env.DB.prepare('INSERT OR REPLACE INTO request_logs(id,created_at,channel_id,result,source,model,data) VALUES(?,?,?,?,?,?,?)').bind(log.id,log.createdAt,log.channelId,log.result,log.source,log.model,JSON.stringify(clean)).run(); }
   async recordEvent(event: GatewayEvent): Promise<void> { const clean = { ...event,description: redact(event.description) ?? '' }; await this.env.DB.prepare('INSERT OR REPLACE INTO events(id,created_at,data) VALUES(?,?,?)').bind(clean.id,clean.createdAt,JSON.stringify(clean)).run(); }
-  async getRecentAttempts(channelId: string, stream: boolean, limit: number, seconds = 0): Promise<AttemptRecord[]> { const epoch = await this.env.DB.prepare('SELECT value FROM gateway_state WHERE id=?').bind(`health-window:${channelId}:${stream ? 1 : 0}`).first<{ value:string }>(); const timeSince = seconds ? new Date(Date.now()-seconds*1000).toISOString() : ''; const since = epoch && epoch.value > timeSince ? epoch.value : timeSince; const rows = await this.env.DB.prepare("SELECT data FROM attempts WHERE channel_id=? AND stream=? AND started_at>=? AND json_extract(data,'$.result')<>'cancelled' ORDER BY started_at DESC,rowid DESC LIMIT ?").bind(channelId,stream ? 1 : 0,since,Math.min(1000,limit)).all<DataRow>(); return rows.results.map(r => decode<AttemptRecord>(r)); }
+  async getRecentAttempts(channelId: string, stream: boolean, limit: number, seconds = 0): Promise<AttemptRecord[]> {
+    const epochs = await this.env.DB.prepare('SELECT (SELECT value FROM gateway_state WHERE id=?) AS window,(SELECT value FROM gateway_state WHERE id=?) AS reset').bind(`health-window:${channelId}:${stream ? 1 : 0}`,'health-reset:'+channelId).first<{ window:string|null;reset:string|null }>();
+    const timeSince = seconds ? new Date(Date.now()-seconds*1000).toISOString() : ''; const since = epochs?.window && epochs.window > timeSince ? epochs.window : timeSince;
+    const rows = await this.env.DB.prepare("SELECT data FROM attempts WHERE channel_id=? AND stream=? AND started_at>=? AND started_at>? AND json_extract(data,'$.result')<>'cancelled' ORDER BY started_at DESC,rowid DESC LIMIT ?").bind(channelId,stream ? 1 : 0,since,epochs?.reset ?? '',Math.min(1000,limit)).all<DataRow>();
+    return rows.results.map(r => decode<AttemptRecord>(r));
+  }
+  async resetChannelHealth(channelId: string): Promise<void> {
+    if (this.coordinate) { await this.coordinated('reset-health',{ channelId }); return; }
+    const channel = await this.getChannel(channelId); if (!channel) return;
+    const resetAt = now();
+    const health: GatewayChannel['health'] = { averageTtft:null,averageDuration:null,samples:0,cooldownUntil:null,recoveryCount:0,failureCount:0,reason:null,autoDisabled:false };
+    // Atomic SQL updates preserve concurrent configuration edits and all history.
+    // Both response modes and channel-level HTTP failure streaks start fresh.
+    const result = await this.env.DB.batch([
+      this.env.DB.prepare("UPDATE channels SET data=json_set(data,'$.health',json(?),'$.status','healthy'),health_version=health_version+1 WHERE id=?").bind(JSON.stringify(health),channelId),
+      ...[`health-window:${channelId}:0`,`health-window:${channelId}:1`,'health-reset:'+channelId].map(id => this.env.DB.prepare('INSERT INTO gateway_state(id,value) SELECT ?,? WHERE EXISTS (SELECT 1 FROM channels WHERE id=?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').bind(id,resetAt,channelId)),
+      this.env.DB.prepare('DELETE FROM gateway_state WHERE id=?').bind('auto-disable:'+channelId),
+    ]);
+    if (result[0].meta.changes) await this.recordEvent({ id:crypto.randomUUID(),createdAt:resetAt,time:new Date(resetAt).toLocaleTimeString('zh-CN',{ timeZone:'Asia/Shanghai',hour12:false }),title:'渠道健康状态已重置',description:`${channel.name}：管理员已解除健康隔离并清空检测窗口`,type:'recovery',channelId });
+  }
   async updateHealth(channelId: string, patch: Partial<GatewayChannel['health']>, status?: GatewayChannel['status']): Promise<void> {
     if (this.coordinate) { await this.coordinated('health',{ channelId,patch,status }); return; }
     for (let retry = 0; retry < 5; retry++) { const row = await this.env.DB.prepare('SELECT data,health_version FROM channels WHERE id=?').bind(channelId).first<DataRow>(); if (!row) return; const c = decode<GatewayChannel>(row); c.health = { ...c.health,...patch }; if (status) c.status = status; const result = await this.env.DB.prepare('UPDATE channels SET data=?,health_version=health_version+1 WHERE id=? AND health_version=?').bind(JSON.stringify(c),channelId,row.health_version!).run(); if (result.meta.changes) return; } throw new Error('Health update conflict');
