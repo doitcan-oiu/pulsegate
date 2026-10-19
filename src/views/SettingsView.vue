@@ -15,15 +15,16 @@ function selectRouting(section: typeof routingSection.value) { routingSection.va
 
 <template>
   <div class="settings-workbench">
-    <aside class="settings-navigation"><v-list nav density="comfortable" bg-color="transparent" aria-label="设置分区"><v-list-subheader>接入与运行</v-list-subheader><v-list-item tag="button" role="button" :tabindex="0" v-for="item in connectionItems" :key="item.id" :title="item.title" :prepend-icon="item.icon" :active="selected === item.id" color="primary" :aria-current="selected === item.id ? 'page' : undefined" @click="selectConnection(item.id)" /><v-divider class="my-4" /><v-list-subheader>调度与健康</v-list-subheader><v-list-item tag="button" role="button" :tabindex="0" v-for="item in routingItems" :key="item.id" :title="item.title" :prepend-icon="item.icon" :active="selected === item.id" color="primary" :aria-current="selected === item.id ? 'page' : undefined" @click="selectRouting(item.id)" /></v-list><p class="text-caption text-medium-emphasis px-4 mt-5">配置按分组保存。切换分区会保留未保存的更改。</p></aside>
+    <aside class="settings-navigation"><v-list nav density="compact" bg-color="transparent" aria-label="设置分区"><v-list-subheader>接入与运行</v-list-subheader><v-list-item tag="button" role="button" :tabindex="0" v-for="item in connectionItems" :key="item.id" :title="item.title" :prepend-icon="item.icon" :active="selected === item.id" color="primary" :aria-current="selected === item.id ? 'page' : undefined" @click="selectConnection(item.id)" /><v-divider class="my-4" /><v-list-subheader>调度与健康</v-list-subheader><v-list-item tag="button" role="button" :tabindex="0" v-for="item in routingItems" :key="item.id" :title="item.title" :prepend-icon="item.icon" :active="selected === item.id" color="primary" :aria-current="selected === item.id ? 'page' : undefined" @click="selectRouting(item.id)" /></v-list><p class="text-caption text-medium-emphasis px-4 mt-5">配置按分组保存。切换分区会保留未保存的更改。</p></aside>
     <div class="settings-content"><section v-show="settingsTab === 'connection'" aria-label="接入与运行设置"><ConnectionSettings :section="connectionSection" @section="connectionSection = $event" /></section><section v-show="settingsTab === 'routing'" aria-label="调度与健康设置"><RoutingSettings :active-section="routingSection" @section="routingSection = $event" /></section></div>
   </div>
 </template>
 
 <style scoped>
-.settings-workbench { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 40px; align-items: start; min-width: 0; }
+.settings-workbench { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 24px; align-items: start; min-width: 0; }
 .settings-navigation { position: sticky; top: calc(var(--workspace-sticky-top, 110px) + 16px); }
 .settings-navigation :deep(.v-list-item) { width: 100%; margin-bottom: 3px; text-align: left; }
+.settings-navigation :deep(.v-list-item__prepend > .v-icon) { font-size: 18px; margin-inline-end: 12px; }
 .settings-content { min-width: 0; max-width: 1080px; }
 @media (max-width: 800px) { .settings-workbench { grid-template-columns: minmax(0, 1fr); gap: 20px; } .settings-navigation { position: static; } .settings-navigation :deep(.v-list) { display: flex; overflow-x: auto; gap: 6px; padding: 0 0 8px; } .settings-navigation :deep(.v-list-item) { flex: 0 0 auto; width: auto; min-height: 42px; } .settings-navigation :deep(.v-list-subheader), .settings-navigation :deep(.v-divider), .settings-navigation > p { display: none; } }
 </style>

@@ -17,9 +17,9 @@ const sanitize = (value: string) => value.replace(/\bBearer\s+[^\s"']+/gi, 'Bear
   </div>
 </template>
 <style scoped>
-.test-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; padding: 20px; background: rgba(var(--v-theme-on-surface), .035); border-radius: 4px; }
-.test-metrics > div { display: flex; flex-direction: column; gap: 7px; }
+.test-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 12px; background: rgba(var(--v-theme-on-surface), .035); border-radius: 4px; }
+.test-metrics > div { display: flex; flex-direction: column; gap: 4px; }
 .test-metrics span { font-size: 12px; color: rgba(var(--v-theme-on-surface), .6); }
-.test-metrics strong { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
-@media (max-width: 600px) { .test-metrics { gap: 12px; padding: 16px; } .test-metrics strong { font-size: 16px; } }
+.test-metrics strong { font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) { .test-metrics { gap: 10px; } .test-metrics strong { font-size: 16px; } }
 </style>

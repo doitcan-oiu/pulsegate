@@ -79,7 +79,7 @@ async function save() {
 <template>
   <v-dialog :model-value="true" :aria-label="keyRecord ? '编辑 API Key' : '创建 API Key'" persistent scrollable max-width="880" @keydown.esc="close">
     <v-card>
-      <v-card-title class="d-flex align-center px-6 pt-5"><span>{{ keyRecord ? '编辑 API Key' : '创建 API Key' }}</span><v-spacer /><v-btn icon="mdi-close" variant="text" size="small" aria-label="关闭编辑" :disabled="busy" @click="close" /></v-card-title>
+      <v-card-title class="d-flex align-center px-5 pt-4"><span>{{ keyRecord ? '编辑 API Key' : '创建 API Key' }}</span><v-spacer /><v-btn icon="mdi-close" variant="text" size="small" aria-label="关闭编辑" :disabled="busy" @click="close" /></v-card-title>
       <v-tabs v-model="editorSection" color="primary" class="px-4 mt-2" grow><v-tab value="identity">应用信息</v-tab><v-tab value="permissions">访问策略</v-tab><v-tab value="preview">授权预览</v-tab></v-tabs><v-divider />
       <v-card-text class="pt-4">
         <v-form :id="formId" :disabled="busy" @submit.prevent="save">
@@ -103,7 +103,7 @@ async function save() {
         </v-form>
         <v-alert v-if="error" type="error" variant="tonal" density="compact" class="mt-4" role="alert">{{ error }}</v-alert>
       </v-card-text>
-      <v-divider /><v-card-actions class="px-6 py-4"><span class="text-caption text-medium-emphasis">{{ dirty ? '有未保存的更改' : '仅当前生效策略参与请求授权' }}</span><v-spacer /><v-btn variant="text" :disabled="busy" @click="close">取消</v-btn><v-btn color="primary" variant="flat" type="submit" :form="formId" :loading="busy" :disabled="busy">{{ keyRecord ? '保存配置' : '创建 API Key' }}</v-btn></v-card-actions>
+      <v-divider /><v-card-actions class="px-5 py-3"><span class="text-caption text-medium-emphasis">{{ dirty ? '有未保存的更改' : '仅当前生效策略参与请求授权' }}</span><v-spacer /><v-btn variant="text" :disabled="busy" @click="close">取消</v-btn><v-btn color="primary" variant="flat" type="submit" :form="formId" :loading="busy" :disabled="busy">{{ keyRecord ? '保存配置' : '创建 API Key' }}</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
   <v-dialog v-model="discard" aria-label="放弃未保存的更改" max-width="420" persistent><v-card title="放弃更改？" text="未保存的配置将丢失。"><v-card-actions><v-spacer /><v-btn @click="discard = false">继续编辑</v-btn><v-btn color="error" @click="emit('close')">放弃更改</v-btn></v-card-actions></v-card></v-dialog>
@@ -112,9 +112,9 @@ async function save() {
 <style scoped>
 .editor-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
 .editor-section { padding: 8px 0 12px; }
-.editor-fields :deep(.v-row) { margin: 0; --v-col-gap-y: 24px; row-gap: 24px; }
+.editor-fields :deep(.v-row) { margin: 0; --v-col-gap-y: 16px; row-gap: 16px; }
 .profile-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .profile-tools > .v-input { flex: 1; min-width: 180px; }
-.mapping-row { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(170px, 1.2fr) 32px; gap: 12px; align-items: start; margin-bottom: 16px; }
+.mapping-row { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(170px, 1.2fr) 32px; gap: 10px; align-items: start; margin-bottom: 12px; }
 @media (max-width: 600px) { .mapping-row { grid-template-columns: minmax(0, 1fr) 32px; } .mapping-row > :nth-child(2) { grid-column: 1; } .mapping-row > :last-child { grid-column: 2; grid-row: 1; } }
 </style>

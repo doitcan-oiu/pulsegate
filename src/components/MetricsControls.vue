@@ -17,10 +17,10 @@ const ranges = [
 </template>
 
 <style scoped>
-.metrics-controls { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.metrics-range { width: 156px; min-width: 142px; flex: 0 0 156px; }
+.metrics-controls { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.metrics-range { width: 140px; min-width: 132px; flex: 0 0 140px; }
 .metrics-updated { font-size: 12px; color: rgba(var(--v-theme-on-surface), .45); white-space: nowrap; }
 .metrics-controls > .v-btn { flex: 0 0 auto; }
 @media (max-width: 1250px) { .metrics-updated { display: none; } }
-@media (max-width: 600px) { .metrics-range { width: 145px; flex-basis: 145px; } }
+@media (max-width: 600px) { .metrics-range { width: 132px; flex-basis: 132px; } }
 </style>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { useDisplay } from 'vuetify';
 import type { GatewayChannel } from '../../shared/types';
 import { api } from '../api';
 import { channelHealthView, matchesChannelHealthStatus } from '../channel-health';
@@ -12,6 +13,7 @@ import ChannelManagement from '../components/channels/ChannelManagement.vue';
 import ChannelHealth from '../components/channels/ChannelHealth.vue';
 import ChannelTagFilter from '../components/channels/ChannelTagFilter.vue';
 const { channels, tags, session, channelToEdit, editChannel, openPlayground, navigate, refresh, loading, notify } = useConsole();
+const { mdAndUp } = useDisplay();
 const columns = [{ key: 'priority', title: '优先级' }, { key: 'enabled', title: '启用' }, { key: 'health', title: '健康 / 首字' }, { key: 'models', title: '支持的模型' }, { key: 'tags', title: '标签' }, { key: 'provider', title: '服务商' }, { key: 'weight', title: '权重' }, { key: 'createdAt', title: '创建时间' }];
 const defaults = ['enabled', 'health', 'models'];
 function savedView() {
@@ -91,6 +93,10 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
 
 <template>
   <div>
+    <div class="channels-layout">
+      <aside v-if="mdAndUp" class="channel-tag-sidebar" aria-label="渠道标签筛选">
+        <ChannelTagFilter :tags="allTags" :channels="scopedChannels" v-model:selected="filterTags" v-model:untagged="untagged" @manage="openManagement('tags')" />
+      </aside>
     <v-card border variant="flat" class="channel-workspace">
       <div class="channel-list-summary" aria-label="渠道列表概况">
         <h2>渠道列表</h2>
@@ -105,6 +111,10 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
       <div class="channel-toolbar">
         <v-tabs v-model="archive" color="primary" density="compact" class="channel-view-tabs"><v-tab :value="false">使用中 <span class="view-count">{{ activeChannels.length }}</span></v-tab><v-tab :value="true">已归档 <span class="view-count">{{ channels.length - activeChannels.length }}</span></v-tab></v-tabs>
         <v-text-field v-model="query" placeholder="搜索渠道、模型或端点" aria-label="搜索渠道" prepend-inner-icon="mdi-magnify" variant="solo-filled" density="compact" hide-details clearable flat class="channel-search" />
+        <v-menu v-if="!mdAndUp" v-model="tagOpen" :close-on-content-click="false" :max-width="'calc(100vw - 32px)'">
+          <template #activator="{ props: tagProps }"><v-btn v-bind="tagProps" :variant="filterTags.length || untagged ? 'tonal' : 'text'" :color="filterTags.length || untagged ? 'primary' : undefined" prepend-icon="mdi-file-tree-outline">标签树<span v-if="filterTags.length || untagged" class="filter-count">{{ untagged ? '未分组' : filterTags.length }}</span></v-btn></template>
+          <div class="mobile-tag-panel"><ChannelTagFilter :tags="allTags" :channels="scopedChannels" v-model:selected="filterTags" v-model:untagged="untagged" @manage="tagOpen = false; openManagement('tags')" /></div>
+        </v-menu>
         <v-btn :variant="filtersOpen || filterCount ? 'tonal' : 'text'" :color="filtersOpen || filterCount ? 'primary' : undefined" prepend-icon="mdi-filter-variant" :append-icon="filtersOpen ? 'mdi-chevron-up' : 'mdi-chevron-down'" :aria-expanded="filtersOpen" @click="filtersOpen = !filtersOpen">筛选<span v-if="filterCount" class="filter-count">{{ filterCount }}</span></v-btn>
         <v-btn icon="mdi-table-column" variant="text" size="small" aria-label="显示列与分页设置" title="显示列" @click="columnDialog = true" />
         <v-btn icon="mdi-refresh" variant="text" size="small" :loading="loading" :disabled="busy" aria-label="刷新渠道列表" title="刷新渠道列表" @click="refresh()" />
@@ -115,7 +125,6 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
           <v-select v-model="providers" :items="allProviders" label="服务商" multiple density="compact" hide-details clearable />
           <v-select v-model="statuses" :items="stateItems" label="健康状态" multiple density="compact" hide-details clearable />
           <v-autocomplete v-model="filterModels" :items="allModels" label="模型" multiple density="compact" hide-details clearable />
-          <v-menu v-model="tagOpen" :close-on-content-click="false"><template #activator="{ props: tagProps }"><v-btn v-bind="tagProps" variant="tonal" height="40" prepend-icon="mdi-tag-outline" append-icon="mdi-chevron-down" :color="filterTags.length || untagged ? 'primary' : undefined">标签{{ filterTags.length ? ` · ${filterTags.length}` : untagged ? ' · 未分组' : '' }}</v-btn></template><ChannelTagFilter :tags="allTags" :channels="scopedChannels" v-model:selected="filterTags" v-model:untagged="untagged" @manage="tagOpen = false; openManagement('tags')" /></v-menu>
         </div>
       </v-expand-transition>
       <div v-if="filterCount" class="applied-filters">
@@ -136,11 +145,12 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
           <td v-if="show('models')"><div class="d-flex flex-column align-start ga-1"><code v-for="model in expandedModels.includes(channel.id) ? channel.models : channel.models.slice(0, 2)" :key="model" class="model-name" :title="model">{{ model }}</code><v-btn v-if="channel.models.length > 2" variant="text" size="x-small" color="primary" @click="expandedModels = expandedModels.includes(channel.id) ? expandedModels.filter(id => id !== channel.id) : [...expandedModels, channel.id]">{{ expandedModels.includes(channel.id) ? '收起' : `+${channel.models.length - 2}` }}</v-btn></div></td>
           <td v-if="show('tags')"><div class="d-flex ga-1 flex-wrap tag-cell"><v-chip v-for="tag in channel.tags" :key="tag" size="x-small" variant="tonal">{{ tag }}</v-chip><span v-if="!channel.tags.length" class="text-medium-emphasis">—</span></div></td><td v-if="show('provider')">{{ channel.provider }}</td><td v-if="show('weight')">{{ channel.weight }}</td><td v-if="show('createdAt')" class="text-caption">{{ dateTime(channel.createdAt).split(' ')[0] }}</td>
           <td class="action-column"><div class="d-flex justify-end"><v-btn icon="mdi-pencil-outline" variant="text" size="small" :disabled="busy" :aria-label="`编辑 ${channel.name}`" @click="editChannel(channel)" /><v-btn icon="mdi-play-outline" variant="text" size="small" :disabled="busy" :aria-label="`测试 ${channel.name}`" @click="openPlayground(channel.id)" /><v-menu><template #activator="{ props: actionProps }"><v-btn v-bind="actionProps" icon="mdi-dots-vertical" variant="text" size="small" :disabled="busy" :aria-label="`${channel.name} 更多操作`" /></template><v-list density="compact"><v-list-item v-for="item in menuItems" :key="item.panel" :title="item.panel === 'archive' ? channel.archived ? '恢复渠道' : '归档渠道' : item.title" :prepend-icon="item.icon" :base-color="item.panel === 'delete' ? 'error' : undefined" @click="act(channel, item.panel)" /></v-list></v-menu></div></td></tr>
-          <tr v-if="expanded.includes(channel.id)"><td :colspan="4 + displayedColumns.length" class="detail-cell"><v-row class="py-4"><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">上游端点</span><code class="d-block text-break">{{ channel.endpoint }}</code><p class="text-caption mt-2">{{ channel.config.protocol }} · {{ channel.config.gatewayMode === 'ai-gateway' ? 'Cloudflare AI Gateway' : channel.config.relayUrl ? 'HTTPS 中继' : '直连' }}</p></v-col><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">模型别名</span><div v-for="alias in channel.config.aliases" :key="alias.from" class="text-body-2">{{ alias.from }} → {{ alias.to }}</div><div v-if="!channel.config.aliases.length" class="text-body-2">未配置</div><p class="text-caption mt-2">{{ channel.credentialCount }} 个密钥 · 优先级 {{ channel.priority }}</p></v-col><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">健康判定</span><p class="text-body-2">{{ channelHealthView(channel, now).reason }}</p><p class="text-caption mt-2">样本 {{ channel.health.samples }} · 失败 {{ channel.health.failureCount }} · 恢复 {{ channel.health.recoveryCount }}</p></v-col><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">请求统计</span><p>{{ count(channel.requests) }} 次 · 成功率 {{ channel.successRate.toFixed(1) }}%</p><p class="text-caption mt-2">平均完成 {{ seconds(channel.health.averageDuration) }}</p></v-col></v-row></td></tr>
-        </template><tr v-if="!shown.length"><td :colspan="4 + displayedColumns.length" class="text-center py-12"><v-icon size="40" color="secondary">{{ archive ? 'mdi-archive-outline' : 'mdi-server-outline' }}</v-icon><p class="text-body-1 mt-3">{{ activeFilters ? '没有符合条件的渠道' : archive ? '暂无归档渠道' : '还没有渠道' }}</p><v-btn v-if="activeFilters" variant="text" color="primary" @click="clearFilters">清除筛选</v-btn><v-btn v-else-if="!archive" color="primary" class="mt-4" @click="editChannel('new')">添加第一个渠道</v-btn></td></tr></tbody>
+          <tr v-if="expanded.includes(channel.id)"><td :colspan="4 + displayedColumns.length" class="detail-cell"><v-row class="py-3"><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">上游端点</span><code class="d-block text-break">{{ channel.endpoint }}</code><p class="text-caption mt-2">{{ channel.config.protocol }} · {{ channel.config.gatewayMode === 'ai-gateway' ? 'Cloudflare AI Gateway' : channel.config.relayUrl ? 'HTTPS 中继' : '直连' }}</p></v-col><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">模型别名</span><div v-for="alias in channel.config.aliases" :key="alias.from" class="text-body-2">{{ alias.from }} → {{ alias.to }}</div><div v-if="!channel.config.aliases.length" class="text-body-2">未配置</div><p class="text-caption mt-2">{{ channel.credentialCount }} 个密钥 · 优先级 {{ channel.priority }}</p></v-col><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">健康判定</span><p class="text-body-2">{{ channelHealthView(channel, now).reason }}</p><p class="text-caption mt-2">样本 {{ channel.health.samples }} · 失败 {{ channel.health.failureCount }} · 恢复 {{ channel.health.recoveryCount }}</p></v-col><v-col cols="12" md="3"><span class="text-caption text-medium-emphasis">请求统计</span><p>{{ count(channel.requests) }} 次 · 成功率 {{ channel.successRate.toFixed(1) }}%</p><p class="text-caption mt-2">平均完成 {{ seconds(channel.health.averageDuration) }}</p></v-col></v-row></td></tr>
+        </template><tr v-if="!shown.length"><td :colspan="4 + displayedColumns.length" class="text-center py-8"><v-icon size="24" color="secondary">{{ archive ? 'mdi-archive-outline' : 'mdi-server-outline' }}</v-icon><p class="text-body-2 mt-2">{{ activeFilters ? '没有符合条件的渠道' : archive ? '暂无归档渠道' : '还没有渠道' }}</p><v-btn v-if="activeFilters" variant="text" color="primary" @click="clearFilters">清除筛选</v-btn><v-btn v-else-if="!archive" color="primary" class="mt-4" @click="editChannel('new')">添加第一个渠道</v-btn></td></tr></tbody>
       </v-table>
-      <v-divider /><div class="d-flex align-center flex-wrap ga-4 pa-4"><span class="text-caption text-medium-emphasis">共 {{ filtered.length }} 个渠道{{ selected.length ? ` · 已选 ${selected.length}` : '' }}</span><v-spacer /><v-select v-model="pageSize" :items="[10, 20, 50, 100]" label="每页" density="compact" hide-details class="page-size" /><v-pagination v-model="page" :length="pageCount" :total-visible="5" density="compact" show-first-last-page /></div>
+      <v-divider /><div class="d-flex align-center flex-wrap ga-3 pa-3"><span class="text-caption text-medium-emphasis">共 {{ filtered.length }} 个渠道{{ selected.length ? ` · 已选 ${selected.length}` : '' }}</span><v-spacer /><v-select v-model="pageSize" :items="[10, 20, 50, 100]" label="每页" density="compact" hide-details class="page-size" /><v-pagination v-model="page" :length="pageCount" :total-visible="5" density="compact" show-first-last-page /></div>
     </v-card>
+    </div>
     <ChannelEditor v-if="editor" :key="editor === 'new' ? 'new' : editor.id" :channel="editor === 'new' ? undefined : editor" :tags="allTags" :dev-mode="session?.devMode" @close="editor = null" @saved="editorSaved" />
     <ChannelOperations v-if="operation" :key="`${operation.channel.id}-${operation.panel}`" :channel="operation.channel" :panel="operation.panel" @close="operation = null" />
     <ChannelManagement v-if="management" :key="management" :mode="management" :selected="selected" @close="management = null" @applied="selected = []" @tags-changed="syncTagFilters" />
@@ -150,26 +160,29 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
 </template>
 
 <style scoped>
-.channel-workspace { overflow: hidden; }
-.channel-list-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 12px 20px 4px; }
-.channel-list-summary h2 { margin-right: 4px; font-size: 15px; font-weight: 600; }
+.channels-layout { display: grid; grid-template-columns: 224px minmax(0, 1fr); align-items: start; gap: 16px; }
+.channel-tag-sidebar { position: sticky; top: calc(var(--workspace-sticky-top) + 24px); min-width: 0; }
+.channel-workspace { min-width: 0; overflow: hidden; }
+.mobile-tag-panel { width: 330px; max-width: calc(100vw - 32px); }
+.channel-list-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 8px 16px 2px; }
+.channel-list-summary h2 { margin-right: 4px; font-size: 14px; font-weight: 600; }
 .summary-total { color: rgba(var(--v-theme-on-surface), .68); font-variant-numeric: tabular-nums; }
 .summary-health { display: flex; align-items: center; gap: 4px; }
 .summary-health .v-btn { font-variant-numeric: tabular-nums; }
 .status-dot { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; }
 .summary-models { margin-left: auto; color: rgba(var(--v-theme-on-surface), .5); font-size: 12px; white-space: nowrap; }
 .summary-create { margin-left: 8px; }
-.channel-toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px 8px 0; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .1); }
+.channel-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 0; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .1); }
 .channel-view-tabs { flex: 0 0 auto; }
 .view-count { margin-left: 8px; opacity: .6; font-size: 12px; }
 .channel-search { flex: 1 1 280px; min-width: 160px; max-width: 400px; margin-left: auto; }
 .filter-count { margin-left: 7px; font-size: 12px; }
-.channel-filter-panel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 14px; padding: 18px 20px; background: rgba(var(--v-theme-on-surface), .025); border-bottom: 1px solid rgba(var(--v-theme-on-surface), .1); }
-.applied-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 12px 20px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .1); }
-.channel-bulk { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 20px; background: rgba(var(--v-theme-primary), .1); border-bottom: 1px solid rgba(var(--v-theme-primary), .2); }
+.channel-filter-panel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 12px 16px; background: rgba(var(--v-theme-on-surface), .025); border-bottom: 1px solid rgba(var(--v-theme-on-surface), .1); }
+.applied-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .1); }
+.channel-bulk { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 16px; background: rgba(var(--v-theme-primary), .1); border-bottom: 1px solid rgba(var(--v-theme-primary), .2); }
 .channel-table :deep(table) { min-width: 820px; }
-.channel-table th { padding: 12px; }
-.channel-table td { padding: 18px 12px; }
+.channel-table th { padding: 8px 10px; }
+.channel-table td { padding: 12px 10px; }
 .channel-table :deep(th) { background: rgba(var(--v-theme-on-surface), .035); white-space: nowrap; }
 .identity-column { min-width: 220px; max-width: 310px; }
 .identity-column > strong { overflow-wrap: anywhere; }
@@ -180,6 +193,7 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
 .detail-cell { background: rgba(var(--v-theme-on-surface), .03); }
 .selected-row { background: rgba(var(--v-theme-primary), .05); }
 .page-size { max-width: 90px; min-width: 80px; }
-@media (max-width: 1050px) { .channel-toolbar { flex-wrap: wrap; padding-left: 16px; } .channel-view-tabs { flex: 1 1 100%; } .channel-search { margin-left: 0; max-width: none; } }
-@media (max-width: 700px) { .channel-list-summary { gap: 4px; padding: 10px 12px 4px; } .channel-list-summary h2 { font-size: 14px; } .summary-create { order: 1; margin-left: auto; } .summary-health { order: 2; } .summary-models { order: 3; margin-left: auto; } .channel-search { flex-basis: 100%; max-width: none; } .channel-toolbar { gap: 8px; padding: 8px 12px 12px; } .channel-filter-panel { grid-template-columns: 1fr; padding: 16px; } }
+@media (max-width: 1280px) { .channel-toolbar { flex-wrap: wrap; padding-left: 12px; } .channel-view-tabs { flex: 1 1 100%; } .channel-search { margin-left: 0; max-width: none; } }
+@media (max-width: 959px) { .channels-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 700px) { .channel-list-summary { gap: 4px; padding: 8px 12px 2px; } .channel-list-summary h2 { font-size: 14px; } .summary-create { order: 1; margin-left: auto; } .summary-health { order: 2; } .summary-models { order: 3; margin-left: auto; } .channel-search { flex-basis: 100%; max-width: none; } .channel-toolbar { gap: 6px; padding: 6px 12px 8px; } .channel-filter-panel { grid-template-columns: 1fr; padding: 12px; } }
 </style>

@@ -51,12 +51,12 @@ const charts = computed<Plan[]>(() => {
 <template>
   <v-alert v-if="!analytics" type="info" variant="tonal">统计数据尚未加载，请刷新页面。</v-alert>
   <div v-else class="analytics-workspace">
-    <div class="analytics-tabbar"><v-tabs v-model="view" color="primary" density="comfortable"><v-tab value="traffic" prepend-icon="mdi-chart-line">流量与时延</v-tab><v-tab value="usage" prepend-icon="mdi-counter">Token 用量</v-tab><v-tab value="channels" prepend-icon="mdi-transit-connection-variant">渠道表现</v-tab></v-tabs><MetricsControls class="analytics-controls" /></div>
+    <div class="analytics-tabbar"><v-tabs v-model="view" color="primary" density="compact"><v-tab value="traffic" prepend-icon="mdi-chart-line">流量与时延</v-tab><v-tab value="usage" prepend-icon="mdi-counter">Token 用量</v-tab><v-tab value="channels" prepend-icon="mdi-transit-connection-variant">渠道表现</v-tab></v-tabs><MetricsControls class="analytics-controls" /></div>
     <div class="analytics-stage">
       <v-card v-if="charts[0]" variant="flat" border class="analytics-main-chart">
-        <v-card-title class="section-heading"><div><h2>{{ charts[0].title }}</h2><p>{{ charts[0].note }}</p></div><v-icon icon="mdi-chart-timeline-variant" color="primary" size="24" /></v-card-title>
+        <v-card-title class="section-heading"><div><h2>{{ charts[0].title }}</h2><p>{{ charts[0].note }}</p></div><v-icon icon="mdi-chart-timeline-variant" color="primary" size="18" /></v-card-title>
         <div class="chart-summary"><div v-for="(metric, index) in metrics.slice(0, 4)" :key="metric.title" :class="{ 'is-primary': index === 0 }"><span>{{ metric.title }}</span><strong>{{ metric.value }}</strong><small>{{ metric.detail }}</small></div></div>
-        <v-card-text><div v-if="!analytics.totals.requests" class="chart-empty is-main"><div class="empty-state"><v-icon icon="mdi-chart-line" size="34" color="primary" /><h3 class="mt-3">暂无业务请求数据</h3><p class="mt-2">在测试场发起请求后，可在这里查看性能与用量。</p></div></div><div v-else-if="charts[0].empty" class="chart-empty is-main">暂无有效样本</div><MetricChart v-else :key="charts[0].title" :type="charts[0].type" :data="charts[0].data" :options="charts[0].options" :label="charts[0].title" :height="320" /></v-card-text>
+        <v-card-text><div v-if="!analytics.totals.requests" class="chart-empty is-main"><div class="empty-state"><v-icon icon="mdi-chart-line" size="24" color="primary" /><h3 class="mt-3">暂无业务请求数据</h3><p class="mt-2">在测试场发起请求后，可在这里查看性能与用量。</p></div></div><div v-else-if="charts[0].empty" class="chart-empty is-main">暂无有效样本</div><MetricChart v-else :key="charts[0].title" :type="charts[0].type" :data="charts[0].data" :options="charts[0].options" :label="charts[0].title" :height="280" /></v-card-text>
         <p class="chart-footnote">统计业务请求，不含健康探测。北京时间 · 每点 {{ analytics.intervalMinutes < 60 ? analytics.intervalMinutes + ' 分钟' : analytics.intervalMinutes / 60 + ' 小时' }}。</p>
       </v-card>
       <v-card variant="flat" border class="analytics-details">
@@ -64,46 +64,46 @@ const charts = computed<Plan[]>(() => {
         <section class="analytics-side-section"><h2>性能详情</h2><div class="performance-list"><div v-for="item in performance" :key="item[0]"><span>{{ item[0] }}</span><strong>{{ item[1] }}</strong></div></div></section>
       </v-card>
     </div>
-    <div v-if="analytics.totals.requests" class="analytics-supporting" :class="{ 'has-three': charts.length > 3 }"><v-card v-for="chart in charts.slice(1)" :key="chart.title" variant="flat" border><v-card-title class="section-heading"><div><h2>{{ chart.title }}</h2><p>{{ chart.note }}</p></div></v-card-title><v-card-text><div v-if="chart.empty" class="chart-empty">暂无有效样本</div><MetricChart v-else :type="chart.type" :data="chart.data" :options="chart.options" :label="chart.title" :height="240" /></v-card-text></v-card></div>
+    <div v-if="analytics.totals.requests" class="analytics-supporting" :class="{ 'has-three': charts.length > 3 }"><v-card v-for="chart in charts.slice(1)" :key="chart.title" variant="flat" border><v-card-title class="section-heading"><div><h2>{{ chart.title }}</h2><p>{{ chart.note }}</p></div></v-card-title><v-card-text><div v-if="chart.empty" class="chart-empty">暂无有效样本</div><MetricChart v-else :type="chart.type" :data="chart.data" :options="chart.options" :label="chart.title" :height="210" /></v-card-text></v-card></div>
   </div>
 </template>
 <style scoped>
-.analytics-workspace { display: grid; gap: 18px; min-width: 0; }
-.analytics-tabbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 18px; padding-bottom: 10px; border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.analytics-workspace { display: grid; gap: 14px; min-width: 0; }
+.analytics-tabbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 14px; padding-bottom: 8px; border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .analytics-tabbar > .v-tabs { min-width: 0; flex: 1 1 auto; }
 .analytics-controls { flex-shrink: 0; margin-left: auto; }
-.analytics-stage { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 20px; align-items: start; min-width: 0; }
+.analytics-stage { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 14px; align-items: start; min-width: 0; }
 .analytics-main-chart { min-width: 0; border-top: 2px solid rgba(var(--v-theme-primary), .65) !important; }
-.analytics-main-chart :deep(.section-heading h2) { font-size: 19px; }
-.chart-summary { display: flex; flex-wrap: wrap; gap: 20px 30px; padding: 0 24px 22px; }
+.analytics-main-chart :deep(.section-heading h2) { font-size: 16px; }
+.chart-summary { display: flex; flex-wrap: wrap; gap: 14px 22px; padding: 0 18px 16px; }
 .chart-summary > div { min-width: 0; }
 .chart-summary span { display: block; font-size: 12px; color: rgba(var(--v-theme-on-surface), .65); }
-.chart-summary strong { display: block; font-size: 20px; font-weight: 600; letter-spacing: -.3px; margin-top: 7px; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.chart-summary small { display: block; font-size: 12px; color: rgba(var(--v-theme-on-surface), .55); line-height: 1.6; margin-top: 5px; }
-.chart-summary .is-primary { padding-right: 24px; border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.chart-summary .is-primary strong { color: rgb(var(--v-theme-primary)); font-size: 24px; }
-.chart-footnote { padding: 0 24px 18px; margin: 0; color: rgba(var(--v-theme-on-surface), .5); font-size: 12px; }
-.analytics-details { padding: 20px; }
-.analytics-side-section + .analytics-side-section { margin-top: 20px; padding-top: 18px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.analytics-side-section h2 { font-size: 13px; font-weight: 600; margin-bottom: 14px; }
-.usage-list { display: grid; gap: 16px; }
+.chart-summary strong { display: block; font-size: 18px; font-weight: 600; letter-spacing: -.3px; margin-top: 5px; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chart-summary small { display: block; font-size: 12px; color: rgba(var(--v-theme-on-surface), .55); line-height: 1.5; margin-top: 3px; }
+.chart-summary .is-primary { padding-right: 18px; border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.chart-summary .is-primary strong { color: rgb(var(--v-theme-primary)); font-size: 22px; }
+.chart-footnote { padding: 0 18px 14px; margin: 0; color: rgba(var(--v-theme-on-surface), .5); font-size: 12px; }
+.analytics-details { padding: 16px; }
+.analytics-side-section + .analytics-side-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.analytics-side-section h2 { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.usage-list { display: grid; gap: 12px; }
 .usage-list > div > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .7); }
-.usage-list strong { font-size: 16px; font-weight: 600; color: rgb(var(--v-theme-on-surface)); font-variant-numeric: tabular-nums; }
-.usage-list small { display: block; margin-top: 5px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .55); line-height: 1.7; }
-.usage-note { display: flex; align-items: flex-start; gap: 6px; margin: 14px 0 0; font-size: 12px; line-height: 1.75; color: rgba(var(--v-theme-on-surface), .65); }
+.usage-list strong { font-size: 15px; font-weight: 600; color: rgb(var(--v-theme-on-surface)); font-variant-numeric: tabular-nums; }
+.usage-list small { display: block; margin-top: 3px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .55); line-height: 1.6; }
+.usage-note { display: flex; align-items: flex-start; gap: 6px; margin: 10px 0 0; font-size: 12px; line-height: 1.6; color: rgba(var(--v-theme-on-surface), .65); }
 .usage-note > .v-icon { flex-shrink: 0; margin-top: 3px; }
 .usage-note.is-warning { color: rgb(var(--v-theme-warning)); }
 .performance-list { display: grid; gap: 0; }
-.performance-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; font-size: 12px; }
+.performance-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 12px; }
 .performance-list span { color: rgba(var(--v-theme-on-surface), .65); }
 .performance-list strong { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.analytics-supporting { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; min-width: 0; }
+.analytics-supporting { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
 .analytics-supporting.has-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .analytics-supporting > .v-card { min-width: 0; }
-.chart-empty { height: 240px; display: grid; place-items: center; color: rgba(var(--v-theme-on-surface), .6); font-size: 13px; }
-.chart-empty.is-main { height: 320px; }
-@media (max-width: 1250px) { .analytics-stage { grid-template-columns: minmax(0, 1fr) 250px; } .chart-summary { gap: 18px 24px; } .chart-summary .is-primary { padding-right: 18px; } .analytics-supporting.has-three { grid-template-columns: repeat(2, minmax(0, 1fr)); } .analytics-supporting.has-three > .v-card:last-child { grid-column: 1 / -1; } }
+.chart-empty { height: 210px; display: grid; place-items: center; color: rgba(var(--v-theme-on-surface), .6); font-size: 13px; }
+.chart-empty.is-main { height: 280px; }
+@media (max-width: 1250px) { .analytics-stage { grid-template-columns: minmax(0, 1fr) 240px; } .chart-summary { gap: 14px 20px; } .chart-summary .is-primary { padding-right: 18px; } .analytics-supporting.has-three { grid-template-columns: repeat(2, minmax(0, 1fr)); } .analytics-supporting.has-three > .v-card:last-child { grid-column: 1 / -1; } }
 @media (max-width: 1000px) { .chart-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } .chart-summary .is-primary { border-right: 0; padding-right: 0; } }
-@media (max-width: 850px) { .analytics-stage { grid-template-columns: minmax(0, 1fr); } .chart-summary { display: flex; gap: 18px 28px; } .analytics-details { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; } .analytics-side-section + .analytics-side-section { margin: 0; padding: 0 0 0 24px; border-top: 0; border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); } }
-@media (max-width: 600px) { .analytics-workspace { gap: 16px; } .chart-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; padding: 0 18px 18px; } .chart-summary strong { font-size: 19px; } .chart-summary .is-primary strong { font-size: 22px; } .chart-footnote { padding-inline: 18px; } .analytics-supporting.has-three { grid-template-columns: minmax(0, 1fr); } .analytics-supporting.has-three > .v-card:last-child { grid-column: auto; } .analytics-tabbar :deep(.v-tab) { padding-inline: 12px; min-width: 0; font-size: 13px; } .analytics-tabbar :deep(.v-tab .v-icon) { display: none; } .analytics-details { grid-template-columns: minmax(0, 1fr); padding: 18px; gap: 18px; } .analytics-side-section + .analytics-side-section { padding: 18px 0 0; border-left: 0; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); } .performance-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; } .performance-list > div { align-items: flex-start; flex-direction: column; gap: 5px; } }
+@media (max-width: 850px) { .analytics-stage { grid-template-columns: minmax(0, 1fr); } .chart-summary { display: flex; gap: 14px 22px; } .analytics-details { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; } .analytics-side-section + .analytics-side-section { margin: 0; padding: 0 0 0 18px; border-top: 0; border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); } }
+@media (max-width: 600px) { .analytics-workspace { gap: 12px; } .chart-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; padding: 0 16px 14px; } .chart-summary strong { font-size: 16px; } .chart-summary .is-primary strong { font-size: 22px; } .chart-footnote { padding-inline: 16px; } .analytics-supporting.has-three { grid-template-columns: minmax(0, 1fr); } .analytics-supporting.has-three > .v-card:last-child { grid-column: auto; } .analytics-tabbar :deep(.v-tab) { padding-inline: 12px; min-width: 0; font-size: 13px; } .analytics-tabbar :deep(.v-tab .v-icon) { display: none; } .analytics-details { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 16px; } .analytics-side-section + .analytics-side-section { padding: 14px 0 0; border-left: 0; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); } .performance-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; } .performance-list > div { align-items: flex-start; flex-direction: column; gap: 5px; } }
 </style>

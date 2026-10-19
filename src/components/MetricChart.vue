@@ -5,7 +5,7 @@ import { Chart as VueChart } from 'vue-chartjs';
 import { Chart, registerables, type ChartData, type ChartOptions } from 'chart.js';
 Chart.register(...registerables);
 Chart.defaults.font.family = '"Segoe UI", "Microsoft YaHei", system-ui, sans-serif';
-const props = withDefaults(defineProps<{ type?: 'line' | 'bar' | 'doughnut'; data: ChartData; options?: ChartOptions; height?: number; label: string }>(), { type: 'line', height: 280 });
+const props = withDefaults(defineProps<{ type?: 'line' | 'bar' | 'doughnut'; data: ChartData; options?: ChartOptions; height?: number; label: string }>(), { type: 'line', height: 240 });
 const theme = useTheme();
 function mergeOptions(base: Record<string, unknown>, extra: Record<string, unknown>): Record<string, unknown> {
   const result = { ...base };
@@ -24,8 +24,8 @@ const options = computed<ChartOptions>(() => {
     responsive: true, maintainAspectRatio: false, animation: false,
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 7, padding: 20, color: foreground + 'B3', font: { size: 12 } } },
-      tooltip: { padding: 12, backgroundColor: colors.surface, titleColor: foreground, bodyColor: foreground + 'D9', borderColor: foreground + '33', borderWidth: 1, titleFont: { size: 12 }, bodyFont: { size: 12 } },
+      legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 6, boxHeight: 6, padding: 12, color: foreground + 'B3', font: { size: 12 } } },
+      tooltip: { padding: 8, backgroundColor: colors.surface, titleColor: foreground, bodyColor: foreground + 'D9', borderColor: foreground + '33', borderWidth: 1, titleFont: { size: 12 }, bodyFont: { size: 12 } },
     },
     ...(props.type === 'doughnut' ? { cutout: '76%' } : { scales: {
       x: { grid: { display: false }, border: { display: false }, ticks: { ...ticks, maxTicksLimit: 8 } },

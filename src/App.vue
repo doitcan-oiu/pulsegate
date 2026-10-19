@@ -89,15 +89,15 @@ onUnmounted(() => {
   <v-app>
     <template v-if="session?.authenticated && ready">
       <a class="skip-link" href="#main-content" @click.prevent="skipMain">跳转到主要内容</a>
-      <v-app-bar flat height="64" :extended="!mobile" extension-height="48" class="console-appbar" color="surface">
+      <v-app-bar flat height="56" :extended="!mobile" extension-height="40" class="console-appbar" color="surface">
         <div class="console-topbar">
           <v-app-bar-nav-icon v-if="mobile" data-navigation-toggle :aria-label="drawer ? '关闭导航' : '打开导航'" :aria-expanded="drawer" :aria-controls="drawerId" @click="drawer = !drawer" />
-          <button class="console-brand" aria-label="PulseGate 网关概览" @click="select('overview')"><v-icon icon="mdi-pulse" color="primary" size="30" /><strong>PulseGate</strong><span v-if="!mobile">控制台</span></button>
+          <button class="console-brand" aria-label="PulseGate 网关概览" @click="select('overview')"><v-icon icon="mdi-pulse" color="primary" size="24" /><strong>PulseGate</strong><span v-if="!mobile">控制台</span></button>
           <v-spacer />
           <v-chip v-if="!mobile" :color="connectionError ? 'error' : 'success'" size="small" variant="tonal" :prepend-icon="connectionError ? 'mdi-alert-circle-outline' : 'mdi-check-circle-outline'">{{ connectionError ? '连接异常' : '服务在线' }}</v-chip>
           <v-btn class="ml-2" :icon="mobile ? 'mdi-code-braces' : undefined" :prepend-icon="mobile ? undefined : 'mdi-code-braces'" variant="text" aria-label="复制 API 地址" @click="copy(endpoint)"><span v-if="!mobile">API 地址</span></v-btn>
           <v-divider vertical inset class="mx-2" />
-          <v-menu><template #activator="{ props }"><v-btn v-bind="props" variant="text" class="console-account" aria-label="管理员菜单"><v-avatar color="primary" variant="tonal" size="30"><v-icon icon="mdi-account-outline" size="20" /></v-avatar><span v-if="!mobile" class="ml-2">管理员</span><v-icon icon="mdi-chevron-down" size="16" class="ml-1" /></v-btn></template><v-list density="compact"><v-list-item title="使用指南" prepend-icon="mdi-help-circle-outline" @click="guide = true" /><v-list-item title="网关设置" prepend-icon="mdi-cog-outline" @click="select('settings')" /><v-divider class="my-1" /><v-list-item title="退出登录" prepend-icon="mdi-logout" @click="store.requestLogout()" /></v-list></v-menu>
+          <v-menu><template #activator="{ props }"><v-btn v-bind="props" variant="text" class="console-account" aria-label="管理员菜单"><v-avatar color="primary" variant="tonal" size="26"><v-icon icon="mdi-account-outline" size="17" /></v-avatar><span v-if="!mobile" class="ml-2">管理员</span><v-icon icon="mdi-chevron-down" size="14" class="ml-1" /></v-btn></template><v-list density="compact"><v-list-item title="使用指南" prepend-icon="mdi-help-circle-outline" @click="guide = true" /><v-list-item title="网关设置" prepend-icon="mdi-cog-outline" @click="select('settings')" /><v-divider class="my-1" /><v-list-item title="退出登录" prepend-icon="mdi-logout" @click="store.requestLogout()" /></v-list></v-menu>
         </div>
         <template v-if="!mobile" #extension><nav class="console-navigation" aria-label="主导航"><v-tabs :model-value="page" color="primary" @update:model-value="selectTab"><v-tab v-for="item in items" :key="item.id" :value="item.id" :prepend-icon="item.icon" :aria-label="item.title">{{ item.title }}</v-tab></v-tabs><span class="environment-label">{{ session.devMode ? '本地开发' : '生产环境' }}</span></nav></template>
         <v-progress-linear v-if="loading" indeterminate color="primary" absolute location="bottom" height="2" />
@@ -116,11 +116,11 @@ onUnmounted(() => {
       </div></v-main>
     </template>
     <div v-else class="login-screen">
-      <div class="login-brand"><v-icon icon="mdi-pulse" color="primary" size="36" /><strong>PulseGate</strong></div>
-      <v-card border class="login-card"><v-avatar color="primary" variant="tonal" size="52"><v-icon icon="mdi-shield-key-outline" size="28" /></v-avatar>
+      <div class="login-brand"><v-icon icon="mdi-pulse" color="primary" size="28" /><strong>PulseGate</strong></div>
+      <v-card border class="login-card"><v-avatar color="primary" variant="tonal" size="40"><v-icon icon="mdi-shield-key-outline" size="22" /></v-avatar>
         <template v-if="connectionError"><v-alert type="error" variant="tonal" class="mb-5">{{ connectionError }}</v-alert><v-btn color="primary" block @click="session?.authenticated ? refresh() : store.startSession()">重新连接</v-btn></template>
         <div v-else-if="!session || session.authenticated" class="login-connecting"><v-progress-circular color="primary" indeterminate size="28" /><span>正在连接工作空间…</span></div>
-        <v-form v-else aria-label="管理员登录" @submit.prevent="submitLogin"><v-alert v-if="!session.configured" type="warning" variant="tonal" class="mb-5">请先在服务端配置 ADMIN_TOKEN。</v-alert><v-text-field v-model="token" label="管理员令牌" type="password" autocomplete="current-password" prepend-inner-icon="mdi-key-outline" :disabled="loginBusy" required class="mb-6" /><v-btn color="primary" size="large" block type="submit" :loading="loginBusy" :disabled="!session.configured || !token">进入控制台<v-icon icon="mdi-arrow-right" end /></v-btn></v-form>
+        <v-form v-else aria-label="管理员登录" @submit.prevent="submitLogin"><v-alert v-if="!session.configured" type="warning" variant="tonal" class="mb-5">请先在服务端配置 ADMIN_TOKEN。</v-alert><v-text-field v-model="token" label="管理员令牌" type="password" autocomplete="current-password" prepend-inner-icon="mdi-key-outline" :disabled="loginBusy" required class="mb-5" /><v-btn color="primary" block type="submit" :loading="loginBusy" :disabled="!session.configured || !token">进入控制台<v-icon icon="mdi-arrow-right" end /></v-btn></v-form>
         <v-divider class="my-6" /><p class="text-caption text-medium-emphasis"><v-icon icon="mdi-lock-outline" size="15" class="mr-1" />安全会话保护管理访问，上游凭证加密保存。</p>
       </v-card><p class="login-caption">多模型接入 <span>·</span> 智能调度 <span>·</span> 请求观测</p>
     </div>

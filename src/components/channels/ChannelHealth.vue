@@ -32,7 +32,7 @@ const history = computed(() => props.channel.history.slice(-14));
 
 <style scoped>
 .channel-health { min-width: 210px; max-width: 310px; }
-.health-history { display: flex; gap: 3px; margin-top: 8px; max-width: 148px; }
-.health-history i { flex: 1; height: 6px; border-radius: 2px; }
+.health-history { display: flex; gap: 3px; margin-top: 6px; max-width: 148px; }
+.health-history i { flex: 1; height: 5px; border-radius: 2px; }
 .history-neutral { background: rgba(var(--v-theme-on-surface), .13); }
 </style>

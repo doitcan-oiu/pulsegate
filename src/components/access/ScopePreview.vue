@@ -31,10 +31,10 @@ function status(channel: GatewayChannel) {
 </template>
 
 <style scoped>
-.scope-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-.scope-counts strong { display: block; font-size: 22px; font-weight: 600; }
+.scope-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.scope-counts strong { display: block; font-size: 18px; font-weight: 600; }
 .scope-counts span { display: block; margin-top: 4px; font-size: 12px; opacity: .7; }
-.scope-content { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 24px; }
+.scope-content { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 20px; }
 .scope-content > section { min-width: 0; }
 .preview-channels { max-height: 300px; overflow-y: auto; }
 @media (max-width: 600px) { .scope-content { grid-template-columns: minmax(0, 1fr); } }

@@ -15,8 +15,8 @@ const resultNames: Record<string, string> = { success: '成功', slow: '响应�
 
 <template>
   <article class="play-message" :class="`is-${message.role}`">
-    <v-avatar :color="message.role === 'user' ? 'secondary' : 'primary'" variant="tonal" size="32" class="message-avatar">
-      <v-icon :icon="message.role === 'user' ? 'mdi-account-outline' : 'mdi-robot-outline'" size="19" />
+    <v-avatar :color="message.role === 'user' ? 'secondary' : 'primary'" variant="tonal" size="26" class="message-avatar">
+      <v-icon :icon="message.role === 'user' ? 'mdi-account-outline' : 'mdi-robot-outline'" size="18" />
     </v-avatar>
     <div class="message-main">
       <header class="message-header">
@@ -60,28 +60,28 @@ const resultNames: Record<string, string> = { success: '成功', slow: '响应�
 </template>
 
 <style scoped>
-.play-message { display: flex; align-items: flex-start; gap: 13px; padding: 24px 28px; }
+.play-message { display: flex; align-items: flex-start; gap: 10px; padding: 16px 20px; }
 .is-user { justify-content: flex-end; padding-bottom: 8px; }
 .is-user .message-avatar { order: 2; margin-top: 12px; }
-.is-user .message-main { flex: 0 1 86%; padding: 12px 18px 16px; border-radius: 4px; border: 1px solid rgba(var(--v-theme-primary), .16); background: rgba(var(--v-theme-primary), .09); }
-.is-assistant { padding-top: 22px; padding-bottom: 30px; }
+.is-user .message-main { flex: 0 1 86%; padding: 10px 14px 12px; border-radius: 4px; border: 1px solid rgba(var(--v-theme-primary), .16); background: rgba(var(--v-theme-primary), .09); }
+.is-assistant { padding-top: 16px; padding-bottom: 20px; }
 .message-avatar { flex-shrink: 0; margin-top: 2px; }
 .message-main { flex: 1; min-width: 0; }
-.message-header { display: flex; align-items: center; gap: 12px; min-height: 30px; margin-bottom: 9px; }
+.message-header { display: flex; align-items: center; gap: 8px; min-height: 28px; margin-bottom: 6px; }
 .message-header > strong { font-size: 13px; font-weight: 600; }
 .is-assistant .message-header > strong { color: rgb(var(--v-theme-primary)); }
 .message-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 .message-pending { display: inline-flex; align-items: center; gap: 6px; color: rgba(var(--v-theme-on-surface), .7); font-size: 12px; }
 .message-content { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.9; }
 .message-image { margin: 4px 0 12px; border-radius: 4px; }
-.message-panels { margin-top: 18px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-left: 2px solid rgba(var(--v-theme-primary), .45); border-radius: 4px; overflow: hidden; }
-.message-panels :deep(.v-expansion-panel-title) { min-height: 44px; padding: 12px 14px; font-size: 12px; }
-.message-panels :deep(.v-expansion-panel-title--active) { min-height: 44px; }
-.message-panels :deep(.v-expansion-panel-text__wrapper) { padding: 4px 16px 16px; }
+.message-panels { margin-top: 12px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-left: 2px solid rgba(var(--v-theme-primary), .45); border-radius: 4px; overflow: hidden; }
+.message-panels :deep(.v-expansion-panel-title) { min-height: 36px; padding: 8px 12px; font-size: 12px; }
+.message-panels :deep(.v-expansion-panel-title--active) { min-height: 36px; }
+.message-panels :deep(.v-expansion-panel-text__wrapper) { padding: 4px 12px 12px; }
 .message-panels :deep(.v-expansion-panel__shadow) { display: none; }
 .reasoning-content { color: rgba(var(--v-theme-on-surface), .7); font-size: 13px; padding-block: 4px; }
-.message-code { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 4px; background: rgb(var(--v-theme-background)); font: 12px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.message-footer { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 16px; color: rgba(var(--v-theme-on-surface), .6); font-size: 12px; }
+.message-code { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 4px; background: rgb(var(--v-theme-background)); font: 12px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.message-footer { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; color: rgba(var(--v-theme-on-surface), .6); font-size: 12px; }
 .request-id-button { text-align: left; overflow-wrap: anywhere; border-radius: 4px; }
 .request-id-button:focus-visible { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: 4px; }
 .trace-title { display: flex; align-items: center; gap: 10px; width: 100%; line-height: 1.6; padding-right: 6px; }
@@ -89,8 +89,8 @@ const resultNames: Record<string, string> = { success: '成功', slow: '响应�
 .trace-description { flex: 1; }
 .trace-title small { display: block; color: rgba(var(--v-theme-on-surface), .6); font-size: 12px; margin-top: 2px; }
 .trace-title > .v-chip { flex-shrink: 0; }
-.trace-metrics { display: flex; flex-wrap: wrap; gap: 8px 16px; color: rgba(var(--v-theme-on-surface), .7); font-size: 12px; margin-bottom: 16px; padding: 12px; background: rgba(var(--v-theme-primary), .07); border-radius: 4px; font-variant-numeric: tabular-nums; }
-.trace-attempt { display: flex; align-items: flex-start; gap: 12px; padding-block: 14px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); font-size: 12px; }
+.trace-metrics { display: flex; flex-wrap: wrap; gap: 8px 12px; color: rgba(var(--v-theme-on-surface), .7); font-size: 12px; margin-bottom: 12px; padding: 10px; background: rgba(var(--v-theme-primary), .07); border-radius: 4px; font-variant-numeric: tabular-nums; }
+.trace-attempt { display: flex; align-items: flex-start; gap: 10px; padding-block: 10px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); font-size: 12px; }
 .trace-attempt > div:nth-child(2) { flex: 1; min-width: 0; }
 .trace-attempt strong { font-weight: 550; font-size: 13px; }
 .trace-attempt p { margin: 4px 0 0; color: rgba(var(--v-theme-on-surface), .65); overflow-wrap: anywhere; line-height: 1.7; }
