@@ -125,6 +125,8 @@ npm run deploy:button -- https://github.com/your-name/pulsegate
 
 OpenAI SDK 的 `base_url` 使用 `https://你的worker地址/v1`。公开入口：`GET /v1/models`、`POST /v1/chat/completions` 和 `POST /v1/messages`。两种公开生成入口保持客户端请求路径与格式，不按渠道接口类型转换请求；调用方需使用上游支持的入口。Key Profile、别名、重试、健康及用量记录共用原有流程。
 
+公开接口使用本程序「API Keys」创建时展示的完整 `pg_live_...` 调用方令牌。`Authorization: Bearer <令牌>` 的认证方案名称不区分大小写，支持空格或 Tab 分隔；`GET /v1/models` 与 `POST /v1/messages` 也支持 `x-api-key: <令牌>`。管理员令牌、渠道上游密钥和列表中的遮罩预览不能代替调用方令牌；已轮换的旧令牌、停用、撤销或过期的 Key 返回 401。模型列表仍按当前 Profile 的渠道及模型范围过滤。
+
 ```bash
 curl https://你的worker地址/v1/chat/completions \
   -H "Authorization: Bearer pg_live_替换为真实Token" \

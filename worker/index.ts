@@ -12,7 +12,7 @@ export { GatewayState } from './state';
 
 function loopback(request: Request): boolean { return ['127.0.0.1','localhost','[::1]'].includes(new URL(request.url).hostname); }
 export function development(request: Request, env: Env): boolean { return env.DEV_MODE === 'true' && loopback(request); }
-const bearer = (request: Request): string | null => { const header = request.headers.get('authorization'); return header?.startsWith('Bearer ') ? header.slice(7) : null; };
+const bearer = (request: Request): string | null => /^Bearer[ \t]+([^\s,]+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1] ?? null;
 function cookieToken(request: Request): string | null { return request.headers.get('cookie')?.split(';').map(s => s.trim()).find(s => s.startsWith('pg_session='))?.slice(11) ?? null; }
 function sameOrigin(request: Request, env: Env): void {
   const origin = request.headers.get('origin'); if (!origin) { if (cookieToken(request) && !bearer(request)) throw new HttpError(403,'Origin header required'); return; }
@@ -42,7 +42,7 @@ function response(data: unknown, status = 200, extra: Record<string,string> = {}
 function noContent(): Response { return new Response(null,{ status:204 }); }
 async function needChannel(store: Store, id: string): Promise<GatewayChannel> { const found = await store.getChannel(id); if (!found) throw new HttpError(404,'Channel not found'); return found; }
 async function needKey(store: Store, id: string): Promise<KeyRecord> { const found = await store.getKey(id); if (!found) throw new HttpError(404,'API Key not found'); return found; }
-async function authorizeApi(request: Request, store: Store, anthropic = false): Promise<KeyRecord> { const token = bearer(request) ?? (anthropic ? request.headers.get('x-api-key') : null); const key = token && token.startsWith('pg_live_') ? await store.findKey(token) : null; if (!key || key.status !== 'active' || expired(key)) throw new HttpError(401,'Invalid, disabled or expired API key'); return key; }
+async function authorizeApi(request: Request, store: Store, allowApiKeyHeader = false): Promise<KeyRecord> { const token = bearer(request) ?? (allowApiKeyHeader ? request.headers.get('x-api-key')?.trim() : null); const key = token && token.startsWith('pg_live_') ? await store.findKey(token) : null; if (!key || key.status !== 'active' || expired(key)) throw new HttpError(401,'Invalid, disabled or expired API key'); return key; }
 function currentProfile(key: GatewayApiKey): KeyProfile { const profile = key.profiles.find(p => p.id === key.activeProfile); if (!profile) throw new HttpError(403,'Active profile is unavailable'); return profile; }
 function allowedChannel(c: GatewayChannel,p: KeyProfile): boolean { if (!c.enabled || c.archived) return false; if (p.scope === 'channels') return p.channelIds.includes(c.id); if (p.scope === 'tags') { if (p.match === 'none') return !p.tags.some(t => c.tags.includes(t)); return p.match === 'all' ? p.tags.every(t => c.tags.includes(t)) : p.tags.some(t => c.tags.includes(t)); } return true; }
 function modelsFor(channels: GatewayChannel[],p: KeyProfile): string[] {
@@ -190,7 +190,7 @@ export default {
       if (path === '/health' && request.method === 'GET') { const readiness = await env.DB.prepare('SELECT COUNT(*) AS count FROM sqlite_master WHERE type=\'table\' AND name IN (\'channels\',\'settings\',\'channel_accounts\')').first<{ count:number }>(); return response({ status:readiness?.count === 3 ? 'ok' : 'migrations_required',service:'pulsegate' },readiness?.count === 3 ? 200 : 503); }
       const store = new Store(env);
       if (path.startsWith('/api/')) return await admin(request,env,ctx,store);
-      if (path === '/v1/models' && request.method === 'GET') { const key = await authorizeApi(request,store); const models = modelsFor(await store.listChannels(),currentProfile(key)); return response({ object:'list',data:models.map(id => ({ id,object:'model',created:0,owned_by:'pulsegate' })) }); }
+      if (path === '/v1/models' && request.method === 'GET') { const key = await authorizeApi(request,store,true); const models = modelsFor(await store.listChannels(),currentProfile(key)); return response({ object:'list',data:models.map(id => ({ id,object:'model',created:0,owned_by:'pulsegate' })) }); }
       if (path === '/v1/chat/completions' && request.method === 'POST') { const key = await authorizeApi(request,store); return await handleGateway(request,{ ...await context(env,ctx,store,'api',key),relayProtocol:'openai' },store); }
       if (path === '/v1/messages' && request.method === 'POST') {
         const key = await authorizeApi(request,store,true);

@@ -10,9 +10,9 @@ import type { AttemptRecord, GatewayApiKey, GatewayChannel, GatewayLog } from '.
 
 const testEnv = env as unknown as Env & { TEST_MIGRATIONS: Parameters<typeof applyD1Migrations>[1] };
 let cookie = '';
-async function call(path: string,method = 'GET',data?: unknown,options: { token?:string;cookie?:string;origin?:string;env?:Env;host?:string } = {}) {
+async function call(path: string,method = 'GET',data?: unknown,options: { token?:string;cookie?:string;origin?:string;env?:Env;host?:string;headers?:Record<string,string> } = {}) {
   const ctx = createExecutionContext();
-  const request = new Request((options.host ?? 'http://127.0.0.1:8787')+path,{ method,headers:{ ...(data !== undefined ? { 'content-type':'application/json' } : {}),...(options.token ? { authorization:'Bearer '+options.token } : {}),...(options.cookie ?? cookie ? { cookie:options.cookie ?? cookie } : {}),...(!['GET','HEAD'].includes(method) ? { origin:options.origin ?? 'http://127.0.0.1:8787' } : {}) },...(data !== undefined ? { body:JSON.stringify(data) } : {}) });
+  const request = new Request((options.host ?? 'http://127.0.0.1:8787')+path,{ method,headers:{ ...(data !== undefined ? { 'content-type':'application/json' } : {}),...(options.token ? { authorization:'Bearer '+options.token } : {}),...(options.cookie ?? cookie ? { cookie:options.cookie ?? cookie } : {}),...(!['GET','HEAD'].includes(method) ? { origin:options.origin ?? 'http://127.0.0.1:8787' } : {}),...options.headers },...(data !== undefined ? { body:JSON.stringify(data) } : {}) });
   const result = await worker.fetch(request,options.env ?? testEnv,ctx);
   const content = await result.text(); await waitOnExecutionContext(ctx);
   let json: any = null; try { json = JSON.parse(content); } catch { /* SSE content is intentionally not parsed as JSON. */ }
@@ -20,6 +20,7 @@ async function call(path: string,method = 'GET',data?: unknown,options: { token?
 }
 async function newChannel(name = 'Test',tags = ['production']) { const r = await call('/api/channels','POST',{ name,models:['test-model'],tags,config:{ protocol:'mock',mock:{ delayMs:1 } } }); expect(r.response.status).toBe(201); return r.json.channel as GatewayChannel; }
 async function newKey(input: Record<string,unknown> = {}) { const r = await call('/api/keys','POST',{ name:'Test key',...input }); expect(r.response.status).toBe(201); return r.json as { key:GatewayApiKey;token:string }; }
+const publicCall = (path: string, headers: Record<string,string> = {}, method = 'GET', data?: unknown) => call(path,method,data,{ cookie:'',headers });
 
 beforeAll(async () => { await applyD1Migrations(testEnv.DB,testEnv.TEST_MIGRATIONS); });
 beforeEach(async () => {
@@ -138,8 +139,10 @@ describe('API keys and profiles', () => {
     const c = await newChannel('Prod',['prod']); await call(`/api/channels/${c.id}`,'PATCH',{ models:['real-model'],config:{ aliases:[{ from:'stable',to:'real-model' }] } });
     const other = await newChannel('Other',['other']); await call(`/api/channels/${other.id}`,'PATCH',{ models:['private-model'],model:'private-model' });
     const k = await newKey({ profiles:[{ id:'p',name:'restricted',scope:'tags',tags:['prod'],match:'any',modelMode:'selected',models:['stable'],requestLimit:'5',mappings:[{ from:'public-model',to:['stable'] }] }],activeProfile:'p' });
-    const list = await call('/v1/models','GET',undefined,{ token:k.token });
-    expect(list.json.data.map((m:{ id:string }) => m.id)).toEqual(['stable','public-model']);
+    for (const headers of [{ authorization:'Bearer '+k.token }, { authorization:'bEaReR\t  '+k.token }, { 'x-api-key':k.token }]) {
+      const list = await publicCall('/v1/models',headers);
+      expect(list.response.status).toBe(200); expect(list.json.data.map((m:{ id:string }) => m.id)).toEqual(['stable','public-model']);
+    }
   });
   it('applies quotas atomically to the selected profile under concurrent requests',async () => {
     const k = await newKey({ profiles:[{ id:'a',name:'A',requestLimit:'3' },{ id:'b',name:'B',requestLimit:'1' }],activeProfile:'a' });
@@ -209,6 +212,83 @@ describe('API keys and profiles', () => {
     expect(key.status).toBe('revoked'); expect(key.name).toBe('concurrent revocation'); expect(key.profiles[0].tags).toEqual(['new']);
     await store.deleteTag('new'); current = (await store.getChannel(c.id))!;
     expect(current.tags).toEqual([]); expect(current.requests).toBe(72); expect(current.status).toBe('degraded'); expect(current.health.reason).toBe('concurrent health update');
+  });
+});
+
+describe('public API authentication header compatibility', () => {
+  it.each([
+    ['standard', 'Bearer '], ['lowercase', 'bearer '], ['uppercase', 'BEARER '],
+    ['multiple spaces', 'Bearer   '], ['tab separator', 'Bearer\t'], ['mixed horizontal whitespace', 'bEaReR \t  '],
+  ])('accepts %s Bearer syntax for model discovery', async (_label, prefix) => {
+    await newChannel(); const key = await newKey();
+    const result = await publicCall('/v1/models',{ authorization:prefix+key.token });
+    expect(result.response.status).toBe(200); expect(result.json.data.map((model: { id:string }) => model.id)).toEqual(['test-model']);
+    expect((await new Store(testEnv).getKey(key.key.id))?.used).toBe(0);
+  });
+
+  it('accepts x-api-key for models while keeping chat and admin authentication boundaries', async () => {
+    await newChannel(); const key = await newKey();
+    const listed = await publicCall('/v1/models',{ 'x-api-key':key.token });
+    expect(listed.response.status).toBe(200); expect(listed.json.data.map((model: { id:string }) => model.id)).toEqual(['test-model']);
+    const chat = await publicCall('/v1/chat/completions',{ 'x-api-key':key.token },'POST',{ model:'test-model',messages:[{ role:'user',content:'hello' }],stream:false });
+    expect(chat.response.status).toBe(401);
+    expect((await publicCall('/api/bootstrap',{ authorization:'bearer '+key.token })).response.status).toBe(401);
+    expect((await publicCall('/api/bootstrap',{ 'x-api-key':testEnv.ADMIN_TOKEN! })).response.status).toBe(401);
+    expect((await new Store(testEnv).getKey(key.key.id))?.used).toBe(0);
+    expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count:number }>())?.count).toBe(0);
+  });
+
+  it.each(['wrong','preview','admin','upstream','missing','disabled','revoked','expired','rotated'] as const)('keeps rejecting a %s credential through both models authentication headers', async mode => {
+    const channel = await newChannel();
+    const key = await newKey(mode === 'expired' ? { expires:'2000-01-01T00:00:00Z' } : mode === 'disabled' ? { status:'disabled' } : {});
+    let token = key.token;
+    if (mode === 'wrong') token = 'pg_live_synthetic-unknown-client-key';
+    if (mode === 'preview') token = key.key.preview;
+    if (mode === 'admin') token = testEnv.ADMIN_TOKEN!;
+    if (mode === 'upstream') {
+      token = 'pg_live_synthetic-upstream-only-key';
+      expect((await call(`/api/channels/${channel.id}/credentials`,'POST',{ label:'Upstream only',secret:token })).response.status).toBe(201);
+    }
+    if (mode === 'revoked') expect((await call(`/api/keys/${key.key.id}`,'DELETE')).response.status).toBe(200);
+    if (mode === 'rotated') expect((await call(`/api/keys/${key.key.id}/rotate`,'POST',{})).response.status).toBe(200);
+    const variants: Record<string,string>[] = mode === 'missing' ? [{}] : [{ authorization:'Bearer '+token }, { 'x-api-key':token }];
+    for (const headers of variants) {
+      const result = await publicCall('/v1/models',headers);
+      expect(result.response.status).toBe(401); expect(result.json.error.message).toBe('Invalid, disabled or expired API key');
+      expect(result.content).not.toContain(token);
+    }
+  });
+
+  it.each(['/v1/models','/v1/messages'])('does not replace an explicit incorrect Bearer token with a valid x-api-key on %s', async path => {
+    await newChannel(); const key = await newKey();
+    const result = await publicCall(path,{ authorization:'Bearer pg_live_synthetic-wrong-client-key','x-api-key':key.token },path === '/v1/models' ? 'GET' : 'POST',path === '/v1/models' ? undefined : { model:'test-model',max_tokens:32,messages:[{ role:'user',content:'hello' }] });
+    expect(result.response.status).toBe(401); expect(result.content).not.toContain(key.token);
+    expect((await new Store(testEnv).getKey(key.key.id))?.used).toBe(0);
+  });
+
+  it.each(['internal space','internal tab','comma joined','repeated Bearer','multiple values','duplicate headers','missing token'] as const)('rejects malformed or duplicated Bearer credentials: %s', async mode => {
+    await newChannel(); const key = await newKey();
+    const split = Math.floor(key.token.length/2);
+    const values = {
+      'internal space':`Bearer ${key.token.slice(0,split)} ${key.token.slice(split)}`,
+      'internal tab':`Bearer ${key.token.slice(0,split)}\t${key.token.slice(split)}`,
+      'comma joined':`Bearer ${key.token},${key.token}`,
+      'repeated Bearer':`Bearer Bearer ${key.token}`,
+      'multiple values':`Bearer ${key.token}, Bearer ${key.token}`,
+      'duplicate headers':`Bearer ${key.token}`,
+      'missing token':'Bearer   ',
+    };
+    const headers: Record<string,string> = { authorization:values[mode],...(mode === 'duplicate headers' ? { Authorization:`Bearer ${key.token}` } : {}) };
+    expect((await publicCall('/v1/models',headers)).response.status).toBe(401);
+  });
+
+  it('keeps a missing current profile as a permission failure under either accepted header', async () => {
+    await newChannel(); const key = await newKey();
+    await testEnv.DB.prepare("UPDATE api_keys SET data=json_set(data,'$.activeProfile','missing-profile') WHERE id=?").bind(key.key.id).run();
+    for (const headers of [{ authorization:'bearer '+key.token }, { 'x-api-key':key.token }]) {
+      const result = await publicCall('/v1/models',headers);
+      expect(result.response.status).toBe(403); expect(result.json.error.message).toBe('Active profile is unavailable');
+    }
   });
 });
 
