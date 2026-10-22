@@ -6,13 +6,16 @@ import { autoDisableDecision, evaluateHealth } from '../worker/health';
 import { normalizeJSON, prepareBody, RequestFailure, toAnthropic, toGemini, upstreamHeaders, upstreamUrl } from '../worker/protocols';
 import { sseBytes } from '../worker/sse';
 
+const backgroundTasks: Promise<unknown>[] = [];
+async function flush() { while (backgroundTasks.length) await Promise.all(backgroundTasks.splice(0)); }
+
 function channel(id = 'a', scenario: GatewayChannel['config']['mock']['scenario'] = 'healthy'): GatewayChannel {
   return { id, name: `Channel ${id}`, provider: 'Mock', model: 'test', models: ['test'], tags: ['production'], weight: 1, endpoint: 'https://upstream.example/v1', status: 'healthy', priority: id === 'a' ? 0 : 1, ttft: 0.01, successRate: 100, requests: 0, enabled: true, color: '#000', history: [], createdAt: new Date().toISOString(), archived: false, credentialCount: 0,
     health: { averageTtft: null, averageDuration: null, samples: 0, cooldownUntil: null, recoveryCount: 0, failureCount: 0, reason: null, autoDisabled: false }, config: { ...structuredClone(defaultChannelConfig), protocol: 'mock', mock: { scenario, delayMs: 1, status: 503, failuresBeforeSuccess: 1 } } };
 }
 function setup(channels = [channel()]) {
   const attempts: AttemptRecord[] = [], logs: GatewayLog[] = [], sticky = new Map<string, string>();
-  const context: GatewayContext = { channels, settings: { ...defaultSettings, maxSameChannelRetries: 0, retryDelayMs: 100 }, env: { DEV_MODE: 'true' } as GatewayContext['env'], ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext, key: null, profile: null, source: 'playground' };
+  const context: GatewayContext = { channels, settings: { ...defaultSettings, maxSameChannelRetries: 0, retryDelayMs: 100 }, env: { DEV_MODE: 'true' } as GatewayContext['env'], ctx: { waitUntil: vi.fn((task: Promise<unknown>) => { backgroundTasks.push(task); }) } as unknown as ExecutionContext, key: null, profile: null, source: 'playground' };
   const store: GatewayStore = {
     getCredentials: async () => [{ id: 'credential', label: 'test', secret: 'secret-super-important', enabled: true, failureCount: 0, disabledAt: null }],
     recordAttempt: async a => { attempts.push(a); }, recordLog: async l => { logs.push(l); }, recordEvent: async () => {},
@@ -20,11 +23,11 @@ function setup(channels = [channel()]) {
     nextRoundRobin: async () => 0, getSticky: async key => sticky.get(key) || null, setSticky: async (key, id) => { sticky.set(key, id); },
     getAiGatewayToken: async () => null, reserveChannel: async () => true,
   };
-  return { context, store, attempts, logs, sticky };
+  return { context, store, attempts, logs, sticky, flush };
 }
 function request(stream = true, signal?: AbortSignal) { return new Request('https://gateway.test/v1/chat/completions', { method: 'POST', signal, body: JSON.stringify({ model: 'test', stream, messages: [{ role: 'user', content: 'hello' }] }) }); }
 const profile: KeyProfile = { id: 'profile', name: 'production', scope: 'tags', tags: ['production'], match: 'any', channelIds: [], modelMode: 'all', models: [], requestLimit: '', mappings: [] };
-afterEach(() => vi.unstubAllGlobals());
+afterEach(async () => { await flush(); vi.unstubAllGlobals(); });
 
 describe('scope and model selection', () => {
   it('applies ANY / ALL / NONE and empty tag scopes fail closed', () => {
@@ -105,6 +108,7 @@ describe('model alias response identity', () => {
       return upstreamReply(protocol, stream);
     }); vi.stubGlobal('fetch', fetcher);
     await expectAliasResponse(await handleGateway(aliasRequest(stream), context, store), stream);
+    await flush();
     expect(fetcher).toHaveBeenCalledTimes(1); expect(attempts[0].model).toBe('provider-model'); expect(logs[0].model).toBe('client-alias');
   });
   it.each(['anthropic', 'gemini'] as const)('routes %s inference with a NewAPI account monitor using the native protocol and the inference API key', async protocol => {
@@ -138,6 +142,7 @@ describe('model alias response identity', () => {
     const response = await handleGateway(aliasRequest(stream), context, store);
     expect(response.headers.get('x-pulsegate-channel-id')).toBe('b'); expect(response.headers.get('x-pulsegate-attempts')).toBe('2');
     await expectAliasResponse(response, stream);
+    await flush();
     expect(dispatched).toEqual(['provider-primary', 'provider-backup']); expect(attempts.map(attempt => attempt.model)).toEqual(dispatched);
     expect(logs[0]).toMatchObject({ model: 'client-alias', result: 'failover', apiKeyId: 'client-key' });
   });
@@ -166,11 +171,13 @@ describe('gateway execution', () => {
     const { context, store, logs, attempts } = setup(); const response = await handleGateway(request(), context, store);
     expect(response.status).toBe(200); expect(response.headers.get('x-pulsegate-channel-id')).toBe('a');
     const text = await response.text(); expect(text).toContain('[DONE]'); expect(text).toContain('content');
+    await flush();
     expect(attempts).toHaveLength(1); expect(attempts[0].ttft).not.toBeNull(); expect(logs[0].tokens).toBeGreaterThan(0);
   });
   it('detects empty SSE and retries another channel before sending any content', async () => {
     const { context, store, logs, attempts } = setup([channel('a', 'empty'), channel('b')]);
     const response = await handleGateway(request(), context, store); await response.text();
+    await flush();
     expect(response.headers.get('x-pulsegate-channel-id')).toBe('b'); expect(attempts.map(a => a.result)).toEqual(['empty', 'success']); expect(logs[0].result).toBe('failover');
   });
   it('does not retry any failure when retryEnabled is false', async () => {
@@ -203,6 +210,7 @@ describe('gateway execution', () => {
   it('does not splice a second channel into a stream disconnected after valid output', async () => {
     const { context, store, attempts, logs } = setup([channel('a', 'disconnect'), channel('b')]);
     const response = await handleGateway(request(), context, store); const text = await response.text();
+    await flush();
     expect(text).toContain('upstream_stream_error'); expect(attempts).toHaveLength(1); expect(logs[0].result).toBe('error');
   });
   it('cancels retry backoff promptly when the client aborts', async () => {
@@ -212,11 +220,12 @@ describe('gateway execution', () => {
   });
   it('cancels an established stream without recording the cancellation as upstream failure', async () => {
     const { context, store, attempts } = setup(); const response = await handleGateway(request(), context, store);
-    const reader = response.body!.getReader(); await reader.read(); await reader.cancel(); expect(attempts).toHaveLength(1); expect(attempts[0].result).toBe('cancelled'); expect(attempts[0].status).toBe(499);
+    const reader = response.body!.getReader(); await reader.read(); await reader.cancel(); await flush(); expect(attempts).toHaveLength(1); expect(attempts[0].result).toBe('cancelled'); expect(attempts[0].status).toBe(499);
   });
   it('cancels while an established upstream read is pending', async () => {
     const { context, store, attempts } = setup(); const response = await handleGateway(request(), context, store); const reader = response.body!.getReader();
     await reader.read(); await reader.read(); const pendingRead = reader.read(); await reader.cancel(); await pendingRead;
+    await flush();
     expect(attempts).toHaveLength(1); expect(attempts[0].result).toBe('cancelled');
   });
   it('does not dispatch upstream work after cancellation during a rate reservation', async () => {

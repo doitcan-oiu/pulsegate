@@ -10,6 +10,8 @@ type RelayProtocol = 'openai' | 'anthropic';
 type ChannelProtocol = 'openai' | 'anthropic' | 'gemini';
 const clientModel = 'client-alias', upstreamModel = 'provider-model', upstreamSecret = 'upstream-private-secret';
 const encoder = new TextEncoder();
+const backgroundTasks: Promise<unknown>[] = [];
+async function flush() { while (backgroundTasks.length) await Promise.all(backgroundTasks.splice(0)); }
 function channel(id = 'primary', actualModel = upstreamModel, protocol: ChannelProtocol = 'anthropic', alias = true): GatewayChannel {
   return { id, name: id, provider: protocol, model: actualModel, models: [actualModel], tags: ['production'], weight: 1, endpoint: `https://${id}.example`, status: 'healthy', priority: id === 'primary' ? 0 : 1, ttft: 0, successRate: 100, requests: 0, enabled: true, color: '#000', history: [], createdAt: new Date().toISOString(), archived: false, credentialCount: 1,
     health: { averageTtft: null, averageDuration: null, samples: 0, cooldownUntil: null, recoveryCount: 0, failureCount: 0, reason: null, autoDisabled: false },
@@ -17,14 +19,14 @@ function channel(id = 'primary', actualModel = upstreamModel, protocol: ChannelP
 }
 function setup(channels = [channel()]) {
   const attempts: AttemptRecord[] = [], logs: GatewayLog[] = [];
-  const context: GatewayContext = { channels, settings: { ...defaultSettings, errorMode: 'raw', retryEnabled: false, emptyResponseDetection: false }, env: {} as GatewayContext['env'], ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext, key: null, profile: null, source: 'api' };
+  const context: GatewayContext = { channels, settings: { ...defaultSettings, errorMode: 'raw', retryEnabled: false, emptyResponseDetection: false }, env: {} as GatewayContext['env'], ctx: { waitUntil: vi.fn((task: Promise<unknown>) => { backgroundTasks.push(task); }) } as unknown as ExecutionContext, key: null, profile: null, source: 'api' };
   const store: GatewayStore = {
     getCredentials: async () => [{ id: 'credential', label: 'upstream', secret: upstreamSecret, enabled: true, failureCount: 0, disabledAt: null }],
     recordAttempt: async value => { attempts.push(value); }, recordLog: async value => { logs.push(value); }, recordEvent: vi.fn(async () => {}),
     getRecentAttempts: async () => [], updateHealth: vi.fn(async () => {}), setCredentialHealth: vi.fn(async () => {}), incrementKeyUsage: vi.fn(async () => true),
     nextRoundRobin: async () => 0, getSticky: async () => null, setSticky: async () => {}, getAiGatewayToken: async () => null, reserveChannel: vi.fn(async () => true),
   };
-  return { context, store, attempts, logs };
+  return { context, store, attempts, logs, flush };
 }
 function request(body: unknown, protocol: RelayProtocol = 'anthropic', signal?: AbortSignal) {
   return new Request('https://gateway.test/v1/' + (protocol === 'anthropic' ? 'messages' : 'chat/completions'), { method: 'POST', signal, headers: { 'content-type': 'application/json', 'x-api-key': 'pg_live_client', authorization: 'Bearer pg_live_client', 'x-trace-id': 'transparent-relay', 'anthropic-version': '2024-01-01', 'anthropic-beta': 'prompt-caching-2024-07-31,tools-2024-05-16' }, body: typeof body === 'string' ? body : JSON.stringify(body) });
@@ -58,7 +60,7 @@ function nativeEvents(): Event[] {
   ];
 }
 
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(async () => { await flush(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('public relay preserves the incoming protocol and provider payloads', () => {
   it.each((['anthropic', 'openai'] as const).flatMap(incoming => (['openai', 'anthropic', 'gemini'] as const).map(configured => ({ incoming, configured }))))('keeps $incoming path, body and JSON response through a $configured channel', async ({ incoming, configured }) => {
@@ -196,7 +198,7 @@ describe('public relay preserves the incoming protocol and provider payloads', (
     const native = nativeEvents(); vi.stubGlobal('fetch', vi.fn(async () => streaming(native)));
     const response = await dispatch({ model: clientModel, stream: true, vendor_stream: null }, context, store);
     const expected = native.map(({ event, data }) => ({ event, data: { ...data, ...(typeof data.model === 'string' ? { model: clientModel } : {}), ...(event === 'message_start' ? { message: { ...data.message, model: clientModel } } : {}) } }));
-    expect(await readEvents(response)).toEqual(expected); expect(attempts[0]).toMatchObject({ result: 'success', status: 200 }); expect(logs[0]).toMatchObject({ model: clientModel, result: 'success' });
+    expect(await readEvents(response)).toEqual(expected); await flush(); expect(attempts[0]).toMatchObject({ result: 'success', status: 200 }); expect(logs[0]).toMatchObject({ model: clientModel, result: 'success' });
   });
 
   it('preserves SSE comments, id, retry, event names, line endings and opaque data when another frame needs an alias rewrite', async () => {
@@ -205,6 +207,7 @@ describe('public relay preserves the incoming protocol and provider payloads', (
     const raw = prefix + 'id: model\r\nevent: arbitrary\r\ndata: {"model":"provider-model","nested":{"model":"nested-model"},"future":null}\r\n\r\n: final comment\r\n\r\n';
     vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, { headers: { 'content-type': 'text/event-stream' } })));
     const response = await dispatch({ model: clientModel, stream: true }, context, store), actual = await response.text();
+    await flush();
     expect(actual).toBe(raw.replace('"model":"provider-model"', '"model":"client-alias"'));
   });
 
@@ -277,6 +280,7 @@ describe('public relay preserves the incoming protocol and provider payloads', (
     const native = nativeEvents().slice(0, 3); native.push({ event: 'error', data: { type: 'error', error: { type: 'vendor_error', message: 'failed ' + upstreamSecret }, future: null } });
     vi.stubGlobal('fetch', vi.fn(async () => streaming(native)));
     const response = await dispatch({ model: clientModel, stream: true }, context, store), text = await response.text();
+    await flush();
     expect(text).not.toContain(upstreamSecret);
     const events = await readEvents(new Response(text)); expect(events.at(-1)).toMatchObject({ event: 'error', data: { type: 'error', error: { type: 'vendor_error' }, future: null } });
     expect(attempts[0]).toMatchObject({ result: 'error' }); expect(logs[0].error).not.toContain(upstreamSecret);
@@ -291,6 +295,7 @@ describe('public relay preserves the incoming protocol and provider payloads', (
     }));
     const response = await dispatch({ model: clientModel, stream: true }, context, store), reader = response.body!.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toContain('event: message_start'); await reader.cancel();
+    await flush();
     expect(cancelled).toBe(true); expect(upstreamSignal?.aborted).toBe(true); expect(attempts[0]).toMatchObject({ status: 499, result: 'cancelled' }); expect(logs[0]).toMatchObject({ status: 499, result: 'error' });
   });
 
@@ -304,6 +309,7 @@ describe('public relay preserves the incoming protocol and provider payloads', (
     const response = await dispatch({ model: clientModel, stream: true }, context, store), reader = response.body!.getReader();
     const output: string[] = [];
     await expect((async () => { while (true) { const item = await reader.read(); if (item.done) return; output.push(new TextDecoder().decode(item.value)); } })()).rejects.toThrow('Provider connection broken');
+    await flush();
     expect(output.join('')).toContain('content_block_delta'); expect(output.join('')).not.toContain('event: error'); expect(output.join('')).not.toContain('[DONE]');
     expect(upstreamSignal?.aborted).toBe(true); expect(attempts[0]).toMatchObject({ status: 502, result: 'error' }); expect(logs[0]).toMatchObject({ status: 502, result: 'error' });
   });

@@ -8,35 +8,59 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '', event = 'message', data: string[] = [];
+  let frameBytes = 0;
+  const countBytes = (size: number) => {
+    frameBytes += size;
+    if (frameBytes > 1024 * 1024) throw new StreamFailure('Upstream SSE event exceeded 1 MiB');
+  };
+  const line = (raw: string): SSEEvent | undefined => {
+    const value = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (!value) {
+      const complete = data.length ? { event, data: data.join('\n') } : undefined;
+      event = 'message'; data = []; frameBytes = 0;
+      return complete;
+    }
+    if (value.startsWith(':')) return;
+    const colon = value.indexOf(':'), field = colon < 0 ? value : value.slice(0, colon);
+    const content = colon < 0 ? '' : value.slice(colon + 1);
+    const parsed = content.startsWith(' ') ? content.slice(1) : content;
+    if (field === 'event') event = parsed;
+    else if (field === 'data') data.push(parsed);
+  };
   const abort = () => { void reader.cancel(signal?.reason).catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   try {
     while (true) {
       if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
       const { value, done } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      if (buffer.length > 1024 * 1024) throw new StreamFailure('Upstream SSE event exceeded 1 MiB');
-      let newline: number;
-      while ((newline = buffer.indexOf('\n')) >= 0) {
-        let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        if (!line) {
-          if (data.length) yield { event, data: data.join('\n') };
-          event = 'message'; data = [];
-        } else if (!line.startsWith(':')) {
-          const colon = line.indexOf(':'); const field = colon < 0 ? line : line.slice(0, colon);
-          const raw = colon < 0 ? '' : line.slice(colon + 1); const value = raw.startsWith(' ') ? raw.slice(1) : raw;
-          if (field === 'event') event = value;
-          else if (field === 'data') { data.push(value); if (data.reduce((n, d) => n + d.length, 0) > 1024 * 1024) throw new StreamFailure('Upstream SSE event exceeded 1 MiB'); }
-        }
-      }
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
       if (done) {
-        if (buffer.startsWith('data:')) data.push(buffer.slice(5).trimStart());
+        buffer += decoder.decode();
+        const complete = buffer ? line(buffer) : undefined;
+        if (complete) yield complete;
         if (data.length) yield { event, data: data.join('\n') };
         break;
       }
+      let offset = 0, newline: number;
+      while ((newline = value.indexOf(10, offset)) >= 0) {
+        if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+        countBytes(newline + 1 - offset);
+        buffer += decoder.decode(value.subarray(offset, newline + 1), { stream: true });
+        const complete = line(buffer.slice(0, -1)); buffer = '';
+        offset = newline + 1;
+        if (complete) yield complete;
+      }
+      if (offset < value.length) {
+        if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+        countBytes(value.length - offset);
+        buffer += decoder.decode(value.subarray(offset), { stream: true });
+      }
     }
-  } finally { signal?.removeEventListener('abort', abort); await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 export function meaningfulOpenAIChunk(value: Record<string, any>): boolean {

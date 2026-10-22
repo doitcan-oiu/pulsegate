@@ -4,7 +4,7 @@ import type { GatewayContext, GatewayStore } from '../worker/env';
 import { handleGateway } from '../worker/gateway';
 
 function setup(path: 'json' | 'sse' | 'redirect') {
-  const attempts: AttemptRecord[] = [], logs: GatewayLog[] = [];
+  const attempts: AttemptRecord[] = [], logs: GatewayLog[] = [], background: Promise<unknown>[] = [];
   const channel: GatewayChannel = {
     id: 'runtime', name: 'Runtime transport', provider: 'OpenAI', model: 'test', models: ['test'], tags: [], weight: 1, priority: 0,
     endpoint: `https://gateway-runtime.test/${path}`, status: 'healthy', ttft: 0, successRate: 100, requests: 0,
@@ -13,7 +13,7 @@ function setup(path: 'json' | 'sse' | 'redirect') {
     config: structuredClone(defaultChannelConfig),
   };
   const context: GatewayContext = {
-    env: { DEV_MODE: 'true' } as GatewayContext['env'], ctx: {} as ExecutionContext, channels: [channel],
+    env: { DEV_MODE: 'true' } as GatewayContext['env'], ctx: { waitUntil(task: Promise<unknown>) { background.push(task); } } as ExecutionContext, channels: [channel],
     settings: { ...defaultSettings, retryEnabled: false, stickyMode: 'off' }, key: null, profile: null, source: 'api',
   };
   const store: GatewayStore = {
@@ -25,7 +25,8 @@ function setup(path: 'json' | 'sse' | 'redirect') {
   const request = (stream: boolean) => new Request('https://gateway.test/v1/chat/completions', {
     method: 'POST', body: JSON.stringify({ model: 'test', stream, messages: [{ role: 'user', content: 'hi' }] }),
   });
-  return { context, store, attempts, logs, request };
+  const flush = async () => { while (background.length) await Promise.all(background.splice(0)); };
+  return { context, store, attempts, logs, request, flush };
 }
 
 describe('Workerd upstream transport without replacing global fetch', () => {
@@ -36,8 +37,9 @@ describe('Workerd upstream transport without replacing global fetch', () => {
     expect(attempts).toHaveLength(1); expect(attempts[0]).toMatchObject({ status: 200, result: 'success', inputTokens: 3, outputTokens: 2 }); expect(logs[0].tokens).toBe(5);
   });
   it('streams genuine upstream SSE through parsing, TTFT and final usage accounting', async () => {
-    const { context, store, attempts, logs, request } = setup('sse');
+    const { context, store, attempts, logs, request, flush } = setup('sse');
     const response = await handleGateway(request(true), context, store); const text = await response.text();
+    await flush();
     expect(response.status).toBe(200); expect(text).toContain('runtime SSE reply'); expect(text).toContain('[DONE]');
     expect(attempts).toHaveLength(1); expect(attempts[0].ttft).not.toBeNull(); expect(attempts[0]).toMatchObject({ status: 200, result: 'success', inputTokens: 3, outputTokens: 2 }); expect(logs[0].tokens).toBe(5);
   });

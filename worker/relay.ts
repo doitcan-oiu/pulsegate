@@ -219,8 +219,7 @@ export async function* relayStream(body: ReadableStream<Uint8Array>, clientModel
   const reader = body.getReader(), state = initialUsage(); let parts: Uint8Array[] = [], lineLength = 0, pendingCR = false, blankCR = false;
   let frameSize = 0;
   const countByte = () => { if (++frameSize > 1024 * 1024) throw new StreamFailure('Upstream SSE event exceeded 1 MiB'); };
-  let aborted: Promise<void> | undefined;
-  const abort = () => { aborted = reader.cancel(signal.reason).catch(() => {}); };
+  const abort = () => { void reader.cancel(signal.reason).catch(() => {}); };
   signal.addEventListener('abort', abort, { once: true });
   const frame = () => { const result = observeFrame(concatenate(parts), clientModel, rewriteModel, state); parts = []; frameSize = 0; return result; };
   try {
@@ -253,5 +252,11 @@ export async function* relayStream(body: ReadableStream<Uint8Array>, clientModel
       if (offset < value.length) parts.push(value.subarray(offset));
     }
     if (parts.length) yield frame();
-  } finally { signal.removeEventListener('abort', abort); await aborted; await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  } finally {
+    signal.removeEventListener('abort', abort);
+    // Cancellation closes pending reads immediately; an underlying source's cleanup
+    // promise must not hold this generator, downstream cancellation, or logging open.
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }

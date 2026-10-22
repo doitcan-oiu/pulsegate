@@ -197,14 +197,18 @@ export async function handleGateway(request: Request, context: GatewayContext, s
   }
   const secrets: string[] = [];
   const aigToken = context.env.AI_GATEWAY_TOKEN || await store.getAiGatewayToken(); if (aigToken) secrets.push(aigToken);
-  const recordLog = async (status: number, error: string | null, success: boolean) => {
-    const date = new Date(); const log: GatewayLog = {
+  const logSnapshot = (status: number, error: string | null, success: boolean): GatewayLog => {
+    const date = new Date(); return {
       id: requestId, createdAt: date.toISOString(), time: timeLabel(date), model: original.model,
       channel: lastCandidate?.channel.name || '无可用渠道', channelId: lastCandidate?.channel.id || null, apiKeyId: context.key?.id || null,
       stream: streaming, ttft: lastTtft || 0, duration: seconds(requestStart), tokens: totalInput + totalOutput, status,
       result: success ? candidates.findIndex(c => c.channel.id === lastCandidate?.channel.id) > 0 ? 'failover' : streaming ? (lastTtft || 0) > context.settings.threshold ? 'slow' : 'success' : latestDuration > context.settings.responseThreshold ? 'slow' : 'success' : 'error',
       attempts, source: context.source, traceId, error: error ? redact(error, secrets) : null,
-    }; await persist('request-log', () => store.recordLog(log));
+    };
+  };
+  const recordLog = (status: number, error: string | null, success: boolean) => {
+    const log = logSnapshot(status, error, success);
+    return persist('request-log', () => store.recordLog(log));
   };
   const remember = async (channel: GatewayChannel, candidateIndex: number) => {
     if (context.settings.stickyMode === 'prefer') { if (traceScope) await persist('trace-affinity', () => store.setSticky(traceScope, channel.id)); if (threadScope) await persist('thread-affinity', () => store.setSticky(threadScope, channel.id)); }
@@ -358,29 +362,45 @@ export async function handleGateway(request: Request, context: GatewayContext, s
         }
         if (!meaningful && !streamError && context.settings.emptyResponseDetection) throw new StreamFailure('Upstream stream completed without content', 502, 'empty');
         if (timeout !== undefined) clearTimeout(timeout); // Only TTFT is bounded. An established stream stays attached to this upstream.
-        if (!streamError) await remember(channel, candidateIndex);
-        let finished = false, downstreamCancelled = false;
-        const finish = async (success: boolean, error: string | null, status = passthrough ? response!.status : 200) => {
-          if (finished) return; finished = true; if (!passthrough) cleanup();
-          await record(success ? ttft !== null && ttft > context.settings.threshold ? 'slow' : 'success' : status === 499 ? 'cancelled' : 'error', status, error);
-          await recordLog(status, error, success);
+        if (!streamError) {
+          const remembered = remember(channel, candidateIndex);
+          if (context.source === 'probe') await remembered;
+          else context.ctx.waitUntil(remembered);
+        }
+        let finished = false, downstreamCancelled = false, finishTask: Promise<void> | undefined;
+        const finish = (success: boolean, error: string | null, status = passthrough ? response!.status : 200): Promise<void> | undefined => {
+          if (!finished) {
+            finished = true; if (!passthrough) cleanup();
+            // Capture completion before any storage wait. A slow health/log write must not
+            // hold terminal bytes, and later trailers or cancellation cannot alter this result.
+            const attempt = record(success ? ttft !== null && ttft > context.settings.threshold ? 'slow' : 'success' : status === 499 ? 'cancelled' : 'error', status, error);
+            const log = logSnapshot(status, error, success);
+            finishTask = (async () => { await attempt; await persist('request-log', () => store.recordLog(log)); })();
+            if (context.source !== 'probe') context.ctx.waitUntil(finishTask);
+          }
+          // Internal probes read channel health immediately after consuming their body.
+          return context.source === 'probe' ? finishTask : undefined;
         };
         const downstream = new ReadableStream<Uint8Array>({
           async pull(output) {
             try {
+              if (downstreamCancelled) return;
               if (prefix.length) {
                 const bytes = prefix.shift()!;
                 if (!prefix.length && (ended || terminalSeen)) await finish(!streamError, streamError);
+                if (downstreamCancelled) return;
                 if (ended && !prefix.length) { cleanup(); output.enqueue(bytes); output.close(); await iterator?.return(undefined); return; }
                 output.enqueue(bytes); return;
               }
-              if (ended) { await finish(!streamError, streamError); cleanup(); output.close(); await iterator?.return(undefined); return; }
+              if (ended) { await finish(!streamError, streamError); cleanup(); if (!downstreamCancelled) output.close(); await iterator?.return(undefined); return; }
               const item = await iterator!.next();
-              if (item.done) { ended = true; await finish(!streamError, streamError); cleanup(); output.close(); return; }
+              if (downstreamCancelled) return;
+              if (item.done) { ended = true; await finish(!streamError, streamError); cleanup(); if (!downstreamCancelled) output.close(); return; }
               currentUsage = { inputTokens: Math.max(currentUsage.inputTokens, item.value.usage.inputTokens), outputTokens: Math.max(currentUsage.outputTokens, item.value.usage.outputTokens) };
               if (item.value.error) streamError = redact(item.value.error, secrets);
               if (item.value.done) {
                 terminalSeen = true; await finish(!streamError, streamError);
+                if (downstreamCancelled) return;
                 if (!passthrough) { ended = true; cleanup(); output.enqueue(item.value.bytes); output.close(); await iterator?.return(undefined); return; }
               }
               output.enqueue(safeFrameBytes(item.value));
@@ -394,7 +414,11 @@ export async function handleGateway(request: Request, context: GatewayContext, s
               cleanup(); controller.abort(); await iterator?.return(undefined).catch(() => {});
             }
           },
-          async cancel() { downstreamCancelled = true; cleanup(); controller.abort(); await iterator?.return(undefined).catch(() => {}); await finish(false, '客户端取消流式响应', 499); },
+          async cancel() {
+            downstreamCancelled = true; cleanup(); controller.abort();
+            const persisted = finish(false, '客户端取消流式响应', 499);
+            await iterator?.return(undefined).catch(() => {}); await persisted;
+          },
         });
         return new Response(downstream, { status: response.status, statusText: response.statusText, headers: downstreamHeaders(true) });
       } catch (error) {
