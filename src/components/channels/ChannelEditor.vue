@@ -8,7 +8,8 @@ import { providerModelSuggestions } from '../../provider-models';
 import { useConsole } from '../../composables/useConsole';
 import AppDialog from '../AppDialog.vue';
 import ChannelCooldownSettings from './ChannelCooldownSettings.vue';
-import { credentialUpdates, type CredentialDraft } from './credential-utils';
+import CredentialBalance from './CredentialBalance.vue';
+import { credentialStatus, credentialUpdates, type CredentialDraft } from './credential-utils';
 const props = defineProps<{ channel?: GatewayChannel; tags: string[]; devMode?: boolean }>();
 const emit = defineEmits<{ close: []; saved: [] }>();
 const { notify } = useConsole();
@@ -17,6 +18,7 @@ const baseline = clone({ ...(props.channel?.config ?? defaultChannelConfig), coo
 const services = [{ value: 'openai', title: 'OpenAI', endpoint: 'https://api.openai.com' }, { value: 'anthropic', title: 'Anthropic', endpoint: 'https://api.anthropic.com' }, { value: 'gemini', title: 'Gemini', endpoint: 'https://generativelanguage.googleapis.com' }];
 const initialConnection = baseline.gatewayMode === 'ai-gateway' ? 'ai-gateway' : baseline.relayUrl ? 'relay' : 'direct';
 type BalanceBackend = 'newapi' | 'sub2api' | 'bbdevlab';
+type AccountBackend = Exclude<BalanceBackend, 'bbdevlab'>;
 type AccountDraft = { mode: NonNullable<GatewayChannel['accountAuthMode']>; username: string; password: string; accessToken: string; userId: string; cookie: string };
 const balanceBackends = [{ title: 'NewAPI', value: 'newapi' }, { title: 'Sub2API', value: 'sub2api' }, { title: 'BBDevLab', value: 'bbdevlab' }];
 const isBalanceBackend = (value: string | undefined): value is BalanceBackend => balanceBackends.some(backend => backend.value === value);
@@ -24,11 +26,11 @@ const initialBackend = isBalanceBackend(baseline.integration) ? baseline.integra
 const editorTab = ref('connection');
 const connectionPanels = ref<string | undefined>(initialConnection !== 'direct' ? 'connection' : undefined);
 const draft = ref({ name: props.channel?.name ?? '', provider: props.channel?.provider ?? 'OpenAI', protocol: baseline.protocol, endpoint: props.channel?.endpoint ?? services[0]!.endpoint, models: [...(props.channel?.models ?? [])], model: props.channel?.model ?? '', tags: [...(props.channel?.tags ?? [])], priority: props.channel?.priority ?? 0, weight: props.channel?.weight ?? 1, displayMultiplier: props.channel?.displayMultiplier ?? 1, website: props.channel?.website ?? '', enabled: props.channel?.enabled ?? true, cooldown: clone(baseline.cooldown), secrets: '', connection: initialConnection, relayUrl: baseline.relayUrl, slug: baseline.customProviderSlug, balance: isBalanceBackend(baseline.integration), backend: initialBackend as BalanceBackend });
-function accountDraft(backend: BalanceBackend): AccountDraft { return { mode: backend === 'bbdevlab' ? 'token' : props.channel?.accountIntegration === backend ? props.channel.accountAuthMode ?? 'password' : 'password', username: '', password: '', accessToken: '', userId: '', cookie: '' }; }
-const accounts = ref<Record<BalanceBackend, AccountDraft>>({ newapi: accountDraft('newapi'), sub2api: accountDraft('sub2api'), bbdevlab: accountDraft('bbdevlab') });
-const account = computed(() => accounts.value[draft.value.backend]);
+function accountDraft(backend: AccountBackend): AccountDraft { return { mode: props.channel?.accountIntegration === backend ? props.channel.accountAuthMode ?? 'password' : 'password', username: '', password: '', accessToken: '', userId: '', cookie: '' }; }
+const accounts = ref<Record<AccountBackend, AccountDraft>>({ newapi: accountDraft('newapi'), sub2api: accountDraft('sub2api') });
+const account = computed(() => accounts.value[draft.value.backend === 'bbdevlab' ? 'newapi' : draft.value.backend]);
 const simulated = computed(() => draft.value.protocol === 'mock');
-const savedAccount = computed(() => props.channel?.hasAccountCredentials && (props.channel.accountIntegration ?? baseline.integration) === draft.value.backend && (props.channel.accountAuthMode ?? (draft.value.backend === 'bbdevlab' ? 'token' : 'password')) === account.value.mode);
+const savedAccount = computed(() => draft.value.backend !== 'bbdevlab' && props.channel?.hasAccountCredentials && (props.channel.accountIntegration ?? baseline.integration) === draft.value.backend && (props.channel.accountAuthMode ?? 'password') === account.value.mode);
 const snapshot = () => JSON.stringify({ draft: draft.value, accounts: accounts.value, modelInput: modelInput.value, batchInput: batchInput.value, tagInput: tagInput.value });
 const modelInput = ref(''); const batchInput = ref(''); const tagInput = ref('');
 const initial = snapshot();
@@ -134,15 +136,10 @@ async function save() {
     try { updates = credentialUpdates(credentialDrafts.value, savedCredentials.value); }
     catch (error) { editorTab.value = 'connection'; throw error; }
     let accountCredentials: Record<string, string> | undefined;
-    if (d.balance && !simulated.value) {
+    if (d.balance && !simulated.value && d.backend !== 'bbdevlab') {
       editorTab.value = 'account';
       const a = account.value;
-      if (d.backend === 'bbdevlab') {
-        const token = a.accessToken.trim().replace(/^Bearer(?:\s+|$)/i, '');
-        if (!savedAccount.value && !token) throw new Error('请填写 BBDevLab 后台令牌');
-        if ((a.accessToken.trim() && !token) || token.length > 4096 || /\s|[\x00-\x1f\x7f]/.test(token)) throw new Error('BBDevLab 后台令牌须为单行，不超过 4,096 个字符');
-        if (token) accountCredentials = { accessToken: token };
-      } else if (a.mode === 'cookie') {
+      if (a.mode === 'cookie') {
         if (!savedAccount.value && !a.cookie.trim() && !a.accessToken.trim()) throw new Error('请填写 Cookie 或后台登录 Token');
         if (a.cookie.length > 16000 || /[\x00-\x1f\x7f]/.test(a.cookie)) throw new Error('Cookie 须为单行，不超过 16,000 个字符');
         const token = a.accessToken.trim().replace(/^Bearer(?:\s+|$)/i, '');
@@ -161,7 +158,7 @@ async function save() {
     }
     busy.value = true;
     await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: { ...connectionConfig(), ...changedChannelConfig({ cooldown: d.cooldown }, baseline) }, ...(apiKeys.length ? { apiKeys } : {}), ...(updates.length ? { credentialUpdates: updates } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
-    d.secrets = ''; credentialDrafts.value.forEach(key => { key.secret = ''; }); accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; accounts.value.bbdevlab.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
+    d.secrets = ''; credentialDrafts.value.forEach(key => { key.secret = ''; }); accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
   } catch (error) { notify(error instanceof Error ? error.message : '保存失败', 'error'); }
   finally { busy.value = false; }
 }
@@ -176,7 +173,7 @@ async function save() {
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="连接上游" subtitle="地址与密钥" prepend-icon="mdi-connection" :active="editorTab === 'connection'" :aria-pressed="editorTab === 'connection'" color="primary" @click="editorTab = 'connection'" />
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="模型与路由" :subtitle="`${draft.models.length} 个模型`" prepend-icon="mdi-cube-outline" :active="editorTab === 'models'" :aria-pressed="editorTab === 'models'" color="primary" @click="editorTab = 'models'" />
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="健康与冷却" subtitle="当前渠道独立设置" prepend-icon="mdi-shield-check-outline" :active="editorTab === 'health'" :aria-pressed="editorTab === 'health'" color="primary" @click="editorTab = 'health'" />
-          <v-list-item tag="button" type="button" role="button" :tabindex="0" title="余额账户" :subtitle="draft.balance ? '已启用' : '按需配置'" prepend-icon="mdi-wallet-outline" :active="editorTab === 'account'" :aria-pressed="editorTab === 'account'" color="primary" @click="editorTab = 'account'" />
+          <v-list-item tag="button" type="button" role="button" :tabindex="0" title="余额监控" :subtitle="draft.balance ? '已启用' : '按需配置'" prepend-icon="mdi-wallet-outline" :active="editorTab === 'account'" :aria-pressed="editorTab === 'account'" color="primary" @click="editorTab = 'account'" />
         </v-list>
         <div class="editor-nav-note"><v-icon size="16">mdi-shield-lock-outline</v-icon><span>凭据加密保存<br />原文不会回填</span></div>
       </aside>
@@ -192,7 +189,8 @@ async function save() {
             <v-progress-linear v-if="credentialsLoading" indeterminate class="mb-4" aria-label="加载已有密钥" />
             <v-alert v-if="credentialsError" type="error" variant="tonal" density="compact" class="mb-4">{{ credentialsError }}<v-btn variant="text" size="small" :disabled="credentialsLoading" @click="loadCredentials">重新加载</v-btn></v-alert>
             <div v-for="key in credentialDrafts" :key="key.id" class="saved-credential mb-4">
-              <div class="d-flex align-center ga-2 mb-3"><code class="text-caption">{{ credentialMeta.get(key.id)?.preview }}</code><v-chip :color="credentialMeta.get(key.id)?.enabled ? 'success' : 'warning'" size="x-small" variant="tonal">{{ credentialMeta.get(key.id)?.enabled ? '可用' : '已停用' }}</v-chip></div>
+              <div class="d-flex align-center ga-2 mb-3"><code class="text-caption">{{ credentialMeta.get(key.id)?.preview }}</code><v-chip :color="credentialMeta.get(key.id)?.enabled ? 'success' : 'warning'" size="x-small" variant="tonal">{{ credentialStatus(credentialMeta.get(key.id)) }}</v-chip></div>
+              <template v-if="draft.balance && draft.backend === 'bbdevlab'"><p v-if="key.secret.trim()" class="text-caption text-medium-emphasis mb-3">保存后将使用新 Key 重新查询余额。</p><CredentialBalance v-else :balance="credentialMeta.get(key.id)?.balance" class="mb-3" /></template>
               <div class="editor-field-grid editor-field-grid--responsive mb-0"><v-text-field v-model="key.label" label="密钥名称" maxlength="128" /><v-text-field v-model="key.secret" label="替换 API Key（留空保留）" :type="revealExisting.includes(key.id) ? 'text' : 'password'" :append-inner-icon="revealExisting.includes(key.id) ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="new-password" maxlength="16000" @click:append-inner="revealExisting = revealExisting.includes(key.id) ? revealExisting.filter(id => id !== key.id) : [...revealExisting, key.id]" /></div>
             </div>
             <p v-if="!credentialsLoading && !credentialsError && !credentialDrafts.length" class="text-caption text-medium-emphasis mb-4">尚未配置上游密钥，可在下方添加。</p>
@@ -228,11 +226,12 @@ async function save() {
         </section>
         <section v-show="editorTab === 'account'">
           <div class="editor-section-heading"><h3>上游余额监控</h3><p>支持 NewAPI、Sub2API 和 BBDevLab，由 Worker 定时刷新。</p></div>
-          <div class="account-toggle"><div><strong class="text-body-2">自动读取账户余额</strong><p class="text-caption text-medium-emphasis mt-1">关闭监控后，已保存的凭据仍然保留。</p></div><v-switch v-model="draft.balance" :disabled="simulated" color="primary" hide-details aria-label="自动刷新账户余额" /></div>
+          <div class="account-toggle"><div><strong class="text-body-2">自动读取上游余额</strong><p class="text-caption text-medium-emphasis mt-1">{{ draft.backend === 'bbdevlab' ? '逐个监控渠道 API Key，额度耗尽时仅停用对应 Key。' : '关闭监控后，已保存的凭据仍然保留。' }}</p></div><v-switch v-model="draft.balance" :disabled="simulated" color="primary" hide-details aria-label="自动刷新上游余额" /></div>
           <template v-if="draft.balance && !simulated">
-            <div class="editor-field-grid editor-field-grid--responsive mt-4" :class="{ 'editor-field-grid--single': draft.backend === 'bbdevlab' }"><v-select v-model="draft.backend" :items="balanceBackends" label="后台类型" /><v-select v-if="draft.backend !== 'bbdevlab'" v-model="account.mode" :items="[{ title: '账号密码', value: 'password' }, ...(draft.backend === 'newapi' ? [{ title: '后台访问令牌', value: 'token' }] : [{ title: 'Cookie / 登录 Token', value: 'cookie' }])]" label="认证方式" /></div>
+            <div class="editor-field-grid editor-field-grid--responsive mt-4" :class="{ 'editor-field-grid--single': draft.backend === 'bbdevlab' }"><v-select v-model="draft.backend" :items="balanceBackends" label="余额后台类型" /><v-select v-if="draft.backend !== 'bbdevlab'" v-model="account.mode" :items="[{ title: '账号密码', value: 'password' }, ...(draft.backend === 'newapi' ? [{ title: '后台访问令牌', value: 'token' }] : [{ title: 'Cookie / 登录 Token', value: 'cookie' }])]" label="认证方式" /></div>
+            <v-alert v-if="draft.backend === 'bbdevlab'" type="info" variant="tonal" density="compact">直接使用「连接上游」中的 API Key 逐个查询，无需单独填写后台令牌。余额耗尽只停用对应 Key，其余 Key 继续轮换；查询失败不会停用 Key。充值后确认余额大于 0，会自动恢复因额度耗尽停用的 Key，手动停用的 Key 保持停用。<p class="mt-2">可在「连接上游」每行添加一个 Key，保存后由 Worker 分批刷新，也可在渠道列表或密钥管理中手动刷新。</p></v-alert>
             <v-alert v-if="savedAccount" type="info" variant="tonal" density="compact" class="mb-4">已有加密保存的账户凭据，全部留空即可沿用。</v-alert>
-            <div class="account-fields"><template v-if="draft.backend === 'bbdevlab'"><v-text-field v-model="account.accessToken" label="BBDevLab 后台令牌" type="password" maxlength="4096" autocomplete="off" hint="与上游 API Key 独立保存；已有凭据时留空沿用。" persistent-hint /></template><template v-else-if="account.mode === 'password'"><v-text-field v-model="account.username" label="后台账号" autocomplete="off" /><v-text-field v-model="account.password" label="后台密码" type="password" autocomplete="new-password" /></template><template v-else><v-text-field v-if="account.mode === 'cookie'" v-model="account.cookie" label="Cookie" type="password" maxlength="16000" autocomplete="off" /><v-text-field v-model="account.accessToken" label="后台访问 Token" type="password" autocomplete="off" /><v-text-field v-if="account.mode === 'token'" v-model="account.userId" label="用户 ID（可选）" /></template></div>
+            <div v-if="draft.backend !== 'bbdevlab'" class="account-fields"><template v-if="account.mode === 'password'"><v-text-field v-model="account.username" label="后台账号" autocomplete="off" /><v-text-field v-model="account.password" label="后台密码" type="password" autocomplete="new-password" /></template><template v-else><v-text-field v-if="account.mode === 'cookie'" v-model="account.cookie" label="Cookie" type="password" maxlength="16000" autocomplete="off" /><v-text-field v-model="account.accessToken" label="后台访问 Token" type="password" autocomplete="off" /><v-text-field v-if="account.mode === 'token'" v-model="account.userId" label="用户 ID（可选）" /></template></div>
           </template>
           <div v-else class="account-placeholder"><v-icon size="24">mdi-wallet-outline</v-icon><p>按需启用余额监控</p><span>渠道调用不依赖此账户配置。</span></div>
         </section>

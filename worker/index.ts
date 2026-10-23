@@ -7,6 +7,7 @@ import { HttpError, apiKey, assert, bool, channel, number, object, oneOf, settin
 import { assertAccountReuse, parseAccountCredentials, refreshAccountBalance, refreshDueAccounts } from './accounts';
 import { discoverModels } from './model-discovery';
 import { credentialRecoveryAllowed } from './health';
+import { refreshChannelCredentialBalances, refreshDueCredentialBalances } from './credential-balances';
 import { anthropicErrorResponse, handleAnthropicMessages } from './anthropic-ingress';
 export { GatewayState } from './state';
 
@@ -165,7 +166,7 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
     }
     if (tail === 'clone' && method === 'POST') { const clone = { ...structuredClone(c),id:crypto.randomUUID(),name:c.name+' · 副本',enabled:false,credentialCount:0,hasAccountCredentials:false,accountAuthMode:undefined,accountIntegration:undefined,accountBalance:undefined,createdAt:new Date().toISOString(),requests:0,ttft:0,successRate:0,history:[],health:{ averageTtft:null,averageDuration:null,samples:0,autoDisabled:false,cooldownUntil:null,recoveryCount:0,failureCount:0,reason:null },status:'healthy' as const }; await store.saveChannel(clone); return response({ channel:clone },201); }
     if (tail === 'test' && method === 'POST') return testChannel(request,env,ctx,store,c,await body(request));
-    if (tail === 'balance' && method === 'POST') { assert(['newapi','sub2api','bbdevlab'].includes(c.config.integration ?? ''), '请先开启上游余额监控'); await refreshAccountBalance(env,c,dev,true); return response({ channel:await store.getChannel(c.id) }); }
+    if (tail === 'balance' && method === 'POST') { assert(['newapi','sub2api','bbdevlab'].includes(c.config.integration ?? ''), '请先开启上游余额监控'); if (c.config.integration === 'bbdevlab') await refreshChannelCredentialBalances(env,c,dev,true); else await refreshAccountBalance(env,c,dev,true); return response({ channel:await store.getChannel(c.id) }); }
     if (tail === 'recover' && method === 'POST') return testChannel(request,env,ctx,store,c,{},true);
     if (tail === 'reset-health' && method === 'POST') { await store.resetChannelHealth(c.id); return response({ channel:await store.getChannel(c.id) }); }
     if (tail === 'tests' && method === 'GET') return response(await store.listLogs({ channelId:c.id,source:'probe',limit:50 }));
@@ -204,7 +205,7 @@ export default {
     const path = new URL(request.url).pathname;
     try {
       if (path === '/api/session') return await sessionRoute(request,env);
-      if (path === '/health' && request.method === 'GET') { const readiness = await env.DB.prepare('SELECT COUNT(*) AS count FROM sqlite_master WHERE type=\'table\' AND name IN (\'channels\',\'settings\',\'channel_accounts\')').first<{ count:number }>(); return response({ status:readiness?.count === 3 ? 'ok' : 'migrations_required',service:'pulsegate' },readiness?.count === 3 ? 200 : 503); }
+      if (path === '/health' && request.method === 'GET') { const readiness = await env.DB.prepare('SELECT COUNT(*) AS count FROM sqlite_master WHERE type=\'table\' AND name IN (\'channels\',\'settings\',\'channel_accounts\',\'credential_balances\')').first<{ count:number }>(); return response({ status:readiness?.count === 4 ? 'ok' : 'migrations_required',service:'pulsegate' },readiness?.count === 4 ? 200 : 503); }
       const store = new Store(env);
       if (path.startsWith('/api/')) return await admin(request,env,ctx,store);
       if (path === '/v1/models' && request.method === 'GET') { const key = await authorizeApi(request,store,true); const models = modelsFor(await store.listChannels(),currentProfile(key)); return response({ object:'list',data:models.map(id => ({ id,object:'model',created:0,owned_by:'pulsegate' })) }); }
@@ -225,7 +226,10 @@ export default {
     const channels = store.listChannels();
     // Balance monitoring must run even if health recovery or log cleanup fails.
     const jobs = await Promise.allSettled([
-      channels.then(items => refreshDueAccounts(env,items,env.DEV_MODE === 'true')),
+      // With a Key pool, reserve 20 balance checks, 3 account refreshes (up to
+      // 7 fetches each), and 8 health probes within the 50 subrequest budget.
+      channels.then(items => refreshDueAccounts(env,items,env.DEV_MODE === 'true',items.some(item => item.config.integration === 'bbdevlab') ? 3 : 5)),
+      refreshDueCredentialBalances(env,env.DEV_MODE === 'true'),
       Promise.all([settings,channels]).then(([config,items]) => recoverDueChannels(env,ctx,store,config,items)),
       settings.then(config => store.cleanup(config.logRetentionDays)),
     ]);

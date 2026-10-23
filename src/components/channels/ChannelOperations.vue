@@ -7,7 +7,8 @@ import { channelConfigPatchForPanel, type ChannelConfigPanel } from '../../chann
 import { dateTime, errorText, resultColor, resultNames, seconds } from '../../format';
 import { useConsole } from '../../composables/useConsole';
 import { overridesToRows, serializeOverrides, validateConfig } from './channel-utils';
-import { credentialUpdates } from './credential-utils';
+import { credentialStatus, credentialUpdates } from './credential-utils';
+import CredentialBalance from './CredentialBalance.vue';
 import AppDialog from '../AppDialog.vue';
 import OverrideRows from './OverrideRows.vue';
 import ChannelTestResult from './ChannelTestResult.vue';
@@ -31,6 +32,7 @@ const dirty = computed(() => isConfig.value ? configSnapshot() !== initial : pro
 const canSaveCredential = computed(() => !!label.value.trim() && label.value.trim().length <= 128 && secret.value.trim().length <= 16000 && (editingCredentialId.value ? !!editingCredential.value && (!!secret.value.trim() || label.value.trim() !== editingCredential.value.label) : !!secret.value.trim()));
 const path = `/api/channels/${encodeURIComponent(props.channel.id)}`;
 const current = computed(() => channels.value.find(channel => channel.id === props.channel.id) ?? props.channel);
+const keyBalanceMonitoring = computed(() => current.value.config.integration === 'bbdevlab');
 const testModel = ref(props.channel.model || props.channel.models[0] || ''); const stream = ref(true);
 type TestResult = { success?: boolean; status?: number; ttft?: number | null; duration?: number | null; error?: string | null; requestId?: string; attempts?: AttemptRecord[] };
 const result = ref<TestResult | null>(null); const logs = ref<GatewayLog[]>([]); const logTotal = ref(0); const logDetail = ref<{ log: GatewayLog; attempts: AttemptRecord[] } | null>(null); const detailLoading = ref('');
@@ -99,6 +101,16 @@ async function saveCredential() {
   await operation(async () => { const data = await api<{ credential: CredentialMeta }>(id ? `${path}/credentials/${encodeURIComponent(id)}` : `${path}/credentials`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(patch) }); credentials.value = id ? credentials.value.map(item => item.id === id ? data.credential : item) : [...credentials.value, data.credential]; setCredentialDraft(null); }, id ? '密钥修改已保存' : '密钥已添加');
 }
 async function toggleCredential(key: CredentialMeta) { await operation(async () => { const data = await api<{ credential: CredentialMeta }>(`${path}/credentials/${encodeURIComponent(key.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !key.enabled }) }); credentials.value = credentials.value.map(item => item.id === key.id ? data.credential : item); }, '密钥状态已更新'); }
+async function refreshCredentialBalances() {
+  await operation(async () => {
+    const data = await api<{ channel: GatewayChannel }>(`${path}/balance`, { method: 'POST' });
+    channels.value = channels.value.map(channel => channel.id === data.channel.id ? data.channel : channel);
+    const result = await api<{ credentials: CredentialMeta[] }>(`${path}/credentials`);
+    if (alive) credentials.value = result.credentials;
+    if (data.channel.accountBalance?.status === 'error') notify(data.channel.accountBalance.error ?? '部分密钥余额查询失败', 'error');
+    else notify(credentials.value.length > 40 ? '已刷新一批密钥，其余由 Worker 定时分批刷新' : '密钥余额已刷新', 'success');
+  });
+}
 async function removeCredential() { const key = deleteCredential.value; if (!key) return; await operation(async () => { await api(`${path}/credentials/${encodeURIComponent(key.id)}`, { method: 'DELETE' }); credentials.value = credentials.value.filter(item => item.id !== key.id); deleteCredential.value = null; if (editingCredentialId.value === key.id) setCredentialDraft(null); }, '密钥已删除'); }
 async function removeChannel() { if (deleteName.value !== props.channel.name) return; if (await operation(() => api(path, { method: 'DELETE' }), '渠道已删除')) close(true); }
 function addStatus() { const value = Number(customStatus.value); if (!Number.isInteger(value) || value < 400 || value > 599) { notify('HTTP 状态码须为 400–599', 'error'); return; } config.value.autoDisable.statuses = [...new Set([...config.value.autoDisable.statuses, value])]; customStatus.value = ''; }
@@ -139,8 +151,9 @@ function addStatus() { const value = Number(customStatus.value); if (!Number.isI
     <template v-if="panel === 'test'"><div class="operation-field-grid operation-field-grid--small-responsive mb-4"><v-select v-model="testModel" :items="channel.models" label="测试模型" :disabled="busy" /><v-select v-model="stream" :items="[{ title: 'SSE 流式', value: true }, { title: '非流式', value: false }]" label="响应模式" :disabled="busy" /></div><p class="text-caption text-medium-emphasis">仅使用当前渠道配置，测试结果会记录日志并更新健康状态。</p><ChannelTestResult v-if="result" :result="result" /></template>
     <template v-if="panel === 'history'"><p class="text-body-2 mb-4">共 {{ logTotal }} 条测试记录</p><v-table density="compact"><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>首字</th><th>完成</th><th>HTTP</th><th /></tr></thead><tbody><tr v-for="log in logs" :key="log.id"><td class="text-caption">{{ dateTime(log.createdAt) }}</td><td>{{ log.model }}<div class="text-caption text-medium-emphasis">{{ log.stream ? '流式' : '非流式' }} · {{ log.attempts }} 次</div></td><td><v-chip :color="resultColor(log.result)" size="small">{{ resultNames[log.result] }}</v-chip></td><td>{{ log.stream ? seconds(log.ttft || null) : '—' }}</td><td>{{ seconds(log.duration) }}</td><td>{{ log.status }}</td><td><v-btn size="small" variant="text" :loading="detailLoading === log.id" :disabled="!!detailLoading" @click="showLog(log)">详情</v-btn></td></tr><tr v-if="!logs.length && !busy"><td colspan="7" class="text-center py-8 text-medium-emphasis">暂无测试历史</td></tr></tbody></v-table></template>
     <template v-if="panel === 'credentials'">
-      <div class="credential-summary"><v-icon color="primary">mdi-key-chain-variant</v-icon><div><strong>{{ credentials.length }} 把上游密钥</strong><p>自动轮换可用密钥，原文加密保存。</p></div></div>
-      <v-table v-if="credentials.length" class="credential-table mb-4"><thead><tr><th>密钥</th><th>状态</th><th>失败次数</th><th class="text-right">操作</th></tr></thead><tbody><tr v-for="key in credentials" :key="key.id"><td><strong>{{ key.label }}</strong><code class="d-block text-medium-emphasis mt-1">{{ key.preview }}</code><p v-if="key.reason" class="text-caption text-warning mt-1">{{ key.reason }}</p></td><td><v-chip :color="key.enabled ? 'success' : 'warning'" size="small" variant="tonal">{{ key.enabled ? '可用' : '已停用' }}</v-chip></td><td>{{ key.failureCount }}<span class="table-secondary">{{ dateTime(key.createdAt) }}</span></td><td><div class="d-flex justify-end"><v-btn size="small" variant="text" :disabled="busy" @click="beginCredentialEdit(key)">编辑</v-btn><v-btn size="small" variant="text" :disabled="busy" @click="toggleCredential(key)">{{ key.enabled ? '停用' : '启用' }}</v-btn><v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" aria-label="删除密钥" :disabled="busy" @click="deleteCredential = key" /></div></td></tr></tbody></v-table>
+      <div class="credential-summary"><v-icon color="primary">mdi-key-chain-variant</v-icon><div><strong>{{ credentials.length }} 把上游密钥</strong><p>自动轮换可用密钥，原文加密保存。</p></div><v-spacer /><v-btn v-if="keyBalanceMonitoring" size="small" variant="tonal" prepend-icon="mdi-refresh" :loading="busy" :disabled="!credentials.length || current.archived" @click="refreshCredentialBalances">刷新余额</v-btn></div>
+      <v-alert v-if="keyBalanceMonitoring" type="info" variant="tonal" density="compact" class="mb-4">BBDevLab 逐 Key 查询余额，额度耗尽时仅停用对应 Key。充值后会自动恢复因额度耗尽停用的 Key；手动停用保持停用。<p v-if="credentials.length > 40" class="mt-1">单次手动刷新最多查询 40 个 Key，其余由 Worker 定时分批刷新。</p></v-alert>
+      <v-table v-if="credentials.length" class="credential-table mb-4"><thead><tr><th>密钥</th><th>状态</th><th v-if="keyBalanceMonitoring">Key 余额</th><th>失败次数</th><th class="text-right">操作</th></tr></thead><tbody><tr v-for="key in credentials" :key="key.id"><td><strong>{{ key.label }}</strong><code class="d-block text-medium-emphasis mt-1">{{ key.preview }}</code><p v-if="key.reason" class="text-caption text-warning mt-1">{{ key.reason }}</p></td><td><v-chip :color="key.enabled ? 'success' : 'warning'" size="small" variant="tonal">{{ credentialStatus(key) }}</v-chip></td><td v-if="keyBalanceMonitoring" class="credential-balance-cell"><CredentialBalance :balance="key.balance" /></td><td>{{ key.failureCount }}<span class="table-secondary">{{ dateTime(key.createdAt) }}</span></td><td><div class="d-flex justify-end"><v-btn size="small" variant="text" :disabled="busy" @click="beginCredentialEdit(key)">编辑</v-btn><v-btn size="small" variant="text" :disabled="busy" @click="toggleCredential(key)">{{ key.enabled ? '停用' : '启用' }}</v-btn><v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" aria-label="删除密钥" :disabled="busy" @click="deleteCredential = key" /></div></td></tr></tbody></v-table>
       <div v-else-if="!busy" class="credentials-empty">尚未配置上游密钥，在下方添加。</div>
       <div class="credential-editor"><div class="d-flex align-center mb-4"><h3 class="text-subtitle-1">{{ editingCredentialId ? '编辑密钥' : '添加密钥' }}</h3><v-spacer /><v-btn v-if="editingCredentialId" variant="text" size="small" :disabled="busy" @click="beginCredentialEdit(null)">返回添加</v-btn></div><p v-if="editingCredential" class="text-caption text-medium-emphasis mb-4">当前密钥：<code>{{ editingCredential.preview }}</code>。可修改名称，或填写新的 API Key 替换此密钥。</p><div class="operation-field-grid operation-field-grid--credentials"><v-text-field v-model="label" label="密钥名称" maxlength="128" :disabled="busy" /><v-text-field v-model="secret" :label="editingCredentialId ? '上游 API Key（留空不修改）' : '上游 API Key'" :type="secretVisible ? 'text' : 'password'" :append-inner-icon="secretVisible ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="off" :disabled="busy" @click:append-inner="secretVisible = !secretVisible" /></div></div>
     </template>
@@ -177,6 +190,7 @@ code { overflow-wrap: anywhere; }
 .credential-summary p { margin-top: 4px; color: rgba(var(--v-theme-on-surface), .6); font-size: 13px; }
 .credential-table :deep(table) { min-width: 640px; }
 .credential-table td { padding-block: 10px; }
+.credential-table .credential-balance-cell { min-width: 200px; max-width: 320px; white-space: normal; }
 .credentials-empty { padding: 24px 16px; margin-bottom: 16px; border: 1px dashed rgba(var(--v-theme-on-surface), .16); border-radius: 4px; color: rgba(var(--v-theme-on-surface), .55); text-align: center; font-size: 14px; }
 .credential-editor { background: rgba(var(--v-theme-on-surface), .035); padding: 14px; border-radius: 4px; }
 @media (max-width: 959px) { .operation-field-grid--credentials { grid-template-columns: minmax(0, 1fr); } }

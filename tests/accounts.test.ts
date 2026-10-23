@@ -276,7 +276,7 @@ describe("BBDevLab account balance adapter", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("tracks the integration and requires replacement credentials when switching providers", () => {
+  it("uses API keys for BBDevLab while requiring replacement account credentials for other providers", () => {
     const channel = makeChannel("bbdevlab");
     const previous = { ...channel, hasAccountCredentials: true, accountAuthMode: "token" as const };
     expect(accountIntegration(previous)).toBe("bbdevlab");
@@ -284,85 +284,10 @@ describe("BBDevLab account balance adapter", () => {
     expect(() => assertAccountCredentials(channel, { accessToken: token })).not.toThrow();
     for (const integration of ["newapi", "sub2api"] as const) {
       const other = { ...makeChannel(integration), hasAccountCredentials: true, accountIntegration: integration };
-      expect(() => assertAccountReuse(channel, other)).toThrow(HttpError);
+      expect(() => assertAccountReuse(channel, other)).not.toThrow();
       expect(() => assertAccountReuse(other, previous)).toThrow(HttpError);
       expect(() => assertAccountReuse(channel, other, { accessToken: token })).not.toThrow();
     }
-  });
-});
-
-describe("BBDevLab encrypted account refresh", () => {
-  const testEnv = env as unknown as Env & { TEST_MIGRATIONS: Parameters<typeof applyD1Migrations>[1] };
-  const token = "private-bbdevlab-refresh-token";
-  type Snapshot = { credentials: string; auth_secret: string | null; balance: string | null; next_refresh_at: number; lease_until: number; version: number };
-  const snapshot = (id: string) => testEnv.DB.prepare("SELECT * FROM channel_accounts WHERE channel_id=?").bind(id).first<Snapshot>();
-  async function seed(archived = false) {
-    const channel = { ...makeChannel("bbdevlab"), archived };
-    await testEnv.DB.prepare("INSERT INTO channels(id,data) VALUES(?,?)").bind(channel.id, JSON.stringify(channel)).run();
-    await (await prepareAccountSave(testEnv, channel, { accessToken: token }))!.run();
-    return channel;
-  }
-  beforeAll(async () => { await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS); });
-  beforeEach(async () => { await testEnv.DB.batch(["channel_accounts", "channels"].map(table => testEnv.DB.prepare("DELETE FROM " + table))); });
-
-  it("encrypts the token and session, refreshes at five-minute intervals, and preserves the last balance on failure", async () => {
-    const channel = await seed();
-    const initial = (await snapshot(channel.id))!;
-    expect(initial.credentials).not.toContain(token);
-    expect(JSON.parse(await decryptSecret(initial.credentials, testEnv))).toEqual({ accessToken: token });
-    const fetch = mockFetch(Response.json({ code: true, data: { total_available: 133516262 } }));
-    const started = Date.now();
-    await refreshAccountBalance(testEnv, channel, false);
-    const refreshed = (await snapshot(channel.id))!;
-    const balance = JSON.parse(refreshed.balance!);
-    expect(balance).toMatchObject({ status: "ok", amount: 1335, unit: "余额" });
-    expect(refreshed.next_refresh_at).toBeGreaterThanOrEqual(started + BALANCE_REFRESH_MS);
-    expect(refreshed.next_refresh_at).toBeLessThanOrEqual(Date.now() + BALANCE_REFRESH_MS);
-    expect(refreshed.lease_until).toBe(0);
-    expect(refreshed.auth_secret).not.toContain(token);
-    expect(JSON.parse(await decryptSecret(refreshed.auth_secret!, testEnv))).toMatchObject({ token, base });
-    await refreshAccountBalance(testEnv, channel, false);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    mockFetch(Response.json({ code: false, message: token + " provider-private-body" }));
-    await refreshAccountBalance(testEnv, channel, false, true);
-    const failed = (await snapshot(channel.id))!;
-    expect(JSON.parse(failed.balance!)).toMatchObject({ status: "error", amount: 1335, unit: "余额", updatedAt: balance.updatedAt });
-    expect(failed.balance).not.toContain(token);
-    expect(failed.balance).not.toContain("provider-private-body");
-    expect(failed.next_refresh_at).toBeGreaterThanOrEqual(started + BALANCE_REFRESH_MS);
-    expect(failed.lease_until).toBe(0);
-  });
-
-  it("allows one leased request and prevents an old response from overwriting replaced credentials", async () => {
-    const channel = await seed();
-    let began!: () => void, finish!: (response: Response) => void;
-    const started = new Promise<void>(resolve => began = resolve);
-    const response = new Promise<Response>(resolve => finish = resolve);
-    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () => { began(); return response; });
-    vi.stubGlobal("fetch", fetch);
-    const refreshing = refreshAccountBalance(testEnv, channel, false, true);
-    await started;
-    await refreshAccountBalance(testEnv, channel, false, true);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    const replacement = { accessToken: "replacement-private-bbdevlab-token" };
-    await (await prepareAccountSave(testEnv, channel, replacement))!.run();
-    finish(Response.json({ code: true, data: { total_available: 133516262 } }));
-    await refreshing;
-    const saved = (await snapshot(channel.id))!;
-    expect(saved.version).toBe(2);
-    expect(JSON.parse(await decryptSecret(saved.credentials, testEnv))).toEqual(replacement);
-    expect(saved.balance).toBeNull();
-    expect(saved.auth_secret).toBeNull();
-    expect(saved.next_refresh_at).toBe(0);
-  });
-
-  it("includes due BBDevLab accounts in the SQL queue and excludes archived accounts", async () => {
-    const archived = await seed(true), channel = await seed();
-    const fetch = mockFetch(Response.json({ code: true, data: { total_available: 200000 } }));
-    await refreshDueAccounts(testEnv, [archived, channel], false);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(JSON.parse((await snapshot(channel.id))!.balance!)).toMatchObject({ status: "ok", amount: 2, unit: "余额" });
-    expect((await snapshot(archived.id))!.next_refresh_at).toBe(0);
   });
 });
 

@@ -4,6 +4,7 @@ import { type ChatBody, normalizeJSON, normalizedStream, prepareBody, prepareRel
 import { meaningfulOpenAIChunk, sseBytes, StreamFailure } from './sse';
 import { mockUpstream, sleep } from './mock';
 import { relayJSON, relayStream, type RelayFrame } from './relay';
+import { refreshCredentialBalance } from './credential-balances';
 
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_RESPONSE = 8 * 1024 * 1024;
@@ -295,9 +296,9 @@ export async function handleGateway(request: Request, context: GatewayContext, s
         if (stream) { result.set('cache-control', 'no-cache, no-transform'); result.set('x-pulsegate-ttft-ms', String(Math.round((ttft || 0) * 1000))); }
         return result;
       };
-      const record = async (result: AttemptRecord['result'], status: number, error: string | null) => {
+      const record = async (result: AttemptRecord['result'], status: number, error: string | null, duration = seconds(attemptStart)) => {
         if (completed) return; completed = true;
-        totalInput += currentUsage.inputTokens; totalOutput += currentUsage.outputTokens; lastTtft = ttft; latestDuration = seconds(attemptStart);
+        totalInput += currentUsage.inputTokens; totalOutput += currentUsage.outputTokens; lastTtft = ttft; latestDuration = duration;
         await persist('attempt', () => store.recordAttempt({ id: crypto.randomUUID(), requestId, channelId: channel.id, channelName: channel.name, credentialId: credential?.id || null,
           model: candidate.model, stream: streaming, startedAt, ttft, duration: latestDuration, status, result,
           error: error ? redact(error, secrets) : null, ...currentUsage, attempt: attempts }));
@@ -428,8 +429,16 @@ export async function handleGateway(request: Request, context: GatewayContext, s
         const status = probeDeadlineExpired() ? 504 : request.signal.aborted ? 499 : timedOut ? 504 : error instanceof StreamFailure || error instanceof RequestFailure ? error.status : 502;
         const message = redact(probeDeadlineExpired() ? '渠道探测整体响应超时' : timedOut ? original.stream ? '流式首字等待超时' : '非流式响应等待超时' : error instanceof Error ? error.message : '上游连接失败', secrets);
         const kind = probeDeadlineExpired() ? 'error' : request.signal.aborted ? 'cancelled' : error instanceof StreamFailure ? error.kind : 'error';
-        const retry = !request.signal.aborted && !(error instanceof RequestFailure) && (timedOut || kind === 'empty' || !(error instanceof StreamFailure) || context.settings.retryStatuses.includes(status));
-        lastFailure = { status, message, kind, retry }; await record(kind, status, message);
+        const failedDuration = seconds(attemptStart);
+        let exhausted = false;
+        if (!request.signal.aborted && context.source !== 'probe' && channel.config.integration === 'bbdevlab' && credential && store.isCredentialExhausted && [401,402,403,429].includes(status)) {
+          // Confirm quota exhaustion outside the serialized state writer. An HTTP
+          // error alone must never be treated as a zero balance.
+          try { await refreshCredentialBalance(context.env,channel,credential.id,context.env.DEV_MODE === 'true',true); exhausted = await store.isCredentialExhausted(channel.id,credential.id); }
+          catch { /* Balance uncertainty retains the normal retry/health policy. */ }
+        }
+        const retry = !request.signal.aborted && !(error instanceof RequestFailure) && (exhausted || timedOut || kind === 'empty' || !(error instanceof StreamFailure) || context.settings.retryStatuses.includes(status));
+        lastFailure = { status, message, kind, retry }; await record(kind, status, message,failedDuration);
         if (!retry || !context.settings.retryEnabled) break;
       }
     }

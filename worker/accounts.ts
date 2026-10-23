@@ -41,6 +41,8 @@ export function assertAccountReuse(channel: GatewayChannel, previous: GatewayCha
     assertAccountCredentials(channel, account);
     return;
   }
+  // BBDevLab authenticates each balance request with its inference API Key.
+  if (integration === 'bbdevlab') return;
   assert(previous?.hasAccountCredentials && accountIntegration(previous) === integration, '开启余额监控或切换后台类型时，请填写对应的后台凭据');
 }
 
@@ -236,11 +238,11 @@ export async function fetchAccountBalance(channel: GatewayChannel, credentials: 
 }
 
 export async function refreshAccountBalance(env: Env, channel: GatewayChannel, dev: boolean, force = false): Promise<void> {
-  if (!isAccountIntegration(channel.config.integration)) return;
+  if (!isAccountIntegration(channel.config.integration) || channel.config.integration === 'bbdevlab') return;
   const now = Date.now();
   // Capture the destination and credentials in one atomic read. A Cron snapshot can
   // outlive a channel edit; never pair a new password with that snapshot's old URL.
-  const claimed = await env.DB.prepare("UPDATE channel_accounts SET lease_until=? WHERE channel_id=? AND lease_until<=? AND (?=1 OR next_refresh_at<=?) AND EXISTS (SELECT 1 FROM channels c WHERE c.id=channel_accounts.channel_id AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api','bbdevlab')) RETURNING *, (SELECT data FROM channels WHERE id=channel_accounts.channel_id) AS channel_data").bind(now + 45000, channel.id, now, force ? 1 : 0, now).first<AccountRow>();
+  const claimed = await env.DB.prepare("UPDATE channel_accounts SET lease_until=? WHERE channel_id=? AND lease_until<=? AND (?=1 OR next_refresh_at<=?) AND EXISTS (SELECT 1 FROM channels c WHERE c.id=channel_accounts.channel_id AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api')) RETURNING *, (SELECT data FROM channels WHERE id=channel_accounts.channel_id) AS channel_data").bind(now + 45000, channel.id, now, force ? 1 : 0, now).first<AccountRow>();
   if (!claimed) return;
   const old = claimed.balance ? JSON.parse(claimed.balance) as Balance : null;
   try {
@@ -263,7 +265,7 @@ export async function refreshDueAccounts(env: Env, channels: GatewayChannel[], d
   // A rejected cached session plus encrypted NewAPI login can require seven fetches.
   // Five accounts plus eight recovery probes stay below the Free plan's 50 external fetches.
   const boundedLimit = Math.min(5, Math.max(0, Math.floor(limit)));
-  const due = await env.DB.prepare("SELECT a.channel_id FROM channel_accounts a JOIN channels c ON c.id=a.channel_id WHERE a.next_refresh_at<=? AND a.lease_until<=? AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api','bbdevlab') ORDER BY a.next_refresh_at LIMIT ?").bind(Date.now(), Date.now(), boundedLimit).all<{ channel_id: string }>();
+  const due = await env.DB.prepare("SELECT a.channel_id FROM channel_accounts a JOIN channels c ON c.id=a.channel_id WHERE a.next_refresh_at<=? AND a.lease_until<=? AND COALESCE(json_extract(c.data,'$.archived'),0)=0 AND json_extract(c.data,'$.config.integration') IN ('newapi','sub2api') ORDER BY a.next_refresh_at LIMIT ?").bind(Date.now(), Date.now(), boundedLimit).all<{ channel_id: string }>();
   // Bounded batches leave headroom for normal gateway traffic and Cron subrequest limits.
   for (let i = 0; i < due.results.length; i += 3) {
     await Promise.allSettled(due.results.slice(i, i + 3).map(({ channel_id }) => {

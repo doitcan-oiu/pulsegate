@@ -9,7 +9,7 @@
 | 模块 | 当前实现 |
 | --- | --- |
 | 添加渠道 | OpenAI / Anthropic / Gemini 接口类型，用于模型获取和渠道测试；独立的 NewAPI / Sub2API / BBDevLab 余额监控选项、多密钥；支持模型搜索、多选、手动/批量添加及默认测试模型 |
-| 后台余额 | NewAPI 账号密码/后台令牌、Sub2API 账号密码/浏览器会话、BBDevLab 令牌，凭据与登录会话 AES-GCM 加密；Worker Cron 每分钟检查到期账户，余额默认每 5 分钟更新，名称副标题展示余额与状态，可点击立即刷新 |
+| 后台余额 | NewAPI 账号密码/后台令牌、Sub2API 账号密码/浏览器会话；BBDevLab 直接使用渠道 API Key 逐个监控并汇总余额，单 Key 耗尽只停用该 Key；凭据 AES-GCM 加密，Worker Cron 自动分批刷新，也可手动刷新 |
 | 渠道列表 | 名称旁展示倍率（默认 1）和已配置的官网入口，名称下展示标签，均不占独立列；搜索、服务商/状态/标签/模型筛选、分页、列设置、批量启停/标签/权重、JSON 导入；倍率仅作展示，不参与调度、请求或费用计算 |
 | 渠道菜单 | Vuetify 可视化弹窗：模型映射行、价格与成本预览、类型化请求覆盖、连接与端点预览、限额卡片、状态码选择与恢复流程、已有密钥编辑、SSE/非流式测试及历史；支持复制、归档与删除 |
 | API Keys | 精简凭证列表与固定操作栏；基础名称和渠道权限优先，高级模型/映射/额度/多 Profile 默认折叠，保留启停/撤销/轮换、到期与标签授权 |
@@ -35,17 +35,23 @@
 
 NewAPI / Sub2API 的后台凭据独立于推理 API Key。后台地址从 Base URL 去除末尾 `/v1` 或 `/v1beta` 推导，保留部署子目录；余额不经过 AI Gateway。NewAPI 使用 `/api/user/self` 的 `quota`，按站点 `/api/status` 的 `quota_per_unit` 换算为 USD，无法取得比例时显示原始额度；Sub2API 显示后台 `balance`。支持 NewAPI 旧 Cookie、新 Token 与可选 RSA 密码加密登录，以及 Sub2API Token 登录。NewAPI 还可选择后台访问令牌，在个人设置中生成并填写；旧版站点同时需要数字用户 ID，新版 PAT 可省略。令牌使用 `Authorization: Bearer`，旧版用户标识使用 `New-Api-User`，均加密保存、不回显。[NewAPI 官方后台鉴权说明](https://docs.newapi.pro/zh/docs/api/management/auth)。
 
-NewAPI 开启 Turnstile 人机验证时，账号密码登录会提示改用后台访问令牌。二次验证、禁用密码登录、令牌失效和用户 ID 错误也会给出具体提示，失败时保留上次成功余额及时间。所有后台的自动刷新统一由 [Cloudflare Worker Cron 的 scheduled 入口](https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/)执行，每分钟扫描到期账户，默认刷新间隔为 5 分钟；采用 D1 租约、版本校验和有限批次，账户较多时分批处理，归档或关闭监控的渠道不刷新。页面关闭且没有业务请求时仍会执行；打开页面和创建、编辑渠道只读取或保存配置，不发起后台余额查询。保存新凭据后显示待更新，等待下一次 Cron，也可点击手动刷新。余额、健康探测和日志清理独立执行，单项失败不会阻止其他任务。
+NewAPI 开启 Turnstile 人机验证时，账号密码登录会提示改用后台访问令牌。二次验证、禁用密码登录、令牌失效和用户 ID 错误也会给出具体提示，失败时保留上次成功余额及时间。所有后台的自动刷新统一由 [Cloudflare Worker Cron 的 scheduled 入口](https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/)执行，每分钟扫描到期记录；NewAPI / Sub2API 账户默认刷新间隔为 5 分钟，采用 D1 租约、版本校验和有限批次，账户较多时分批处理，归档或关闭监控的渠道不刷新。页面关闭且没有业务请求时仍会执行；打开页面和创建、编辑渠道只读取或保存配置，不发起后台余额查询。保存新凭据后显示待更新，等待下一次 Cron，也可点击手动刷新。余额、健康探测和日志清理独立执行，单项失败不会阻止其他任务。
 
-BBDevLab 使用独立的后台令牌，支持纯令牌或带 `Bearer` 前缀的值。后台地址同样由渠道 Base URL 推导，例如 `https://api.bddevlab.online/v1` 对应 `GET https://api.bddevlab.online/api/usage/token/`，请求只发送 `Accept: application/json` 和 `Authorization: Bearer <令牌>`。仅接受成功响应 `code: true`，可用余额取 `Math.trunc(total_available / 100000)`；例如 `133516262` 显示 `1335`，不将其标记为美元。令牌加密保存且不回显，失败时保留最近的成功余额。
+BBDevLab 支持将多个小额 API Key 聚合在同一渠道：在「连接上游」中每行添加一个 API Key，在「余额监控」中选择 BBDevLab 即可，无需填写独立后台令牌。Worker 直接使用每个已保存的渠道 API Key 请求余额，地址由渠道 Base URL 推导，例如 `https://api.bddevlab.online/v1` 对应 `GET https://api.bddevlab.online/api/usage/token/`，认证为 `Authorization: Bearer <API Key>`。仅接受成功响应 `code: true`，余额为 `total_available / 100000`，保留最多 5 位小数；例如 `123` 显示 `0.00123`，不标记为美元。已有安装中单独保存的 BBDevLab 后台令牌不再参与查询，只以渠道已有 API Key 为准。
+
+BBDevLab 的余额、成功更新时间和查询错误均逐 Key 保存；渠道列表展示监控 Key 的余额合计、可用 Key 数与总数，渠道编辑器及密钥管理展示每个 Key 的余额。手动停用的 Key 保留自己的余额记录和总数统计，但不计入渠道合计余额及更新状态。确认某个 Key 余额不大于 0 后，仅停用该 Key 并标记「额度耗尽」，其余可用 Key 继续轮换。余额查询失败保留最近成功余额，不会因查询失败停用 Key。充值后确认余额大于 0，会自动恢复因额度耗尽停用的 Key；手动停用的 Key 保持停用。替换 API Key 后清空该 Key 的旧余额并等待重新查询。此规则由 BBDevLab 余额监控控制，独立于渠道错误冷却开关。
+
+真实请求遇到 HTTP 401 / 402 / 403 / 429 时，也会补查该 Key 的余额；确认额度耗尽后停用该 Key，并按现有重试开关和同渠道重试次数尝试其他可用 Key。日志保留原失败记录，已确认耗尽的失败不计入整个渠道的健康判定。
+
+BBDevLab 余额由每分钟 Cron 检查到期记录并分批更新，目标刷新间隔为 1 分钟；批次未覆盖的 Key 在后续轮次继续处理，耗尽停用的 Key 也会定期检查以发现充值。渠道列表和密钥管理的「刷新余额」每次最多查询 40 个 Key，其余自动分批刷新。停用、归档或关闭 BBDevLab 监控后停止自动查询；停用但未归档的渠道仍可手动刷新。页面关闭也不影响已启用监控的 Cron。
 
 Sub2API 可选择「Cookie / 浏览器会话」读取余额，不再由网关提交邮箱密码登录。先在浏览器登录后台并完成人机验证，再从开发者工具「网络」中的个人信息或余额请求复制单行 `Cookie` 请求头值。标准 Sub2API 通过 Bearer JWT 识别登录用户，可只填同一请求的 `Authorization` 值或本地存储中的 `auth_token`，支持 `Bearer` 前缀；只有 `cf_clearance` 等人机验证 Cookie 不足以读取余额。需要 Cookie 的站点同时填写，使用 Cookie 认证的定制站点可只填 Cookie。Cookie 与后台登录 Token 至少填写一个，均加密保存、不回显；编辑时全部留空保留现有会话，填写新会话会替换已保存 Cookie 和 Token，请提供所需的完整会话。浏览器会话过期或失效后需手动重新登录并更新。
 
 模型别名采用可搜索的紧凑列表编辑；请求转发使用上游模型名称，JSON 响应及每个 SSE JSON 事件的 `model` 返回客户端原始请求的公开模型名，跨渠道切换后也保持一致。
 
-上游接口类型与余额后台分别配置：OpenAI / Anthropic / Gemini 接口类型用于模型发现与渠道测试，不决定公开请求的格式。可独立打开「上游余额监控」并选择 NewAPI / Sub2API / BBDevLab，监控只决定后台余额的认证和读取方式。已有渠道按原接口类型和监控类型加载，可直接切换真实渠道的接口类型；关闭监控保留已保存凭据、会话和最近余额，恢复同一后台可继续使用。切换后台类型须提供对应凭据，账户草稿按后台类型独立保留。历史数据无需数据库迁移。
+上游接口类型与余额后台分别配置：OpenAI / Anthropic / Gemini 接口类型用于模型发现与渠道测试，不决定公开请求的格式。可独立打开「上游余额监控」并选择 NewAPI / Sub2API / BBDevLab。已有渠道按原接口类型和监控类型加载，可直接切换真实渠道的接口类型；关闭监控保留已保存凭据、会话和最近余额。NewAPI / Sub2API 切换后台类型时需提供对应凭据，账户草稿按后台类型独立保留；BBDevLab 直接复用已有上游 API Key。
 
-已有安装升级时需应用新的账户表迁移，账号和会话均不保存在渠道公开 JSON 中：
+已有安装升级时需应用账户表及 `0003` 逐 Key 余额迁移，账号、会话和 API Key 原文均不保存在渠道公开 JSON 中。旧 BBDevLab 配置保留监控类型，升级后自动按渠道 API Key 查询：
 
 ```bash
 npx wrangler d1 migrations apply DB --local --config wrangler.dev.jsonc --persist-to .wrangler/state
@@ -184,7 +190,7 @@ TTFT 从发起上游请求计时，直到首个有效文本、推理内容或工
 
 指定 HTTP 状态连续失败可自动禁用渠道或上游密钥。每分钟 Cron 最多探测 8 个渠道，冷却后达到连续健康次数才恢复；页面“恢复探测”同样真实发送请求，不直接宣称恢复。上游密钥仅在自动禁用、开启恢复且冷却已结束时参与恢复，手动停用的密钥需手动启用。单次恢复探测有最多 30 秒的整体截止，防止持续空事件或不结束的流阻塞定时任务。探测输出 Token 很少，但仍可能产生费用。日志、尝试及事件按保留天数自动清理。
 
-Cron 每轮最多刷新 5 个后台账户，打开页面时每轮最多刷新 3 个；通过租约和到期时间继续轮转。该批次为失败会话重登和密码加密握手预留子请求预算，适配 [Workers Free 的 50 次外部子请求限制](https://developers.cloudflare.com/changelog/post/2026-02-11-subrequests-limit/)。高重试次数也会消耗子请求预算，配置大规模重试时需结合 Workers 套餐限制。
+Cron 每轮最多刷新 5 个 NewAPI / Sub2API 后台账户及 20 个 BBDevLab API Key，通过租约和到期时间继续轮转。有限批次为失败会话重登和密码加密握手预留子请求预算，适配 [Workers Free 的 50 次外部子请求限制](https://developers.cloudflare.com/changelog/post/2026-02-11-subrequests-limit/)。高重试次数也会消耗子请求预算，配置大规模重试时需结合 Workers 套餐限制。
 
 ## AI Gateway 自定义服务商
 

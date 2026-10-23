@@ -4,6 +4,7 @@ import { useDisplay } from 'vuetify';
 import type { GatewayChannel } from '../../shared/types';
 import { api } from '../api';
 import { channelHealthView, matchesChannelHealthStatus } from '../channel-health';
+import { balanceAmount } from '../channel-balance';
 import { count, dateTime, download, errorText, seconds } from '../format';
 import { useConsole } from '../composables/useConsole';
 import AppDialog from '../components/AppDialog.vue';
@@ -78,18 +79,19 @@ async function mutate(task: () => Promise<unknown>, message: string) { if (busy.
 async function toggleEnabled(channel: GatewayChannel) { await mutate(() => api(`/api/channels/${encodeURIComponent(channel.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !channel.enabled }) }), channel.enabled ? '渠道已停用' : '渠道已启用'); }
 async function resetHealth(channel: GatewayChannel) { await mutate(async () => { const data = await api<{ channel: GatewayChannel }>(`/api/channels/${encodeURIComponent(channel.id)}/reset-health`, { method: 'POST' }); channels.value = channels.value.map(item => item.id === channel.id ? data.channel : item); }, '冷却和健康异常已清除，等待重新检测'); }
 async function refreshBalance(channel: GatewayChannel) {
-  if (balanceBusy.value.includes(channel.id) || !channel.hasAccountCredentials) return; balanceBusy.value.push(channel.id);
+  if (balanceBusy.value.includes(channel.id) || !canRefreshBalance(channel)) return; balanceBusy.value.push(channel.id);
   try { const data = await api<{ channel: GatewayChannel }>(`/api/channels/${encodeURIComponent(channel.id)}/balance`, { method: 'POST' }); channels.value = channels.value.map(item => item.id === channel.id ? data.channel : item); if (data.channel.accountBalance?.status === 'error') notify(data.channel.accountBalance.error ?? '余额刷新失败', 'error'); }
   catch (error) { notify(errorText(error), 'error'); } finally { balanceBusy.value = balanceBusy.value.filter(id => id !== channel.id); }
 }
 const balanceBackendNames: Record<string, string> = { newapi: 'NewAPI', sub2api: 'Sub2API', bbdevlab: 'BBDevLab' };
+function canRefreshBalance(channel: GatewayChannel) { return !channel.archived && (channel.config.integration === 'bbdevlab' ? channel.credentialCount > 0 : !!channel.hasAccountCredentials); }
 function balanceLabel(channel: GatewayChannel) {
   const balance = channel.accountBalance;
+  if (channel.config.integration === 'bbdevlab') return balanceAmount(balance, channel.credentialCount ? '待更新' : '未配置 Key');
   if (balance?.amount == null) return balance?.status === 'error' ? '更新失败' : channel.hasAccountCredentials ? '待更新' : '未配置账户';
-  if (channel.config.integration === 'bbdevlab') return `${Math.trunc(balance.amount).toLocaleString('zh-CN')}${balance.unit && balance.unit !== '余额' ? ` ${balance.unit}` : ''}`;
   return `${balance.unit === 'USD' ? '$' : ''}${balance.amount.toLocaleString('zh-CN', { maximumFractionDigits: 4 })}${balance.unit && balance.unit !== 'USD' ? ` ${balance.unit}` : ''}`;
 }
-function balanceRefreshTitle(channel: GatewayChannel) { return [channel.accountBalance?.error, channel.accountBalance?.updatedAt ? `更新于 ${dateTime(channel.accountBalance.updatedAt)}` : '', 'Worker 定时刷新'].filter(Boolean).join(' · '); }
+function balanceRefreshTitle(channel: GatewayChannel) { return [channel.accountBalance?.error, channel.accountBalance?.updatedAt ? `更新于 ${dateTime(channel.accountBalance.updatedAt)}` : '', channel.config.integration === 'bbdevlab' ? '监控 Key 的余额合计，手动停用的 Key 不计入合计；每次最多刷新 40 个，其余自动分批刷新' : 'Worker 定时刷新'].filter(Boolean).join(' · '); }
 const confirm = ref<{ title: string; description: string; execute: () => Promise<void> } | null>(null);
 async function confirmAction() { const action = confirm.value; if (!action || busy.value) return; await action.execute(); confirm.value = null; }
 async function bulk(action: string) { if (!selected.value.length || selected.value.length > 200) { notify('请选择 1–200 个渠道', 'error'); return; } if (archive.value && ['enable', 'disable'].includes(action)) { notify('请先恢复归档渠道', 'warning'); return; } if (await mutate(() => api('/api/channels/bulk', { method: 'POST', body: JSON.stringify({ ids: selected.value, action }) }), `已更新 ${selected.value.length} 个渠道`)) selected.value = []; }
@@ -165,7 +167,7 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
               <v-menu v-if="channel.tags.length > 2"><template #activator="{ props: tagProps }"><v-btn v-bind="tagProps" variant="text" size="x-small" class="channel-more-tags" :aria-label="'查看 ' + channel.name + ' 的全部 ' + channel.tags.length + ' 个标签'">+{{ channel.tags.length - 2 }}</v-btn></template><v-card border class="channel-tags-popover"><v-card-text><span class="text-caption text-medium-emphasis">全部标签 · {{ channel.tags.length }}</span><div class="channel-all-tags"><v-chip v-for="tag in channel.tags" :key="tag" size="small" variant="tonal">{{ tag }}</v-chip></div></v-card-text></v-card></v-menu>
             </div>
             <ChannelHealth v-if="!show('health')" :channel="channel" :busy="busy" compact class="mt-2" @reset="resetHealth(channel)" />
-            <div v-if="['newapi', 'sub2api', 'bbdevlab'].includes(channel.config.integration ?? '')" class="d-flex align-center ga-1 mt-1"><span class="text-caption text-medium-emphasis">{{ balanceBackendNames[channel.config.integration ?? ''] }} · 余额 {{ balanceLabel(channel) }}</span><v-btn icon="mdi-refresh" size="x-small" variant="text" :loading="balanceBusy.includes(channel.id)" :disabled="!channel.hasAccountCredentials" :aria-label="'刷新 ' + channel.name + ' 余额'" :title="balanceRefreshTitle(channel)" @click="refreshBalance(channel)" /></div>
+            <div v-if="['newapi', 'sub2api', 'bbdevlab'].includes(channel.config.integration ?? '')" class="d-flex align-center ga-1 mt-1"><span class="text-caption text-medium-emphasis" :title="balanceRefreshTitle(channel)">{{ balanceBackendNames[channel.config.integration ?? ''] }} · 余额 {{ balanceLabel(channel) }}<template v-if="channel.config.integration === 'bbdevlab'"> · 可用 Key {{ channel.accountBalance?.availableKeys ?? '—' }}/{{ channel.accountBalance?.keyCount ?? channel.credentialCount }}<template v-if="channel.accountBalance?.exhaustedKeys"> · {{ channel.accountBalance.exhaustedKeys }} 个额度耗尽</template></template><span v-if="channel.accountBalance?.status === 'error' && channel.accountBalance.amount != null" class="text-warning"> · 更新失败</span><span v-else-if="channel.accountBalance?.status === 'pending' && channel.accountBalance.amount != null"> · 部分待更新</span></span><v-btn icon="mdi-refresh" size="x-small" variant="text" :loading="balanceBusy.includes(channel.id)" :disabled="!canRefreshBalance(channel)" :aria-label="'刷新 ' + channel.name + ' 余额'" :title="balanceRefreshTitle(channel)" @click="refreshBalance(channel)" /></div>
           </td>
           <td v-if="show('priority')">{{ channel.priority }}</td><td v-if="show('enabled')"><v-switch :model-value="channel.enabled" color="primary" hide-details density="compact" :disabled="busy || channel.archived" :aria-label="`${channel.enabled ? '停用' : '启用'} ${channel.name}`" @update:model-value="toggleEnabled(channel)" /></td><td v-if="show('health')"><ChannelHealth :channel="channel" :busy="busy" @reset="resetHealth(channel)" /></td>
           <td v-if="show('models')"><div class="d-flex flex-column align-start ga-1"><code v-for="model in expandedModels.includes(channel.id) ? channel.models : channel.models.slice(0, 2)" :key="model" class="model-name" :title="model">{{ model }}</code><v-btn v-if="channel.models.length > 2" variant="text" size="x-small" color="primary" @click="expandedModels = expandedModels.includes(channel.id) ? expandedModels.filter(id => id !== channel.id) : [...expandedModels, channel.id]">{{ expandedModels.includes(channel.id) ? '收起' : `+${channel.models.length - 2}` }}</v-btn></div></td>

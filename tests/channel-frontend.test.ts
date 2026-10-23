@@ -2,8 +2,34 @@ import { describe, expect, it } from "vitest";
 import { defaultChannelConfig } from "../shared/types";
 import { changedChannelConfig, channelConfigPatchForPanel } from "../src/channel-config-patch";
 import { config as applyConfigPatch } from "../worker/validation";
-import type { CredentialMeta } from "../shared/types";
-import { credentialUpdates } from "../src/components/channels/credential-utils";
+import type { CredentialMeta, GatewayBalance } from "../shared/types";
+import { credentialStatus, credentialUpdates } from "../src/components/channels/credential-utils";
+import { balanceAmount } from "../src/channel-balance";
+
+describe("BBDevLab key balance presentation", () => {
+  const balance = (amount: number | null, status: GatewayBalance["status"] = "ok"): GatewayBalance => ({ amount, status, unit: "余额", updatedAt: null, checkedAt: null });
+
+  it("preserves tiny spendable balances and shows zero without adding a dollar unit", () => {
+    expect(balanceAmount(balance(0.00001))).toBe("0.00001");
+    expect(balanceAmount(balance(0.00123))).toBe("0.00123");
+    expect(balanceAmount(balance(1335.16262))).toBe("1,335.16262");
+    expect(balanceAmount(balance(0))).toBe("0");
+  });
+
+  it("distinguishes unknown balances from failed refreshes while retaining the last successful amount", () => {
+    expect(balanceAmount(undefined)).toBe("待更新");
+    expect(balanceAmount(undefined, "未配置 Key")).toBe("未配置 Key");
+    expect(balanceAmount(balance(null, "error"))).toBe("更新失败");
+    expect(balanceAmount(balance(0.00123, "error"))).toBe("0.00123");
+  });
+
+  it("labels exhausted keys separately from manually disabled keys", () => {
+    const key: CredentialMeta = { id: "balance-key", label: "Key", preview: "••••1234", enabled: false, failureCount: 0, disabledAt: null, createdAt: "2026-10-24T00:00:00Z", reason: null };
+    expect(credentialStatus(key)).toBe("已停用");
+    expect(credentialStatus({ ...key, reason: "BBDevLab 额度耗尽" })).toBe("额度耗尽");
+    expect(credentialStatus({ ...key, enabled: true })).toBe("可用");
+  });
+});
 
 describe("editing saved channel credentials", () => {
   const baseline: CredentialMeta[] = [

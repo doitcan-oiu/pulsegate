@@ -27,6 +27,7 @@ export type GatewayContext = {
 /** Implemented by store.ts; consumed by the routing engine. */
 export type GatewayStore = {
   getChannel?(channelId: string): Promise<GatewayChannel | null>;
+  isCredentialExhausted?(channelId: string, credentialId: string): Promise<boolean>;
   getCredentials(channelId: string, includeDisabled?: boolean): Promise<Credential[]>;
   recordAttempt(attempt: AttemptRecord): Promise<void>;
   recordLog(log: GatewayLog): Promise<void>;

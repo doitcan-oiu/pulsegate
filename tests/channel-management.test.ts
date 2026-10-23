@@ -177,17 +177,17 @@ describe('display-only channel website', () => {
     expect((await orderedCandidates(gatewayCandidates(context, 'model-a'), context, new Store(testEnv), '')).map(candidate => candidate.channel.id)).toEqual([second.id, first.id]);
   });
 
-  it('keeps encrypted balance credentials and the existing session when only the website changes', async () => {
+  it('keeps BBDevLab API keys and their balances when only the website changes', async () => {
     const fetcher = vi.fn(async (target: RequestInfo | URL) => {
       expect(String(target)).toBe('https://upstream.example/api/usage/token/');
       return Response.json({ code: true, data: { total_available: 100000 } });
     }); vi.stubGlobal('fetch', fetcher);
-    const created = await call('/api/channels', 'POST', { ...input, website, config: { integration: 'bbdevlab' }, accountCredentials: { accessToken: 'fake-website-balance-token' } }), id = created.json.channel.id;
+    const created = await call('/api/channels', 'POST', { ...input, website, config: { integration: 'bbdevlab' }, apiKeys: ['fake-website-balance-key'] }), id = created.json.channel.id;
     await manualBalance(id);
-    const before = await testEnv.DB.prepare('SELECT credentials,auth_secret,balance,version FROM channel_accounts WHERE channel_id=?').bind(id).first();
+    const before = await testEnv.DB.prepare('SELECT k.secret,b.balance,b.version FROM credentials k JOIN credential_balances b ON b.credential_id=k.id WHERE k.channel_id=?').bind(id).first();
     const updated = await call(`/api/channels/${id}`, 'PATCH', { website: 'http://localhost:3000/new-site?from=console#start' });
     expect(updated.status).toBe(200); expect(updated.json.channel.accountBalance).toMatchObject({ status: 'ok', amount: 1 });
-    expect(await testEnv.DB.prepare('SELECT credentials,auth_secret,balance,version FROM channel_accounts WHERE channel_id=?').bind(id).first()).toEqual(before);
+    expect(await testEnv.DB.prepare('SELECT k.secret,b.balance,b.version FROM credentials k JOIN credential_balances b ON b.credential_id=k.id WHERE k.channel_id=?').bind(id).first()).toEqual(before);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });
@@ -748,7 +748,6 @@ describe('Worker Cron balance monitoring', () => {
   const backends = [
     { integration: 'newapi', credentials: { accessToken: 'fake-cron-newapi-token', userId: '42' }, path: '/api/user/self', payload: { success: true, data: { quota: 1500000 } }, amount: 3, unit: 'USD' },
     { integration: 'sub2api', credentials: { cookie: 'session=fake-cron-cookie', accessToken: 'fake-cron-sub2api-token' }, path: '/api/v1/user/profile', payload: { code: 0, data: { balance: 9.5 } }, amount: 9.5, unit: 'USD' },
-    { integration: 'bbdevlab', credentials: { accessToken: 'fake-cron-bbdevlab-token' }, path: '/api/usage/token/', payload: { code: true, data: { total_available: 133516262 }, message: 'ok' }, amount: 1335, unit: '余额' },
   ] as const;
 
   it.each(backends)('does not query $integration balances from create, edit, or browser reads', async ({ integration, credentials }) => {
@@ -775,7 +774,6 @@ describe('Worker Cron balance monitoring', () => {
       expect(url.pathname).toBe(path); expect(headers.get('Authorization')).toBe('Bearer ' + credentials.accessToken);
       if (integration === 'newapi') expect(headers.get('New-Api-User')).toBe('42');
       if (integration === 'sub2api') expect(headers.get('Cookie')).toBe('session=fake-cron-cookie');
-      if (integration === 'bbdevlab') expect([...headers.keys()].sort()).toEqual(['accept', 'authorization']);
       return Response.json(payload);
     }); vi.stubGlobal('fetch', fetcher);
     const started = Date.now();
@@ -811,7 +809,7 @@ describe('Worker Cron balance monitoring', () => {
   });
 
   it('still refreshes balances and releases their lease when settings cannot be read', async () => {
-    const store = new Store(testEnv), fixture = backends[2];
+    const store = new Store(testEnv), fixture = backends[1];
     const channel = parseChannel({ name: 'Balance survives settings failure', endpoint: 'https://independent-cron.example/v1', models: ['a'], config: { integration: fixture.integration } }, true);
     await store.saveChannel(channel, false, [], fixture.credentials);
     vi.spyOn(Store.prototype, 'getSettings').mockRejectedValueOnce(new Error('injected settings read failure'));
@@ -826,7 +824,7 @@ describe('Worker Cron balance monitoring', () => {
   });
 
   it('still refreshes balances and releases their lease when the health recovery query fails', async () => {
-    const store = new Store(testEnv), fixture = backends[2];
+    const store = new Store(testEnv), fixture = backends[1];
     const channel = parseChannel({ name: 'Balance survives health failure', endpoint: 'https://independent-cron.example/v1', models: ['a'], config: { integration: fixture.integration } }, true);
     await store.saveChannel(channel, false, [], fixture.credentials);
     const failure = new Error('injected health recovery query failure');

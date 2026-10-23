@@ -2,6 +2,10 @@ import type { CredentialMeta, CredentialUpdate } from '../../../shared/types';
 
 export type CredentialDraft = { id: string; label: string; secret: string };
 
+export function credentialStatus(key: CredentialMeta | undefined): string {
+  return key?.enabled ? '可用' : key?.reason === 'BBDevLab 额度耗尽' ? '额度耗尽' : '已停用';
+}
+
 /** Empty replacement fields preserve saved secrets; send only edited fields. */
 export function credentialUpdates(drafts: CredentialDraft[], baseline: CredentialMeta[]): CredentialUpdate[] {
   const saved = new Map(baseline.map(key => [key.id, key]));
