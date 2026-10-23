@@ -18,6 +18,7 @@ export type ChannelConfig = {
   conversions: { stripUnsupported: boolean; systemToUser: boolean };
   rateLimit: { requestsPerMinute: number; tokensPerMinute: number };
   endpoints: { chat: string; models: string; messages: string; generate: string };
+  cooldown: { firstToken: boolean; error: boolean };
   autoDisable: { enabled: boolean; target: 'key' | 'channel'; statuses: number[]; threshold: number; recover: boolean; cooldown: number };
   mock: { scenario: MockScenario; delayMs: number; status: number; failuresBeforeSuccess: number };
 };
@@ -88,6 +89,7 @@ export const defaultChannelConfig: ChannelConfig = {
   headers: {}, bodyOverrides: {}, relayUrl: '', conversions: { stripUnsupported: false, systemToUser: false },
   rateLimit: { requestsPerMinute: 0, tokensPerMinute: 0 },
   endpoints: { chat: '/chat/completions', models: '/models', messages: '/messages', generate: '/models/{model}:generateContent' },
+  cooldown: { firstToken: true, error: true },
   autoDisable: { enabled: false, target: 'key', statuses: [401, 403], threshold: 3, recover: true, cooldown: 60 },
   mock: { scenario: 'healthy', delayMs: 50, status: 503, failuresBeforeSuccess: 1 },
 };

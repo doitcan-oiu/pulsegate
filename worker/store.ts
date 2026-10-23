@@ -1,8 +1,8 @@
-import { defaultSettings } from '../shared/types';
+import { defaultChannelConfig, defaultSettings } from '../shared/types';
 import type { AccountIntegration, AttemptRecord, CredentialMeta, DashboardData, GatewayApiKey, GatewayChannel, GatewayEvent, GatewayLog, GatewaySettings } from '../shared/types';
 import type { Credential, Env, GatewayStore, KeyRecord } from './env';
 import { decryptSecret, encryptSecret, hashToken, previewToken, randomToken, redact } from './crypto';
-import { autoDisableDecision, credentialRecoveryAllowed, evaluateHealth } from './health';
+import { autoDisableDecision, cooldownExemptsHealth, credentialRecoveryAllowed, evaluateHealth } from './health';
 import { HttpError } from './validation';
 import { accountAuthMode, assertAccountCredentials, assertAccountReuse, prepareAccountSave, type AccountCredentials } from './accounts';
 import { buildAnalytics, completed } from './analytics';
@@ -12,7 +12,9 @@ type CredRow = { id: string; channel_id: string; label: string; preview: string;
 type CredentialInput = { label: string; secret: string };
 const decode = <T>(row: { data: string }): T => JSON.parse(row.data) as T;
 function decodeChannel(row: { data: string }): GatewayChannel {
-  const channel = decode<GatewayChannel>(row); channel.displayMultiplier ??= 1; channel.website ??= ''; return channel;
+  const channel = decode<GatewayChannel>(row); channel.displayMultiplier ??= 1; channel.website ??= '';
+  channel.config.cooldown = { ...defaultChannelConfig.cooldown, ...channel.config.cooldown };
+  return channel;
 }
 const now = (): string => new Date().toISOString();
 function validateCredential({ label,secret }: CredentialInput): void {
@@ -59,6 +61,10 @@ export class Store implements GatewayStore {
     const accountVersion = stored?.account_version ?? -1;
     const effectiveEndpoint = account ? "json_extract(excluded.data,'$.endpoint')" : `CASE WHEN ${backendConflict} OR COALESCE((SELECT version FROM channel_accounts a WHERE a.channel_id=channels.id),-1)<>? THEN json_extract(channels.data,'$.endpoint') ELSE json_extract(excluded.data,'$.endpoint') END`;
     const statements = [this.env.DB.prepare(`INSERT INTO channels(id,data,fixture) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=json_patch(json_set(excluded.data,'$.health',json_extract(channels.data,'$.health'),'$.status',json_extract(channels.data,'$.status'),'$.requests',json_extract(channels.data,'$.requests'),'$.ttft',json_extract(channels.data,'$.ttft'),'$.successRate',json_extract(channels.data,'$.successRate'),'$.history',json_extract(channels.data,'$.history'),'$.endpoint',${effectiveEndpoint},'$.config.integration',${effectiveIntegration}),json_object('accountAuthMode',json_extract(${modeSource}.data,'$.accountAuthMode'),'accountIntegration',${savedIntegration})),health_version=channels.health_version+1`).bind(channel.id, JSON.stringify(channel), fixture ? 1 : 0, ...(!account ? [accountVersion] : [])), ...channel.tags.map(tag => this.env.DB.prepare('INSERT OR IGNORE INTO tags(name) VALUES(?)').bind(tag))];
+    // Apply the saved policy to the current health row in the same transaction.
+    // Keep measurements, history, manual activation and unrelated isolation intact.
+    statements.push(this.env.DB.prepare("UPDATE channels SET data=json_set(data,'$.status','healthy','$.health.cooldownUntil',NULL,'$.health.reason',NULL,'$.health.recoveryCount',0,'$.health.autoDisabled',json('false')),health_version=health_version+1 WHERE id=? AND ((json_extract(data,'$.config.cooldown.error')=0 AND (json_extract(data,'$.health.autoDisabled')=1 OR json_extract(data,'$.health.reason') LIKE 'HTTP %' OR json_extract(data,'$.health.reason') LIKE '%失败率%')) OR (json_extract(data,'$.config.cooldown.firstToken')=0 AND COALESCE(json_extract(data,'$.health.autoDisabled'),0)=0 AND json_extract(data,'$.health.reason') LIKE '%首字%' AND json_extract(data,'$.health.reason') NOT LIKE 'HTTP %' AND json_extract(data,'$.health.reason') NOT LIKE '%失败率%'))").bind(channel.id));
+    statements.push(this.env.DB.prepare("UPDATE credentials SET enabled=1,failure_count=0,recovery_count=0,disabled_at=NULL,reason=NULL WHERE channel_id=? AND enabled=0 AND reason IS NOT NULL AND disabled_at IS NOT NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.id=credentials.channel_id AND json_extract(c.data,'$.config.cooldown.error')=0)").bind(channel.id));
     statements.push(...prepared.map(entry => entry.statement));
     if (accountStatement) statements.push(accountStatement);
     else if (previous && previous.endpoint !== channel.endpoint) statements.push(this.env.DB.prepare("UPDATE channel_accounts SET auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE channel_id=? AND version=? AND EXISTS (SELECT 1 FROM channels c WHERE c.id=? AND json_extract(c.data,'$.endpoint')=? AND (? NOT IN ('newapi','sub2api','bbdevlab') OR COALESCE(json_extract(c.data,'$.accountIntegration'),json_extract(c.data,'$.config.integration'),'native')=?))").bind(channel.id,accountVersion,channel.id,channel.endpoint,channel.config.integration ?? 'native',channel.config.integration ?? 'native'));
@@ -233,7 +239,7 @@ export class Store implements GatewayStore {
           await this.env.DB.prepare('UPDATE credentials SET recovery_count=?,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=0 AND reason IS NOT NULL AND disabled_at<=?').bind(recovery,ad.failureCount,recovered ? 1 : 0,recovered ? null : cred.disabled_at,recovered ? null : cred.reason,clean.credentialId,now()).run();
         }
       } else if (ad.target === 'key' && clean.credentialId && cred) {
-        await this.env.DB.prepare('UPDATE credentials SET recovery_count=0,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=1').bind(ad.failureCount,ad.disable ? 0 : 1,ad.disable ? ad.cooldownUntil : null,ad.disable ? `HTTP ${clean.status}` : null,clean.credentialId).run();
+        await this.env.DB.prepare("UPDATE credentials SET recovery_count=0,failure_count=?,enabled=?,disabled_at=?,reason=? WHERE id=? AND enabled=1 AND (?=0 OR EXISTS (SELECT 1 FROM channels c WHERE c.id=credentials.channel_id AND COALESCE(json_extract(c.data,'$.config.cooldown.error'),1)=1))").bind(ad.failureCount,ad.disable ? 0 : 1,ad.disable ? ad.cooldownUntil : null,ad.disable ? `HTTP ${clean.status}` : null,clean.credentialId,ad.disable ? 1 : 0).run();
       } else if (ad.disable) { await this.updateHealth(c.id,{ autoDisabled: true,cooldownUntil: ad.cooldownUntil,reason: `HTTP ${clean.status}`,failureCount:ad.failureCount },'offline'); }
     }
     for (let retry = 0; retry < 5; retry++) {
@@ -271,7 +277,26 @@ export class Store implements GatewayStore {
   }
   async updateHealth(channelId: string, patch: Partial<GatewayChannel['health']>, status?: GatewayChannel['status']): Promise<void> {
     if (this.coordinate) { await this.coordinated('health',{ channelId,patch,status }); return; }
-    for (let retry = 0; retry < 5; retry++) { const row = await this.env.DB.prepare('SELECT data,health_version FROM channels WHERE id=?').bind(channelId).first<DataRow>(); if (!row) return; const c = decode<GatewayChannel>(row); c.health = { ...c.health,...patch }; if (status) c.status = status; const result = await this.env.DB.prepare('UPDATE channels SET data=?,health_version=health_version+1 WHERE id=? AND health_version=?').bind(JSON.stringify(c),channelId,row.health_version!).run(); if (result.meta.changes) return; } throw new Error('Health update conflict');
+    for (let retry = 0; retry < 5; retry++) {
+      const row = await this.env.DB.prepare('SELECT data,health_version FROM channels WHERE id=?').bind(channelId).first<DataRow>(); if (!row) return;
+      const current = decodeChannel(row);
+      const next = { ...current,status:status ?? current.status,health:{ ...current.health,...patch } };
+      if (cooldownExemptsHealth(next)) {
+        // A late decision from a now-exempt rule cannot remove isolation imposed
+        // by another rule that is still enabled, such as non-streaming latency.
+        const keepRestriction = !cooldownExemptsHealth(current) && (current.status !== 'healthy' || current.health.cooldownUntil || current.health.autoDisabled);
+        next.status = keepRestriction ? current.status : 'healthy';
+        next.health = { ...next.health,
+          cooldownUntil:keepRestriction ? current.health.cooldownUntil : null,
+          reason:keepRestriction ? current.health.reason : null,
+          recoveryCount:keepRestriction ? current.health.recoveryCount : 0,
+          autoDisabled:keepRestriction ? current.health.autoDisabled : false,
+        };
+      }
+      const result = await this.env.DB.prepare('UPDATE channels SET data=?,health_version=health_version+1 WHERE id=? AND health_version=?').bind(JSON.stringify(next),channelId,row.health_version!).run();
+      if (result.meta.changes) return;
+    }
+    throw new Error('Health update conflict');
   }
   async setCredentialHealth(id: string, patch: { enabled?: boolean; failureCount?: number; disabledAt?: string | null; reason?: string | null }): Promise<void> {
     const entries = Object.entries(patch); if (!entries.length) return; const columns: Record<string,string> = { enabled:'enabled',failureCount:'failure_count',disabledAt:'disabled_at',reason:'reason' };

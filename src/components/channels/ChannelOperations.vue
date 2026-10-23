@@ -11,13 +11,14 @@ import AppDialog from '../AppDialog.vue';
 import OverrideRows from './OverrideRows.vue';
 import ChannelTestResult from './ChannelTestResult.vue';
 import ChannelHealth from './ChannelHealth.vue';
+import ChannelCooldownSettings from './ChannelCooldownSettings.vue';
 const props = defineProps<{ channel: GatewayChannel; panel: string }>();
 const emit = defineEmits<{ close: [] }>();
 const { notify, refresh, channels } = useConsole();
-const titles: Record<string, string> = { test: '渠道测试', history: '测试历史', aliases: '模型别名', prices: '模型价格', overrides: '覆盖设置', relay: '代理配置', rateLimit: '速率限制', endpoints: '端点配置', credentials: '上游密钥管理', autoDisable: '自动禁用与恢复', delete: '删除渠道' };
+const titles: Record<string, string> = { test: '渠道测试', history: '测试历史', aliases: '模型别名', prices: '模型价格', overrides: '覆盖设置', relay: '代理配置', rateLimit: '速率限制', endpoints: '端点配置', credentials: '上游密钥管理', autoDisable: '健康与冷却', delete: '删除渠道' };
 const configPanels = ['aliases', 'prices', 'overrides', 'relay', 'rateLimit', 'endpoints', 'autoDisable'];
 const isConfig = computed(() => configPanels.includes(props.panel));
-const baseline: ChannelConfig = JSON.parse(JSON.stringify(props.channel.config));
+const baseline: ChannelConfig = JSON.parse(JSON.stringify({ ...props.channel.config, cooldown: { ...defaultChannelConfig.cooldown, ...props.channel.config.cooldown } }));
 const config = ref<ChannelConfig>(JSON.parse(JSON.stringify(baseline)));
 const headers = ref(overridesToRows(baseline.headers, true)); const body = ref(overridesToRows(baseline.bodyOverrides));
 const configSnapshot = () => JSON.stringify({ config: config.value, headers: headers.value, body: body.value });
@@ -102,6 +103,9 @@ function addStatus() { const value = Number(customStatus.value); if (!Number.isI
     <template v-if="panel === 'rateLimit'"><div class="operation-field-grid operation-field-grid--small-responsive mb-4"><v-text-field v-model.number="config.rateLimit.requestsPerMinute" label="每分钟请求数 RPM" type="number" min="0" max="1000000" /><v-text-field v-model.number="config.rateLimit.tokensPerMinute" label="每分钟 token TPM" type="number" min="0" max="1000000000" /></div><p class="text-caption text-medium-emphasis">0 表示不限制，超出限额时会尝试其他符合条件的渠道。</p></template>
     <template v-if="panel === 'endpoints'"><p class="operation-note mb-4">使用以 / 开头的相对路径，不包含查询参数或片段。Gemini 路径支持 {model} 占位符。</p><div class="endpoint-fields"><v-text-field v-for="field in endpointFields" :key="field.key" v-model="config.endpoints[field.key]" :label="field.title" append-inner-icon="mdi-restore" @click:append-inner="config.endpoints[field.key] = defaultChannelConfig.endpoints[field.key]" /></div></template>
     <template v-if="panel === 'autoDisable'">
+      <ChannelCooldownSettings v-model="config.cooldown" />
+      <v-divider class="my-4" /><h3 class="text-subtitle-1 mb-2">自动停用与恢复规则</h3>
+      <p v-if="!config.cooldown.error" class="text-caption text-medium-emphasis mb-4">当前已关闭错误冷却，以下规则暂不生效；重新开启错误冷却后继续使用。</p>
       <v-switch v-model="config.autoDisable.enabled" color="primary" label="启用当前渠道独立规则" /><p class="text-caption text-medium-emphasis mb-4">关闭时遵循全局自动停用规则。</p>
       <div class="operation-field-stack">
         <v-select v-model="config.autoDisable.target" :items="[{ title: '停用出错密钥', value: 'key' }, { title: '停用整个渠道', value: 'channel' }]" label="停用范围" />

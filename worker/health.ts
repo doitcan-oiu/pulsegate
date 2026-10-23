@@ -2,6 +2,14 @@ import type { AttemptRecord, GatewayChannel, GatewayEvent, GatewaySettings } fro
 
 export type HealthDecision = { patch: Partial<GatewayChannel['health']>; status: GatewayChannel['status']; event?: GatewayEvent };
 
+/** Only clear an existing health restriction when its cause has been explicitly exempted. */
+export function cooldownExemptsHealth(channel: GatewayChannel): boolean {
+  const reason = channel.health.reason || '';
+  const errorRestriction = channel.health.autoDisabled || /^HTTP\b/i.test(reason) || reason.includes('失败率');
+  if (errorRestriction) return channel.config.cooldown?.error === false;
+  return channel.config.cooldown?.firstToken === false && reason.includes('首字');
+}
+
 /** Manual disables have no reason/cooldown and must never be undone by probes. */
 export function credentialRecoveryAllowed(channel: GatewayChannel, settings: GatewaySettings, credential: { enabled: boolean; reason: string | null; disabledAt: string | null }, nowMs = Date.now()): boolean {
   const recover = channel.config.autoDisable.enabled ? channel.config.autoDisable.recover : settings.autoDisableRecover;
@@ -24,9 +32,9 @@ export function evaluateHealth(channel: GatewayChannel, settings: GatewaySetting
   // A slow first token only affects routing after the entire recent window is slow.
   // Include intervening failures/missing TTFT rather than filtering them into a false streak.
   const tooSlow = latest.stream
-    ? samples.length === window && samples.every(a => (a.result === 'success' || a.result === 'slow') && a.ttft !== null && Number.isFinite(a.ttft) && a.ttft > settings.threshold)
-    : enough && duration !== null && duration > settings.responseThreshold;
-  const mostlyFailed = enough && samples.filter(a => a.result === 'error' || a.result === 'empty').length / samples.length >= 0.5;
+    ? channel.config.cooldown?.firstToken !== false && samples.length === window && samples.every(a => (a.result === 'success' || a.result === 'slow') && a.ttft !== null && Number.isFinite(a.ttft) && a.ttft > settings.threshold)
+    : (channel.config.cooldown?.error === false ? valid.length >= Math.max(1, settings.samples) : enough) && duration !== null && duration > settings.responseThreshold;
+  const mostlyFailed = channel.config.cooldown?.error !== false && enough && samples.filter(a => a.result === 'error' || a.result === 'empty').length / samples.length >= 0.5;
   let status = channel.status;
   let reason = channel.health.reason;
   let cooldownUntil = channel.health.cooldownUntil;
@@ -37,7 +45,7 @@ export function evaluateHealth(channel: GatewayChannel, settings: GatewaySetting
     if (channel.status === 'healthy') cooldownUntil = new Date(nowMs + settings.cooldown * 1000).toISOString();
     recoveryCount = 0;
   }
-  const currentGood = !failed && (latest.stream ? latest.ttft !== null && latest.ttft <= settings.threshold : latest.duration <= settings.responseThreshold);
+  const currentGood = !failed && (latest.stream ? channel.config.cooldown?.firstToken === false || latest.ttft !== null && latest.ttft <= settings.threshold : latest.duration <= settings.responseThreshold);
   // Recovery depends on consecutive fresh samples; the stale slow window must not prevent recovery forever.
   if (channel.status !== 'healthy' && settings.autoRecover && nowMs >= Date.parse(channel.health.cooldownUntil || '1970-01-01')) {
     recoveryCount = currentGood ? channel.health.recoveryCount + 1 : 0;
@@ -64,5 +72,5 @@ export function autoDisableDecision(channel: GatewayChannel, settings: GatewaySe
   const recover = local.enabled ? local.recover : settings.autoDisableRecover;
   const cooldown = local.enabled ? local.cooldown : settings.autoDisableCooldown;
   const failureCount = statuses.includes(status) ? previousFailures + 1 : 0;
-  return { target, failureCount, disable: enabled && failureCount >= Math.max(1, threshold), recover, cooldownUntil: new Date(nowMs + cooldown * 1000).toISOString() };
+  return { target, failureCount, disable: channel.config.cooldown?.error !== false && enabled && failureCount >= Math.max(1, threshold), recover, cooldownUntil: new Date(nowMs + cooldown * 1000).toISOString() };
 }

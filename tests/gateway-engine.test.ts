@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultChannelConfig, defaultSettings, type AttemptRecord, type GatewayChannel, type GatewayLog, type KeyProfile } from '../shared/types';
 import type { GatewayContext, GatewayStore } from '../worker/env';
 import { channelInScope, gatewayCandidates, handleGateway, orderedCandidates, probeChannel } from '../worker/gateway';
-import { autoDisableDecision, evaluateHealth } from '../worker/health';
+import { autoDisableDecision, cooldownExemptsHealth, evaluateHealth } from '../worker/health';
 import { normalizeJSON, prepareBody, RequestFailure, toAnthropic, toGemini, upstreamHeaders, upstreamUrl } from '../worker/protocols';
 import { sseBytes } from '../worker/sse';
 
@@ -507,12 +507,85 @@ describe('quality health', () => {
     const decision = evaluateHealth(c, { ...defaultSettings, window: 2, samples: 1, autoSwitch: false }, [latest, sample(true, 12)], latest);
     expect(decision.status).toBe('healthy'); expect(decision.patch.averageTtft).toBe(12); expect(decision.event).toBeUndefined();
   });
+  it('exempts only the configured channel from slow first-token cooldown while retaining latency statistics', () => {
+    const exempt = channel('a'), ordinary = channel('b'), latest = sample(true, 12), history = [latest, sample(true, 14)];
+    const settings = { ...defaultSettings, window: 2, samples: 1 };
+    exempt.config.cooldown = { firstToken: false, error: true };
+    const decision = evaluateHealth(exempt, settings, history, latest);
+    expect(decision).toMatchObject({ status: 'healthy', patch: { averageTtft: 13, samples: 2, reason: null, cooldownUntil: null } });
+    expect(decision.event).toBeUndefined(); expect(evaluateHealth(ordinary, settings, history, latest).status).toBe('degraded');
+    const nonStream = sample(false, 0, 100);
+    expect(evaluateHealth(exempt, settings, [nonStream], nonStream).status).toBe('degraded');
+  });
+  it.each(['error', 'empty'] as const)('preserves %s failure cooldown when only the first-token rule is exempted', result => {
+    const c = channel(), latest = { ...sample(true, 1), result, status: 503, ttft: null };
+    c.config.cooldown = { firstToken: false, error: true };
+    expect(evaluateHealth(c, { ...defaultSettings, window: 1, samples: 1 }, [latest], latest).status).toBe('offline');
+  });
+  it.each([false, true])('exempts failures with stream=%s while retaining failure statistics and independent latency checks', stream => {
+    const c = channel(), latest = { ...sample(stream, 1), result: 'error' as const, status: 503, ttft: null };
+    c.config.cooldown = { firstToken: true, error: false }; c.health.failureCount = 3;
+    const settings = { ...defaultSettings, window: 1, samples: 1 };
+    const decision = evaluateHealth(c, settings, [latest], latest);
+    expect(decision).toMatchObject({ status: 'healthy', patch: { failureCount: 4, samples: 1, reason: null, cooldownUntil: null } });
+    expect(decision.event).toBeUndefined();
+    const slow = sample(stream, 100, 100);
+    expect(evaluateHealth(c, settings, [slow], slow).status).toBe('degraded');
+  });
+  it('does not let exempted errors supply the minimum samples for non-streaming latency cooldown', () => {
+    const c = channel(), slow = sample(false, 0, 100), failed = { ...sample(false, 0), result: 'error' as const, status: 503 };
+    c.config.cooldown = { firstToken: true, error: false };
+    const settings = { ...defaultSettings, window: 3, samples: 3 };
+    expect(evaluateHealth(c, settings, [failed, failed, slow], failed)).toMatchObject({ status: 'healthy', patch: { averageDuration: 100, samples: 3 } });
+    expect(evaluateHealth(c, settings, [slow, sample(false, 0, 100), sample(false, 0, 100)], slow).status).toBe('degraded');
+  });
+  it('keeps both cooldown rules enabled when a legacy channel has no cooldown configuration', () => {
+    const c = channel(), settings = { ...defaultSettings, window: 1, samples: 1 };
+    Reflect.deleteProperty(c.config, 'cooldown');
+    const slow = sample(true, 100), failed = { ...sample(true, 1), result: 'error' as const, status: 401, ttft: null };
+    expect(evaluateHealth(c, settings, [slow], slow).status).toBe('degraded');
+    expect(evaluateHealth(c, settings, [failed], failed).status).toBe('offline');
+    expect(autoDisableDecision(c, { ...settings, autoDisableEnabled: true, autoDisableThreshold: 1 }, 401, 0).disable).toBe(true);
+  });
   it('recovers through consecutive fresh probes after cooldown despite stale slow samples', () => {
     const c = channel(); c.status = 'degraded'; c.health.recoveryCount = 1; c.health.cooldownUntil = new Date(Date.now() - 1).toISOString();
     const latest = sample(true, 1); expect(evaluateHealth(c, { ...defaultSettings, recovery: 2, samples: 1 }, [latest, sample(true, 100)], latest).status).toBe('healthy');
   });
+  it('allows successful slow first tokens to recover after cooldown when their rule is exempted', () => {
+    const c = channel(); c.status = 'offline'; c.health.reason = '最近请求失败率超过 50%'; c.health.recoveryCount = 1; c.health.cooldownUntil = new Date(Date.now() - 1).toISOString();
+    c.config.cooldown = { firstToken: false, error: true };
+    const latest = sample(true, 100), settings = { ...defaultSettings, recovery: 2, samples: 1, window: 1 };
+    expect(evaluateHealth(c, settings, [latest], latest)).toMatchObject({ status: 'healthy', patch: { reason: null, cooldownUntil: null, recoveryCount: 0 } });
+    const failed = { ...latest, result: 'error' as const, status: 503, ttft: null };
+    expect(evaluateHealth(c, settings, [failed], failed)).toMatchObject({ status: 'offline', patch: { recoveryCount: 0 } });
+    const nonStream = sample(false, 0, 100);
+    expect(evaluateHealth(c, settings, [nonStream], nonStream)).toMatchObject({ status: 'degraded', patch: { recoveryCount: 0 } });
+  });
+  it.each([
+    ['HTTP 503', false, false, true, true],
+    ['最近请求失败率超过 50%', false, false, true, true],
+    [null, true, false, true, true],
+    ['连续 20 次首字延迟均超过 10s', false, true, false, true],
+    ['连续 20 次首字延迟均超过 10s', true, true, false, false],
+    ['HTTP 503', false, true, false, false],
+    ['连续 20 次首字延迟均超过 10s', false, false, true, false],
+    ['平均响应耗时 30s 超过 20s', false, false, false, false],
+    [null, false, false, false, false],
+    ['手动停用', false, false, false, false],
+  ] as const)('recognizes existing cooldown exemptions for reason=%s and autoDisabled=%s', (reason, autoDisabled, error, firstToken, expected) => {
+    const c = channel(); c.health.reason = reason; c.health.autoDisabled = autoDisabled;
+    c.config.cooldown = { firstToken, error };
+    expect(cooldownExemptsHealth(c)).toBe(expected);
+  });
   it('auto-disables only after consecutive configured HTTP failures', () => {
     const c = channel(); const settings = { ...defaultSettings, autoDisableEnabled: true, autoDisableThreshold: 2 };
     expect(autoDisableDecision(c, settings, 401, 1).disable).toBe(true); expect(autoDisableDecision(c, settings, 500, 1).failureCount).toBe(0);
+  });
+  it.each(['channel', 'key'] as const)('overrides global and per-channel auto-disable rules for the %s target while counting failures', target => {
+    const c = channel(); c.config.cooldown = { firstToken: true, error: false };
+    const settings = { ...defaultSettings, autoDisableEnabled: true, autoDisableStatuses: [401], autoDisableThreshold: 1, autoDisableTarget: target };
+    expect(autoDisableDecision(c, settings, 401, 3)).toMatchObject({ target, failureCount: 4, disable: false });
+    c.config.autoDisable = { ...c.config.autoDisable, enabled: true, statuses: [503], threshold: 1, target };
+    expect(autoDisableDecision(c, { ...settings, autoDisableEnabled: false }, 503, 3)).toMatchObject({ target, failureCount: 4, disable: false });
   });
 });

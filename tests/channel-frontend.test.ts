@@ -22,6 +22,32 @@ describe("channel form PATCH isolation", () => {
     expect(applyConfigPatch(patch, true, latest).rateLimit).toEqual({ requestsPerMinute: 40, tokensPerMinute: 9000 });
   });
 
+  it("changes one cooldown switch without overwriting the other switch or unrelated panels", () => {
+    const baseline = structuredClone(defaultChannelConfig);
+    const draft = { ...baseline, relayUrl: "https://unsaved-relay.example", aliases: [{ from: "public", to: "physical" }], cooldown: { ...baseline.cooldown, firstToken: false } };
+    const patch = channelConfigPatchForPanel(draft, baseline, "autoDisable");
+    expect(patch).toEqual({ cooldown: { firstToken: false } });
+    const latest = { ...baseline, relayUrl: "https://new-relay.example", cooldown: { firstToken: true, error: false } };
+    expect(applyConfigPatch(patch, true, latest)).toMatchObject({ relayUrl: latest.relayUrl, aliases: [], cooldown: { firstToken: false, error: false } });
+    expect(channelConfigPatchForPanel(draft, baseline, "aliases")).toEqual({ aliases: draft.aliases });
+  });
+
+  it("defaults legacy cooldown switches to enabled and sends explicit false values", () => {
+    const baseline = structuredClone(defaultChannelConfig);
+    delete (baseline as Partial<typeof baseline>).cooldown;
+    expect(changedChannelConfig({ cooldown: { firstToken: true, error: true } }, baseline)).toEqual({});
+    expect(changedChannelConfig({ cooldown: { firstToken: true, error: false } }, baseline)).toEqual({ cooldown: { error: false } });
+  });
+
+  it("keeps auto-disable edits isolated from concurrent cooldown changes", () => {
+    const baseline = structuredClone(defaultChannelConfig);
+    const draft = { ...baseline, autoDisable: { ...baseline.autoDisable, enabled: true } };
+    const patch = channelConfigPatchForPanel(draft, baseline, "autoDisable");
+    expect(patch).toEqual({ autoDisable: { enabled: true } });
+    const latest = { ...baseline, cooldown: { firstToken: false, error: false } };
+    expect(applyConfigPatch(patch, true, latest)).toMatchObject({ autoDisable: draft.autoDisable, cooldown: latest.cooldown });
+  });
+
   it("preserves complete override dictionaries and explicitly sends deletions", () => {
     const baseline = { ...structuredClone(defaultChannelConfig), headers: { "x-old": "old", "x-keep": "keep" }, bodyOverrides: { temperature: 1 } };
     const draft = { ...baseline, headers: { "x-keep": "keep" }, bodyOverrides: {} };

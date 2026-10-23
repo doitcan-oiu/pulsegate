@@ -7,11 +7,12 @@ import { changedChannelConfig } from '../../channel-config-patch';
 import { providerModelSuggestions } from '../../provider-models';
 import { useConsole } from '../../composables/useConsole';
 import AppDialog from '../AppDialog.vue';
+import ChannelCooldownSettings from './ChannelCooldownSettings.vue';
 const props = defineProps<{ channel?: GatewayChannel; tags: string[]; devMode?: boolean }>();
 const emit = defineEmits<{ close: []; saved: [] }>();
 const { notify } = useConsole();
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
-const baseline = clone(props.channel?.config ?? defaultChannelConfig);
+const baseline = clone({ ...(props.channel?.config ?? defaultChannelConfig), cooldown: { ...defaultChannelConfig.cooldown, ...props.channel?.config.cooldown } });
 const services = [{ value: 'openai', title: 'OpenAI', endpoint: 'https://api.openai.com' }, { value: 'anthropic', title: 'Anthropic', endpoint: 'https://api.anthropic.com' }, { value: 'gemini', title: 'Gemini', endpoint: 'https://generativelanguage.googleapis.com' }];
 const initialConnection = baseline.gatewayMode === 'ai-gateway' ? 'ai-gateway' : baseline.relayUrl ? 'relay' : 'direct';
 type BalanceBackend = 'newapi' | 'sub2api' | 'bbdevlab';
@@ -21,7 +22,7 @@ const isBalanceBackend = (value: string | undefined): value is BalanceBackend =>
 const initialBackend = isBalanceBackend(baseline.integration) ? baseline.integration : isBalanceBackend(props.channel?.accountIntegration) ? props.channel.accountIntegration : 'newapi';
 const editorTab = ref('connection');
 const connectionPanels = ref<string | undefined>(initialConnection !== 'direct' ? 'connection' : undefined);
-const draft = ref({ name: props.channel?.name ?? '', provider: props.channel?.provider ?? 'OpenAI', protocol: baseline.protocol, endpoint: props.channel?.endpoint ?? services[0]!.endpoint, models: [...(props.channel?.models ?? [])], model: props.channel?.model ?? '', tags: [...(props.channel?.tags ?? [])], priority: props.channel?.priority ?? 0, weight: props.channel?.weight ?? 1, displayMultiplier: props.channel?.displayMultiplier ?? 1, website: props.channel?.website ?? '', enabled: props.channel?.enabled ?? true, secrets: '', connection: initialConnection, relayUrl: baseline.relayUrl, slug: baseline.customProviderSlug, balance: isBalanceBackend(baseline.integration), backend: initialBackend as BalanceBackend });
+const draft = ref({ name: props.channel?.name ?? '', provider: props.channel?.provider ?? 'OpenAI', protocol: baseline.protocol, endpoint: props.channel?.endpoint ?? services[0]!.endpoint, models: [...(props.channel?.models ?? [])], model: props.channel?.model ?? '', tags: [...(props.channel?.tags ?? [])], priority: props.channel?.priority ?? 0, weight: props.channel?.weight ?? 1, displayMultiplier: props.channel?.displayMultiplier ?? 1, website: props.channel?.website ?? '', enabled: props.channel?.enabled ?? true, cooldown: clone(baseline.cooldown), secrets: '', connection: initialConnection, relayUrl: baseline.relayUrl, slug: baseline.customProviderSlug, balance: isBalanceBackend(baseline.integration), backend: initialBackend as BalanceBackend });
 function accountDraft(backend: BalanceBackend): AccountDraft { return { mode: backend === 'bbdevlab' ? 'token' : props.channel?.accountIntegration === backend ? props.channel.accountAuthMode ?? 'password' : 'password', username: '', password: '', accessToken: '', userId: '', cookie: '' }; }
 const accounts = ref<Record<BalanceBackend, AccountDraft>>({ newapi: accountDraft('newapi'), sub2api: accountDraft('sub2api'), bbdevlab: accountDraft('bbdevlab') });
 const account = computed(() => accounts.value[draft.value.backend]);
@@ -43,7 +44,7 @@ function chooseProtocol(value: ProviderProtocol) {
   const service = services.find(item => item.value === value)!;
   const saved = modelDrafts.get(value);
   const provider = services.some(item => item.title === draft.value.provider) || draft.value.provider === 'Google Gemini' ? service.title : draft.value.provider;
-  const common = { name: draft.value.name, provider, tags: draft.value.tags, priority: draft.value.priority, weight: draft.value.weight, displayMultiplier: draft.value.displayMultiplier, website: draft.value.website, enabled: draft.value.enabled, balance: draft.value.balance, backend: draft.value.backend };
+  const common = { name: draft.value.name, provider, tags: draft.value.tags, priority: draft.value.priority, weight: draft.value.weight, displayMultiplier: draft.value.displayMultiplier, website: draft.value.website, enabled: draft.value.enabled, cooldown: draft.value.cooldown, balance: draft.value.balance, backend: draft.value.backend };
   draft.value = saved ? { ...clone(saved.draft), ...common } : { ...draft.value, ...common, protocol: value, endpoint: service.endpoint, models: [], model: '', secrets: '', connection: 'direct', relayUrl: '', slug: '' };
   modelInput.value = saved?.modelInput ?? ''; batchInput.value = saved?.batchInput ?? '';
 }
@@ -137,7 +138,7 @@ async function save() {
       }
     }
     busy.value = true;
-    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: connectionConfig(), ...(apiKeys.length ? { apiKeys } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
+    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: { ...connectionConfig(), ...changedChannelConfig({ cooldown: d.cooldown }, baseline) }, ...(apiKeys.length ? { apiKeys } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
     d.secrets = ''; accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; accounts.value.bbdevlab.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
   } catch (error) { notify(error instanceof Error ? error.message : '保存失败', 'error'); }
   finally { busy.value = false; }
@@ -152,6 +153,7 @@ async function save() {
         <v-list nav density="compact" bg-color="transparent">
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="连接上游" subtitle="地址与密钥" prepend-icon="mdi-connection" :active="editorTab === 'connection'" :aria-pressed="editorTab === 'connection'" color="primary" @click="editorTab = 'connection'" />
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="模型与路由" :subtitle="`${draft.models.length} 个模型`" prepend-icon="mdi-cube-outline" :active="editorTab === 'models'" :aria-pressed="editorTab === 'models'" color="primary" @click="editorTab = 'models'" />
+          <v-list-item tag="button" type="button" role="button" :tabindex="0" title="健康与冷却" subtitle="当前渠道独立设置" prepend-icon="mdi-shield-check-outline" :active="editorTab === 'health'" :aria-pressed="editorTab === 'health'" color="primary" @click="editorTab = 'health'" />
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="余额账户" :subtitle="draft.balance ? '已启用' : '按需配置'" prepend-icon="mdi-wallet-outline" :active="editorTab === 'account'" :aria-pressed="editorTab === 'account'" color="primary" @click="editorTab = 'account'" />
         </v-list>
         <div class="editor-nav-note"><v-icon size="16">mdi-shield-lock-outline</v-icon><span>凭据加密保存<br />原文不会回填</span></div>
@@ -187,6 +189,10 @@ async function save() {
           <v-switch v-model="draft.enabled" :disabled="channel?.archived" label="启用渠道" color="primary" hide-details />
           <v-divider class="my-4" /><div class="editor-section-heading"><h3>展示信息</h3></div>
           <div class="editor-field-grid editor-field-grid--responsive"><v-text-field v-model.number="draft.displayMultiplier" label="倍率" hint="仅用于列表展示" persistent-hint type="number" step="any" min="0" max="1000000" class="display-multiplier-field" /><v-text-field v-model="draft.website" label="官网地址（可选）" hint="以 http:// 或 https:// 开头，留空可清除。" persistent-hint type="url" maxlength="2048" autocomplete="url" clearable /></div>
+        </section>
+        <section v-show="editorTab === 'health'">
+          <div class="editor-section-heading"><h3>健康与冷却</h3><p>单独控制当前渠道是否因首字延迟或请求错误进入冷却。</p></div>
+          <ChannelCooldownSettings v-model="draft.cooldown" />
         </section>
         <section v-show="editorTab === 'account'">
           <div class="editor-section-heading"><h3>上游余额监控</h3><p>支持 NewAPI、Sub2API 和 BBDevLab，由 Worker 定时刷新。</p></div>
