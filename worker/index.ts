@@ -1,5 +1,5 @@
 import type { Env, GatewayContext, KeyRecord } from './env';
-import type { GatewayApiKey, GatewayChannel, GatewaySettings, KeyProfile } from '../shared/types';
+import type { CredentialUpdate, GatewayApiKey, GatewayChannel, GatewaySettings, KeyProfile } from '../shared/types';
 import { Store, expired, publicKey } from './store';
 import { hashToken, randomToken } from './crypto';
 import { handleGateway, probeChannel } from './gateway';
@@ -60,6 +60,23 @@ function importedCredentials(b: Record<string,unknown>): ImportedCredential[] {
     assert(credential.secret.length > 0,'Upstream API keys cannot be empty');
     return credential;
   });
+}
+function editedCredentialText(value: unknown, max: number): string {
+  assert(typeof value === 'string','Expected text');
+  const normalized = (value as string).trim();
+  assert(normalized.length > 0 && normalized.length <= max,`Credential text must be 1–${max} characters`);
+  return normalized;
+}
+function credentialUpdates(b: Record<string,unknown>): CredentialUpdate[] {
+  if (b.credentialUpdates === undefined) return [];
+  assert(Array.isArray(b.credentialUpdates) && b.credentialUpdates.length <= 100,'Credential updates must be a bounded array');
+  const updates = (b.credentialUpdates as unknown[]).map(value => {
+    const entry = object(value), id = text(entry.id,'',128).trim();
+    assert(id,'Credential ID is required');
+    return { id, ...(entry.label !== undefined ? { label:editedCredentialText(entry.label,128) } : {}), ...(entry.secret !== undefined ? { secret:editedCredentialText(entry.secret,16000) } : {}) };
+  });
+  assert(new Set(updates.map(update => update.id)).size === updates.length,'Credential IDs must be unique');
+  return updates;
 }
 async function createChannel(store: Store,b: Record<string,unknown>,dev: boolean,fixture = false): Promise<GatewayChannel> {
   const c = channel(b,dev); const creds = importedCredentials(b);
@@ -141,7 +158,7 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
         const b = await body(request); const changed = channel(b,dev,c);
         const account = parseAccountCredentials(b.accountCredentials);
         assertAccountReuse(changed,c,account);
-        await store.saveChannel(changed,false,importedCredentials(b),account);
+        await store.saveChannel(changed,false,importedCredentials(b),account,credentialUpdates(b));
         return response({ channel:await store.getChannel(c.id) });
       }
       if (method === 'DELETE') { await store.deleteChannel(c.id); return noContent(); }
@@ -153,7 +170,7 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
     if (tail === 'reset-health' && method === 'POST') { await store.resetChannelHealth(c.id); return response({ channel:await store.getChannel(c.id) }); }
     if (tail === 'tests' && method === 'GET') return response(await store.listLogs({ channelId:c.id,source:'probe',limit:50 }));
     if (tail === 'credentials') { if (method === 'GET') return response({ credentials:await store.listCredentialMeta(c.id) }); if (method === 'POST') { const b = await body(request); return response({ credential:await store.addCredential(c.id,text(b.label,'密钥',128),text(b.secret,'',16000)) },201); } }
-    const credMatch = tail?.match(/^credentials\/([^/]+)$/); if (credMatch) { const id = decodeURIComponent(credMatch[1]); if (method === 'PATCH') { const b = await body(request); return response({ credential:await store.changeCredential(c.id,id,{ ...(b.label !== undefined ? { label:text(b.label,'',128) } : {}),...(b.enabled !== undefined ? { enabled:bool(b.enabled,true) } : {}),...(b.secret !== undefined ? { secret:text(b.secret,'',16000) } : {}) }) }); } if (method === 'DELETE') { await store.deleteCredential(c.id,id); return noContent(); } }
+    const credMatch = tail?.match(/^credentials\/([^/]+)$/); if (credMatch) { const id = decodeURIComponent(credMatch[1]); if (method === 'PATCH') { const b = await body(request); return response({ credential:await store.changeCredential(c.id,id,{ ...(b.label !== undefined ? { label:editedCredentialText(b.label,128) } : {}),...(b.enabled !== undefined ? { enabled:bool(b.enabled,true) } : {}),...(b.secret !== undefined ? { secret:editedCredentialText(b.secret,16000) } : {}) }) }); } if (method === 'DELETE') { await store.deleteCredential(c.id,id); return noContent(); } }
   }
   if (path === '/api/keys') { if (method === 'GET') return response({ keys:await store.listKeys() }); if (method === 'POST') return response(await store.createKey(apiKey(await body(request))),201); }
   const keyMatch = path.match(/^\/api\/keys\/([^/]+)(?:\/(rotate))?$/);

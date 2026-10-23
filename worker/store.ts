@@ -1,5 +1,5 @@
 import { defaultChannelConfig, defaultSettings } from '../shared/types';
-import type { AccountIntegration, AttemptRecord, CredentialMeta, DashboardData, GatewayApiKey, GatewayChannel, GatewayEvent, GatewayLog, GatewaySettings } from '../shared/types';
+import type { AccountIntegration, AttemptRecord, CredentialMeta, CredentialUpdate, DashboardData, GatewayApiKey, GatewayChannel, GatewayEvent, GatewayLog, GatewaySettings } from '../shared/types';
 import type { Credential, Env, GatewayStore, KeyRecord } from './env';
 import { decryptSecret, encryptSecret, hashToken, previewToken, randomToken, redact } from './crypto';
 import { autoDisableDecision, cooldownExemptsHealth, credentialRecoveryAllowed, evaluateHealth } from './health';
@@ -21,6 +21,19 @@ function validateCredential({ label,secret }: CredentialInput): void {
   if (!secret || secret.length > 16000) throw new HttpError(400, 'Credential must be 1–16000 characters');
   if (label.length > 128) throw new HttpError(400, 'Credential label exceeds 128 characters');
 }
+function normalizeCredentialUpdate(update: CredentialUpdate): CredentialUpdate {
+  if (!update || typeof update !== 'object' || typeof update.id !== 'string' || !update.id.trim() || update.id.length > 128) throw new HttpError(400, 'Invalid credential ID');
+  const normalized: CredentialUpdate = { id:update.id.trim() };
+  if (update.label !== undefined) {
+    if (typeof update.label !== 'string' || !update.label.trim() || update.label.trim().length > 128) throw new HttpError(400, 'Credential label must be 1–128 characters');
+    normalized.label = update.label.trim();
+  }
+  if (update.secret !== undefined) {
+    if (typeof update.secret !== 'string' || !update.secret.trim() || update.secret.trim().length > 16000) throw new HttpError(400, 'Credential must be 1–16000 characters');
+    normalized.secret = update.secret.trim();
+  }
+  return normalized;
+}
 export class Store implements GatewayStore {
   constructor(public env: Env, private coordinate = true) {}
   private async coordinated<T>(operation: string, args: unknown): Promise<T> {
@@ -41,14 +54,22 @@ export class Store implements GatewayStore {
     channel.accountBalance = account?.balance ? JSON.parse(account.balance) : account ? { status:'pending',amount:null,unit:'',updatedAt:null,checkedAt:null } : undefined;
     return channel;
   }
-  async saveChannel(channel: GatewayChannel, fixture = false, credentials: CredentialInput[] = [], account?: AccountCredentials): Promise<void> {
+  async saveChannel(channel: GatewayChannel, fixture = false, credentials: CredentialInput[] = [], account?: AccountCredentials, credentialUpdates: CredentialUpdate[] = []): Promise<void> {
     if (credentials.length > 100) throw new HttpError(400, 'Upstream API keys must be a bounded array');
     credentials.forEach(validateCredential);
+    if (!Array.isArray(credentialUpdates) || credentialUpdates.length > 100) throw new HttpError(400, 'Credential updates must be a bounded array');
+    const updates = credentialUpdates.map(normalizeCredentialUpdate);
+    if (new Set(updates.map(update => update.id)).size !== updates.length) throw new HttpError(400, 'Credential IDs must be unique');
+    if (updates.length) {
+      const existing = new Set((await this.listCredentialMeta(channel.id)).map(credential => credential.id));
+      if (updates.some(update => !existing.has(update.id))) throw new HttpError(404, 'Credential not found');
+    }
     const stored = await this.env.DB.prepare('SELECT data,EXISTS(SELECT 1 FROM channel_accounts a WHERE a.channel_id=channels.id) AS has_account,(SELECT version FROM channel_accounts a WHERE a.channel_id=channels.id) AS account_version FROM channels WHERE id=?').bind(channel.id).first<{ data: string; has_account: number; account_version: number | null }>();
     const previous = stored ? { ...decode<GatewayChannel>(stored), hasAccountCredentials: !!stored.has_account } : null;
     if (previous && (previous.hasAccountCredentials || previous.config.integration !== channel.config.integration)) assertAccountReuse(channel, previous, account);
-    // Prepare every encrypted insert before the transaction; edits append and never replace existing keys.
+    // Validate and encrypt the complete edit before the single transaction.
     const prepared = await Promise.all(credentials.map(credential => this.prepareCredential(channel.id,credential)));
+    const preparedUpdates = await Promise.all(updates.map(update => this.prepareCredentialUpdate(channel.id,update)));
     const accountStatement = await prepareAccountSave(this.env, channel, account);
     if (account) channel = { ...channel, accountAuthMode: accountAuthMode(account), accountIntegration: channel.config.integration as AccountIntegration };
     // Merge account metadata against the row inside the transaction. A newer account
@@ -66,6 +87,7 @@ export class Store implements GatewayStore {
     statements.push(this.env.DB.prepare("UPDATE channels SET data=json_set(data,'$.status','healthy','$.health.cooldownUntil',NULL,'$.health.reason',NULL,'$.health.recoveryCount',0,'$.health.autoDisabled',json('false')),health_version=health_version+1 WHERE id=? AND ((json_extract(data,'$.config.cooldown.error')=0 AND (json_extract(data,'$.health.autoDisabled')=1 OR json_extract(data,'$.health.reason') LIKE 'HTTP %' OR json_extract(data,'$.health.reason') LIKE '%失败率%')) OR (json_extract(data,'$.config.cooldown.firstToken')=0 AND COALESCE(json_extract(data,'$.health.autoDisabled'),0)=0 AND json_extract(data,'$.health.reason') LIKE '%首字%' AND json_extract(data,'$.health.reason') NOT LIKE 'HTTP %' AND json_extract(data,'$.health.reason') NOT LIKE '%失败率%'))").bind(channel.id));
     statements.push(this.env.DB.prepare("UPDATE credentials SET enabled=1,failure_count=0,recovery_count=0,disabled_at=NULL,reason=NULL WHERE channel_id=? AND enabled=0 AND reason IS NOT NULL AND disabled_at IS NOT NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.id=credentials.channel_id AND json_extract(c.data,'$.config.cooldown.error')=0)").bind(channel.id));
     statements.push(...prepared.map(entry => entry.statement));
+    statements.push(...preparedUpdates.filter((statement): statement is D1PreparedStatement => statement !== null));
     if (accountStatement) statements.push(accountStatement);
     else if (previous && previous.endpoint !== channel.endpoint) statements.push(this.env.DB.prepare("UPDATE channel_accounts SET auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE channel_id=? AND version=? AND EXISTS (SELECT 1 FROM channels c WHERE c.id=? AND json_extract(c.data,'$.endpoint')=? AND (? NOT IN ('newapi','sub2api','bbdevlab') OR COALESCE(json_extract(c.data,'$.accountIntegration'),json_extract(c.data,'$.config.integration'),'native')=?))").bind(channel.id,accountVersion,channel.id,channel.endpoint,channel.config.integration ?? 'native',channel.config.integration ?? 'native'));
     await this.env.DB.batch(statements);
@@ -116,11 +138,23 @@ export class Store implements GatewayStore {
     return credential;
   }
   async changeCredential(channelId: string, id: string, patch: { label?: string; enabled?: boolean; secret?: string }): Promise<CredentialMeta> {
+    const update = normalizeCredentialUpdate({ ...patch,id });
+    if (patch.enabled !== undefined && typeof patch.enabled !== 'boolean') throw new HttpError(400, 'Expected a boolean');
     const meta = (await this.listCredentialMeta(channelId)).find(c => c.id === id); if (!meta) throw new HttpError(404, 'Credential not found');
-    if (patch.secret !== undefined) { if (!patch.secret || patch.secret.length > 16000) throw new HttpError(400, 'Invalid credential'); await this.env.DB.prepare('UPDATE credentials SET secret=?,preview=?,failure_count=0,disabled_at=NULL,reason=NULL WHERE id=? AND channel_id=?').bind(await encryptSecret(patch.secret,this.env), `••••${patch.secret.slice(-4)}`,id,channelId).run(); }
-    if (patch.label !== undefined) await this.env.DB.prepare('UPDATE credentials SET label=? WHERE id=? AND channel_id=?').bind(patch.label,id,channelId).run();
-    if (patch.enabled !== undefined) await this.setCredentialHealth(id, { enabled: patch.enabled, failureCount: 0, disabledAt: null, reason: null });
+    const statement = await this.prepareCredentialUpdate(channelId,update,patch.enabled);
+    if (statement) await statement.run();
     return (await this.listCredentialMeta(channelId)).find(c => c.id === id)!;
+  }
+  private async prepareCredentialUpdate(channelId: string, update: CredentialUpdate, enabled?: boolean): Promise<D1PreparedStatement | null> {
+    const columns: string[] = [], values: (string | number)[] = [];
+    if (update.label !== undefined) { columns.push('label=?'); values.push(update.label); }
+    if (update.secret !== undefined) {
+      columns.push('secret=?','preview=?');
+      values.push(await encryptSecret(update.secret,this.env),`••••${update.secret.slice(-4)}`);
+    }
+    if (enabled !== undefined) { columns.push('enabled=?'); values.push(enabled ? 1 : 0); }
+    if (update.secret !== undefined || enabled !== undefined) columns.push('failure_count=0','recovery_count=0','disabled_at=NULL','reason=NULL');
+    return columns.length ? this.env.DB.prepare('UPDATE credentials SET '+columns.join(',')+' WHERE id=? AND channel_id=?').bind(...values,update.id,channelId) : null;
   }
   async deleteCredential(channelId: string, id: string): Promise<void> { await this.env.DB.prepare('DELETE FROM credentials WHERE id=? AND channel_id=?').bind(id,channelId).run(); }
   async getCredentials(channelId: string, includeDisabled = false): Promise<Credential[]> {

@@ -49,6 +49,7 @@ export type GatewayApiKey = {
   activeProfile: string; profiles: KeyProfile[];
 };
 export type CredentialMeta = { id: string; label: string; preview: string; enabled: boolean; failureCount: number; disabledAt: string | null; createdAt: string; reason: string | null };
+export type CredentialUpdate = { id: string; label?: string; secret?: string };
 export type GatewaySettings = {
   account: string; gateway: string; aiGatewayEnabled: boolean; hasAiGatewayToken: boolean;
   retryEnabled: boolean; maxChannelRetries: number; maxSameChannelRetries: number;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import type { GatewayChannel, ProviderProtocol } from '../../../shared/types';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import type { CredentialMeta, CredentialUpdate, GatewayChannel, ProviderProtocol } from '../../../shared/types';
 import { defaultChannelConfig } from '../../../shared/types';
 import { api } from '../../api';
 import { changedChannelConfig } from '../../channel-config-patch';
@@ -8,6 +8,7 @@ import { providerModelSuggestions } from '../../provider-models';
 import { useConsole } from '../../composables/useConsole';
 import AppDialog from '../AppDialog.vue';
 import ChannelCooldownSettings from './ChannelCooldownSettings.vue';
+import { credentialUpdates, type CredentialDraft } from './credential-utils';
 const props = defineProps<{ channel?: GatewayChannel; tags: string[]; devMode?: boolean }>();
 const emit = defineEmits<{ close: []; saved: [] }>();
 const { notify } = useConsole();
@@ -31,10 +32,27 @@ const savedAccount = computed(() => props.channel?.hasAccountCredentials && (pro
 const snapshot = () => JSON.stringify({ draft: draft.value, accounts: accounts.value, modelInput: modelInput.value, batchInput: batchInput.value, tagInput: tagInput.value });
 const modelInput = ref(''); const batchInput = ref(''); const tagInput = ref('');
 const initial = snapshot();
-const dirty = computed(() => snapshot() !== initial);
+const savedCredentials = ref<CredentialMeta[]>([]);
+const credentialDrafts = ref<CredentialDraft[]>([]);
+const credentialMeta = computed(() => new Map(savedCredentials.value.map(key => [key.id, key])));
+const credentialsLoading = ref(!!props.channel); const credentialsError = ref(''); const revealExisting = ref<string[]>([]);
+const dirty = computed(() => snapshot() !== initial || credentialDrafts.value.some(key => !!key.secret || key.label !== credentialMeta.value.get(key.id)?.label));
 const busy = ref(false); const discard = ref(false); const revealSecret = ref(false);
 const discovered = ref<string[] | null>(null); const discoverySearch = ref(''); const selectedModels = ref<string[]>([]); const discovering = ref(false); const discoveryError = ref(''); const discoveryEndpoint = ref(''); const discoveryTruncated = ref(false);
 let discoveryController: AbortController | null = null; let sequence = 0;
+let alive = true;
+async function loadCredentials() {
+  if (!props.channel) return;
+  credentialsLoading.value = true; credentialsError.value = '';
+  try {
+    const data = await api<{ credentials: CredentialMeta[] }>(`/api/channels/${encodeURIComponent(props.channel.id)}/credentials`);
+    if (!alive) return;
+    savedCredentials.value = data.credentials;
+    credentialDrafts.value = data.credentials.map(key => ({ id: key.id, label: key.label, secret: '' }));
+  } catch (error) { if (alive) credentialsError.value = error instanceof Error ? error.message : '密钥列表加载失败'; }
+  finally { if (alive) credentialsLoading.value = false; }
+}
+onMounted(loadCredentials);
 const discoveryVisible = computed(() => (discovered.value ?? []).filter(model => model.toLowerCase().includes((discoverySearch.value ?? '').toLowerCase())));
 const modelDrafts = new Map<string, { draft: typeof draft.value; modelInput: string; batchInput: string }>();
 function chooseProtocol(value: ProviderProtocol) {
@@ -78,13 +96,14 @@ function addModels(models: string[]) {
 }
 function removeModel(model: string) { draft.value.models = draft.value.models.filter(item => item !== model); if (draft.value.model === model) draft.value.model = draft.value.models[0] ?? ''; }
 function addTags() { const next = [...new Set([...draft.value.tags, ...values(tagInput.value)])]; if (next.length > 100 || next.some(tag => tag.length > 256)) { notify('最多 100 个标签，每个不超过 256 个字符', 'error'); return; } draft.value.tags = next; tagInput.value = ''; }
-watch(() => [draft.value.endpoint, draft.value.protocol, draft.value.connection, draft.value.relayUrl, draft.value.slug, draft.value.secrets], () => { sequence++; discoveryController?.abort(); discovering.value = false; discovered.value = null; discoveryError.value = ''; selectedModels.value = []; });
+watch(() => [draft.value.endpoint, draft.value.protocol, draft.value.connection, draft.value.relayUrl, draft.value.slug, draft.value.secrets, ...credentialDrafts.value.map(key => key.secret)], () => { sequence++; discoveryController?.abort(); discovering.value = false; discovered.value = null; discoveryError.value = ''; selectedModels.value = []; });
 async function discover() {
   if (busy.value || discovering.value || simulated.value) return;
   try { endpointValid(draft.value.endpoint.trim(), 'Base URL'); if (draft.value.connection === 'relay') endpointValid(draft.value.relayUrl.trim(), '中继地址'); if (draft.value.connection === 'ai-gateway' && !/^[\w-]{1,128}$/.test(draft.value.slug.trim())) throw new Error('请填写有效的自定义服务商 slug'); } catch (error) { editorTab.value = 'connection'; notify(error instanceof Error ? error.message : '请检查连接配置', 'error'); return; }
   const current = ++sequence; discoveryController?.abort(); discoveryController = new AbortController(); discovering.value = true; discoveryError.value = ''; discovered.value = null;
   try {
-    const result = await api<{ models: string[]; endpoint: string; truncated?: boolean }>('/api/channels/discover-models', { method: 'POST', signal: discoveryController.signal, body: JSON.stringify({ ...(props.channel ? { channelId: props.channel.id } : {}), endpoint: draft.value.endpoint.trim(), protocol: draft.value.protocol, config: connectionConfig(), ...(draft.value.secrets.trim() ? { apiKey: draft.value.secrets.trim().split(/\r?\n/)[0] } : {}) }) });
+    const discoveryKey = credentialDrafts.value.find(key => key.secret.trim() && credentialMeta.value.get(key.id)?.enabled)?.secret.trim() || draft.value.secrets.trim().split(/\r?\n/)[0];
+    const result = await api<{ models: string[]; endpoint: string; truncated?: boolean }>('/api/channels/discover-models', { method: 'POST', signal: discoveryController.signal, body: JSON.stringify({ ...(props.channel ? { channelId: props.channel.id } : {}), endpoint: draft.value.endpoint.trim(), protocol: draft.value.protocol, config: connectionConfig(), ...(discoveryKey ? { apiKey: discoveryKey } : {}) }) });
     if (current !== sequence) return;
     if (!Array.isArray(result.models) || result.models.some(model => typeof model !== 'string')) throw new Error('上游返回了无效的模型列表');
     if (result.models.length > 1000) throw new Error('上游模型超过 1,000 个，请使用批量添加');
@@ -95,9 +114,9 @@ async function discover() {
 function close(force = false) { if (busy.value) return; if (dirty.value && !force) { discard.value = true; return; } discoveryController?.abort(); sequence++; emit('close'); }
 function unload(event: BeforeUnloadEvent) { if (dirty.value) { event.preventDefault(); event.returnValue = ''; } }
 window.addEventListener('beforeunload', unload);
-onBeforeUnmount(() => { window.removeEventListener('beforeunload', unload); discoveryController?.abort(); sequence++; });
+onBeforeUnmount(() => { alive = false; credentialDrafts.value.forEach(key => { key.secret = ''; }); window.removeEventListener('beforeunload', unload); discoveryController?.abort(); sequence++; });
 async function save() {
-  if (busy.value) return;
+  if (busy.value || credentialsLoading.value) return;
   try {
     const d = draft.value;
     if (!d.name.trim() || !d.provider.trim() || d.name.length > 128 || d.provider.length > 128) { editorTab.value = 'connection'; throw new Error('渠道名称和服务商名称须为 1–128 个字符'); }
@@ -111,6 +130,9 @@ async function save() {
     try { website = websiteValue(d.website ?? ''); } catch (error) { editorTab.value = 'models'; throw error; }
     const apiKeys = [...new Set(d.secrets.split(/\r?\n/).map(key => key.trim()).filter(Boolean))];
     if (apiKeys.length > 100 || apiKeys.some(key => key.length > 16000)) { editorTab.value = 'connection'; throw new Error('最多 100 个密钥，每个不超过 16,000 个字符'); }
+    let updates: CredentialUpdate[];
+    try { updates = credentialUpdates(credentialDrafts.value, savedCredentials.value); }
+    catch (error) { editorTab.value = 'connection'; throw error; }
     let accountCredentials: Record<string, string> | undefined;
     if (d.balance && !simulated.value) {
       editorTab.value = 'account';
@@ -138,8 +160,8 @@ async function save() {
       }
     }
     busy.value = true;
-    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: { ...connectionConfig(), ...changedChannelConfig({ cooldown: d.cooldown }, baseline) }, ...(apiKeys.length ? { apiKeys } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
-    d.secrets = ''; accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; accounts.value.bbdevlab.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
+    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: { ...connectionConfig(), ...changedChannelConfig({ cooldown: d.cooldown }, baseline) }, ...(apiKeys.length ? { apiKeys } : {}), ...(updates.length ? { credentialUpdates: updates } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
+    d.secrets = ''; credentialDrafts.value.forEach(key => { key.secret = ''; }); accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; accounts.value.bbdevlab.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
   } catch (error) { notify(error instanceof Error ? error.message : '保存失败', 'error'); }
   finally { busy.value = false; }
 }
@@ -165,7 +187,17 @@ async function save() {
           <v-btn-toggle :model-value="draft.protocol" color="primary" mandatory divided class="protocol-selector mb-4" :disabled="simulated || busy" @update:model-value="chooseProtocol($event)"><v-btn v-for="service in services" :key="service.value" :value="service.value">{{ service.title }}</v-btn></v-btn-toggle>
           <div class="editor-field-grid editor-field-grid--responsive"><v-text-field v-model="draft.name" label="渠道名称 *" maxlength="128" /><v-text-field v-model="draft.provider" label="服务商名称 *" maxlength="128" /></div>
           <v-text-field v-model="draft.endpoint" label="Base URL *" maxlength="2048" class="mb-4" hint="只填域名时，模型获取与测试自动补充协议路径。" persistent-hint />
-          <v-textarea v-model="draft.secrets" :label="channel ? '追加 API Key' : '上游 API Key'" rows="3" autocomplete="off" :class="{ 'secret-masked': !revealSecret }" :hint="`每行一个；已有 ${channel?.credentialCount ?? 0} 个密钥，留空保留。`" persistent-hint :append-inner-icon="revealSecret ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="revealSecret = !revealSecret" />
+          <template v-if="channel">
+            <div class="editor-section-heading"><h3>已有 API Key</h3><p>可直接修改名称或填写新 Key 替换原记录，Key 留空则保持原值。</p></div>
+            <v-progress-linear v-if="credentialsLoading" indeterminate class="mb-4" aria-label="加载已有密钥" />
+            <v-alert v-if="credentialsError" type="error" variant="tonal" density="compact" class="mb-4">{{ credentialsError }}<v-btn variant="text" size="small" :disabled="credentialsLoading" @click="loadCredentials">重新加载</v-btn></v-alert>
+            <div v-for="key in credentialDrafts" :key="key.id" class="saved-credential mb-4">
+              <div class="d-flex align-center ga-2 mb-3"><code class="text-caption">{{ credentialMeta.get(key.id)?.preview }}</code><v-chip :color="credentialMeta.get(key.id)?.enabled ? 'success' : 'warning'" size="x-small" variant="tonal">{{ credentialMeta.get(key.id)?.enabled ? '可用' : '已停用' }}</v-chip></div>
+              <div class="editor-field-grid editor-field-grid--responsive mb-0"><v-text-field v-model="key.label" label="密钥名称" maxlength="128" /><v-text-field v-model="key.secret" label="替换 API Key（留空保留）" :type="revealExisting.includes(key.id) ? 'text' : 'password'" :append-inner-icon="revealExisting.includes(key.id) ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="new-password" maxlength="16000" @click:append-inner="revealExisting = revealExisting.includes(key.id) ? revealExisting.filter(id => id !== key.id) : [...revealExisting, key.id]" /></div>
+            </div>
+            <p v-if="!credentialsLoading && !credentialsError && !credentialDrafts.length" class="text-caption text-medium-emphasis mb-4">尚未配置上游密钥，可在下方添加。</p>
+          </template>
+          <v-textarea v-model="draft.secrets" :label="channel ? '新增 API Key（可选）' : '上游 API Key'" rows="3" autocomplete="off" :class="{ 'secret-masked': !revealSecret }" hint="每行一个，仅用于新增密钥。" persistent-hint :append-inner-icon="revealSecret ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="revealSecret = !revealSecret" />
           <v-expansion-panels v-model="connectionPanels" variant="accordion" class="mt-4"><v-expansion-panel value="connection" title="高级连接方式"><v-expansion-panel-text><v-select v-model="draft.connection" :items="[{ title: '直连上游', value: 'direct' }, { title: 'HTTPS API 中继', value: 'relay' }, { title: 'Cloudflare AI Gateway', value: 'ai-gateway' }]" :disabled="simulated" label="连接方式" /><v-text-field v-if="draft.connection === 'relay'" v-model="draft.relayUrl" label="中继 Base URL *" class="mt-4" /><v-text-field v-if="draft.connection === 'ai-gateway'" v-model="draft.slug" label="自定义服务商 slug *" class="mt-4" hint="Account ID、Gateway ID 与网关令牌在全局设置中配置。" persistent-hint /></v-expansion-panel-text></v-expansion-panel></v-expansion-panels>
         </section>
         <section v-show="editorTab === 'models'">
@@ -206,7 +238,7 @@ async function save() {
         </section>
       </div>
     </v-form>
-    <template #actions><span class="text-caption text-medium-emphasis">{{ dirty ? '有未保存的更改' : '密钥加密保存' }}</span><v-spacer /><v-btn :disabled="busy" @click="close()">取消</v-btn><v-btn color="primary" :loading="busy" @click="save">{{ channel ? '保存更改' : '创建渠道' }}</v-btn></template>
+    <template #actions><span class="text-caption text-medium-emphasis">{{ dirty ? '有未保存的更改' : '密钥加密保存' }}</span><v-spacer /><v-btn :disabled="busy" @click="close()">取消</v-btn><v-btn color="primary" :loading="busy" :disabled="credentialsLoading" @click="save">{{ channel ? '保存更改' : '创建渠道' }}</v-btn></template>
   </AppDialog>
   <AppDialog v-model="discard" title="放弃渠道更改？" :max-width="440"><p>尚未保存的设置和密钥将丢失。</p><template #actions><v-btn @click="discard = false">继续编辑</v-btn><v-btn color="error" @click="close(true)">放弃并关闭</v-btn></template></AppDialog>
 </template>
@@ -237,6 +269,7 @@ async function save() {
 .discovery-panel { border: 1px solid rgba(var(--v-theme-primary), .24); background: rgba(var(--v-theme-primary), .04); padding: 12px; border-radius: 4px; }
 .discovery-list { max-height: 260px; overflow: auto; }
 .secret-masked :deep(textarea) { -webkit-text-security: disc; }
+.saved-credential { padding: 14px; border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 4px; }
 .account-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; background: rgba(var(--v-theme-on-surface), .04); border-radius: 4px; }
 .account-toggle > .v-switch { flex: 0 0 auto; }
 .account-fields { display: grid; gap: 16px; }

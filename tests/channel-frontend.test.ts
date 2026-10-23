@@ -2,6 +2,37 @@ import { describe, expect, it } from "vitest";
 import { defaultChannelConfig } from "../shared/types";
 import { changedChannelConfig, channelConfigPatchForPanel } from "../src/channel-config-patch";
 import { config as applyConfigPatch } from "../worker/validation";
+import type { CredentialMeta } from "../shared/types";
+import { credentialUpdates } from "../src/components/channels/credential-utils";
+
+describe("editing saved channel credentials", () => {
+  const baseline: CredentialMeta[] = [
+    { id: "existing", label: "Original", preview: "••••1234", enabled: true, failureCount: 0, disabledAt: null, createdAt: "2026-10-23T00:00:00Z", reason: null },
+    { id: "other", label: "Other", preview: "••••5678", enabled: false, failureCount: 2, disabledAt: null, createdAt: "2026-10-23T00:00:00Z", reason: null },
+  ];
+
+  it("preserves empty replacement fields and supports renaming without submitting a secret", () => {
+    expect(credentialUpdates([{ id: "existing", label: "Original", secret: "" }], baseline)).toEqual([]);
+    expect(credentialUpdates([{ id: "existing", label: " Renamed ", secret: "  " }], baseline)).toEqual([{ id: "existing", label: "Renamed" }]);
+  });
+
+  it("replaces only the chosen saved credential and excludes untouched names and credentials", () => {
+    expect(credentialUpdates([
+      { id: "existing", label: "Original", secret: " replacement-key " },
+      { id: "other", label: "Other", secret: "" },
+    ], baseline)).toEqual([{ id: "existing", secret: "replacement-key" }]);
+  });
+
+  it("rejects invalid edits and stale credential identities before submitting", () => {
+    for (const draft of [
+      { id: "existing", label: " ", secret: "" },
+      { id: "existing", label: "x".repeat(129), secret: "" },
+      { id: "existing", label: "Original", secret: "x".repeat(16001) },
+      { id: "missing", label: "Original", secret: "replacement" },
+    ]) expect(() => credentialUpdates([draft], baseline)).toThrow();
+    expect(() => credentialUpdates([{ id: "existing", label: "Original", secret: "a" }, { id: "existing", label: "Original", secret: "b" }], baseline)).toThrow();
+  });
+});
 
 describe("channel form PATCH isolation", () => {
   it("does not overwrite newer unrelated settings when an alias dialog saves", () => {
