@@ -206,13 +206,39 @@ export class Store implements GatewayStore {
   }
   async saveKey(key: GatewayApiKey): Promise<void> {
     const result = await this.env.DB.batch([this.env.DB.prepare("UPDATE api_keys SET data=? WHERE id=? AND json_extract(data,'$.status')<>'revoked'").bind(JSON.stringify(key),key.id), ...key.profiles.map(p => this.env.DB.prepare("INSERT OR IGNORE INTO profile_usage(key_id,profile_id) SELECT ?,? WHERE EXISTS (SELECT 1 FROM api_keys WHERE id=? AND json_extract(data,'$.status')<>'revoked')").bind(key.id,p.id,key.id))]);
-    if (!result[0].meta.changes && key.status !== 'revoked') throw new HttpError(409, 'Revoked keys cannot be updated');
+    if (!result[0].meta.changes) { if (!await this.getKey(key.id)) throw new HttpError(404, 'API Key not found'); throw new HttpError(409, 'Revoked keys cannot be updated'); }
+  }
+  async deleteKey(id: string): Promise<void> {
+    const result = await this.env.DB.prepare('DELETE FROM api_keys WHERE id=?').bind(id).run();
+    if (!result.meta.changes) throw new HttpError(404, 'API Key not found');
+  }
+  async bulkKeys(ids: string[], action: 'enable' | 'disable' | 'delete'): Promise<void> {
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > 200 || ids.some(id => typeof id !== 'string' || !id || id !== id.trim() || id.length > 128)) throw new HttpError(400, 'Select 1–200 valid API Key IDs');
+    if (new Set(ids).size !== ids.length) throw new HttpError(400, 'API Key IDs must be unique');
+    if (!['enable','disable','delete'].includes(action)) throw new HttpError(400, 'Invalid API Key bulk action');
+    const selection = JSON.stringify(ids);
+    const inspect = async (): Promise<void> => {
+      const rows = await this.env.DB.prepare("SELECT id,json_extract(data,'$.status') AS status FROM api_keys WHERE id IN (SELECT value FROM json_each(?))").bind(selection).all<{ id: string; status: GatewayApiKey['status'] }>();
+      if (rows.results.length !== ids.length) throw new HttpError(404, 'API Key not found');
+      if (action !== 'delete' && rows.results.some(key => key.status === 'revoked')) throw new HttpError(409, 'Revoked keys cannot be updated');
+    };
+    await inspect();
+    // Validate the complete selection again inside the one mutation statement.
+    // A concurrent deletion or revocation must leave every other selected key intact.
+    // profile_usage is removed by its foreign key cascade; request history is retained.
+    const guard = "id IN (SELECT value FROM json_each(?)) AND (SELECT COUNT(*) FROM api_keys WHERE id IN (SELECT value FROM json_each(?)))=?";
+    const changes = action === 'delete'
+      // D1 changes includes cascaded profile rows; RETURNING counts only selected keys.
+      ? (await this.env.DB.prepare('DELETE FROM api_keys WHERE '+guard+' RETURNING id').bind(selection,selection,ids.length).all<{ id: string }>()).results.length
+      : (await this.env.DB.prepare("UPDATE api_keys SET data=json_set(data,'$.status',?) WHERE "+guard+" AND NOT EXISTS (SELECT 1 FROM api_keys WHERE id IN (SELECT value FROM json_each(?)) AND json_extract(data,'$.status')='revoked')").bind(action === 'enable' ? 'active' : 'disabled',selection,selection,ids.length,selection).run()).meta.changes;
+    if (changes !== ids.length) { await inspect(); throw new HttpError(409, 'API Keys changed; refresh and try again'); }
   }
   async rotateKey(key: GatewayApiKey): Promise<{ key: GatewayApiKey; token: string }> {
     const token = randomToken(), preview = previewToken(token);
     const result = await this.env.DB.prepare("UPDATE api_keys SET token_hash=?,data=json_set(data,'$.preview',?) WHERE id=? AND json_extract(data,'$.status')<>'revoked'").bind(await hashToken(token),preview,key.id).run();
-    if (!result.meta.changes) throw new HttpError(409, 'Revoked keys cannot be rotated');
-    return { key: publicKey((await this.getKey(key.id))!), token };
+    if (!result.meta.changes) { if (!await this.getKey(key.id)) throw new HttpError(404, 'API Key not found'); throw new HttpError(409, 'Revoked keys cannot be rotated'); }
+    const current = await this.getKey(key.id); if (!current) throw new HttpError(404, 'API Key not found');
+    return { key: publicKey(current), token };
   }
   async incrementKeyUsage(keyId: string, profileId: string, limit: number): Promise<boolean> {
     if (this.coordinate) return this.coordinated<boolean>('quota',{ keyId,profileId,limit });

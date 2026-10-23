@@ -121,7 +121,7 @@ describe('admin authentication and encryption', () => {
 });
 
 describe('API keys and profiles', () => {
-  it('returns a fresh API token once, saves only its hash and rotates/revokes it',async () => {
+  it('returns a fresh API token once, saves only its hash and rotates/deletes it',async () => {
     await newChannel(); const created = await newKey();
     expect(created.token.startsWith('pg_live_')).toBe(true);
     const stored = await testEnv.DB.prepare('SELECT token_hash,data FROM api_keys WHERE id=?').bind(created.key.id).first<{ token_hash:string;data:string }>();
@@ -131,9 +131,9 @@ describe('API keys and profiles', () => {
     expect(rotated.json.token).not.toBe(created.token);
     expect((await call('/v1/models','GET',undefined,{ token:created.token })).response.status).toBe(401);
     expect((await call('/v1/models','GET',undefined,{ token:rotated.json.token })).response.status).toBe(200);
-    await call(`/api/keys/${created.key.id}`,'DELETE');
+    expect((await call(`/api/keys/${created.key.id}`,'DELETE')).response.status).toBe(204);
     expect((await call('/v1/models','GET',undefined,{ token:rotated.json.token })).response.status).toBe(401);
-    expect((await call(`/api/keys/${created.key.id}`,'PATCH',{ status:'active' })).response.status).toBe(400);
+    expect((await call(`/api/keys/${created.key.id}`,'PATCH',{ status:'active' })).response.status).toBe(404);
   });
   it('filters model discovery by tag scope and model whitelist, including mappings',async () => {
     const c = await newChannel('Prod',['prod']); await call(`/api/channels/${c.id}`,'PATCH',{ models:['real-model'],config:{ aliases:[{ from:'stable',to:'real-model' }] } });
@@ -176,13 +176,13 @@ describe('API keys and profiles', () => {
     expect((await call('/api/tags/production','DELETE')).response.status).toBe(409);
     await call(`/api/keys/${k.key.id}`,'DELETE'); expect((await call('/api/tags/production','DELETE')).response.status).toBe(200);
   });
-  it('cannot revive a revoked key from a stale edit or rotation snapshot', async () => {
+  it('cannot revive a deleted key from a stale edit or rotation snapshot', async () => {
     const created = await newKey(); const store = new Store(testEnv);
     const stale = structuredClone(created.key);
     await call(`/api/keys/${stale.id}`,'DELETE');
-    await expect(store.saveKey({ ...stale,name:'stale edit' })).rejects.toThrow('Revoked');
-    await expect(store.rotateKey(stale)).rejects.toThrow('Revoked');
-    expect((await store.getKey(stale.id))?.status).toBe('revoked');
+    await expect(store.saveKey({ ...stale,name:'stale edit' })).rejects.toMatchObject({ status:404 });
+    await expect(store.rotateKey(stale)).rejects.toMatchObject({ status:404 });
+    expect(await store.getKey(stale.id)).toBeNull();
     expect((await call('/v1/models','GET',undefined,{ token:created.token })).response.status).toBe(401);
   });
   it('rotates only the token and keeps a policy edited after the rotation snapshot', async () => {
@@ -238,7 +238,7 @@ describe('public API authentication header compatibility', () => {
     expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count:number }>())?.count).toBe(0);
   });
 
-  it.each(['wrong','preview','admin','upstream','missing','disabled','revoked','expired','rotated'] as const)('keeps rejecting a %s credential through both models authentication headers', async mode => {
+  it.each(['wrong','preview','admin','upstream','missing','disabled','revoked','deleted','expired','rotated'] as const)('keeps rejecting a %s credential through both models authentication headers', async mode => {
     const channel = await newChannel();
     const key = await newKey(mode === 'expired' ? { expires:'2000-01-01T00:00:00Z' } : mode === 'disabled' ? { status:'disabled' } : {});
     let token = key.token;
@@ -249,7 +249,8 @@ describe('public API authentication header compatibility', () => {
       token = 'pg_live_synthetic-upstream-only-key';
       expect((await call(`/api/channels/${channel.id}/credentials`,'POST',{ label:'Upstream only',secret:token })).response.status).toBe(201);
     }
-    if (mode === 'revoked') expect((await call(`/api/keys/${key.key.id}`,'DELETE')).response.status).toBe(200);
+    if (mode === 'revoked') await testEnv.DB.prepare("UPDATE api_keys SET data=json_set(data,'$.status','revoked') WHERE id=?").bind(key.key.id).run();
+    if (mode === 'deleted') expect((await call(`/api/keys/${key.key.id}`,'DELETE')).response.status).toBe(204);
     if (mode === 'rotated') expect((await call(`/api/keys/${key.key.id}/rotate`,'POST',{})).response.status).toBe(200);
     const variants: Record<string,string>[] = mode === 'missing' ? [{}] : [{ authorization:'Bearer '+token }, { 'x-api-key':token }];
     for (const headers of variants) {

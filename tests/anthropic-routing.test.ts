@@ -92,16 +92,17 @@ describe('public Anthropic Messages route authentication and routing', () => {
     expect(events.at(-1)).toMatchObject({ event: 'message_stop', value: { type: 'message_stop' } }); expect(result.content).not.toContain('[DONE]'); expect(result.content).not.toContain('actual-upstream-model');
     expect((await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM attempts').first<{ count: number }>())?.count).toBe(1); expect(fetch).toHaveBeenCalledTimes(1);
   });
-  it.each(['missing', 'wrong', 'admin', 'expired', 'revoked', 'disabled'] as const)('returns a native authentication error for a %s client key before dispatch', async mode => {
+  it.each(['missing', 'wrong', 'admin', 'expired', 'revoked', 'deleted', 'disabled'] as const)('returns a native authentication error for a %s client key before dispatch', async mode => {
     await newChannel(); let headers: Record<string, string> = {};
     if (mode === 'wrong') headers = { 'x-api-key': 'pg_live_unknown-client-key' };
     if (mode === 'admin') headers = { 'x-api-key': testEnv.ADMIN_TOKEN! };
-    if (['expired', 'revoked', 'disabled'].includes(mode)) {
+    if (['expired', 'revoked', 'deleted', 'disabled'].includes(mode)) {
       const key = await newKey(mode === 'expired' ? { expires: '2000-01-01T00:00:00Z' } : mode === 'disabled' ? { status: 'disabled' } : {});
-      if (mode === 'revoked') {
-        const revoked = await admin(`/api/keys/${key.key.id}`, 'DELETE');
-        expect(revoked.response.status).toBe(200); expect(revoked.json.key.status).toBe('revoked');
+      if (mode === 'deleted') {
+        const deleted = await admin(`/api/keys/${key.key.id}`, 'DELETE');
+        expect(deleted.response.status).toBe(204); expect(deleted.content).toBe('');
       }
+      if (mode === 'revoked') await testEnv.DB.prepare("UPDATE api_keys SET data=json_set(data,'$.status','revoked') WHERE id=?").bind(key.key.id).run();
       headers = { 'x-api-key': key.token };
     }
     expectNativeError(await call('/v1/messages', 'POST', message, headers), 401, 'authentication_error'); await expectNoGatewayDispatch();
