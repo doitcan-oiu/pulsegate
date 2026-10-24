@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BBDEVLAB_EXHAUSTED_REASON, BBDEVLAB_EXPIRED_REASON, credentialExpired } from '../shared/credential-policy';
 import type { CredentialMeta, GatewayBalance } from '../shared/types';
 import { credentialChanged, credentialExpiryText, credentialList, credentialPage } from '../src/components/channels/credential-list';
-import { credentialState, credentialUpdates, type CredentialDraft } from '../src/components/channels/credential-utils';
+import { credentialChanges, credentialState, credentialUpdates, type CredentialDraft } from '../src/components/channels/credential-utils';
 
 const now = Date.parse('2026-10-24T12:00:00.000Z');
 const balance = (expiresAt: string | null, amount = 1): GatewayBalance => ({ status: 'ok', amount, expiresAt, unit: '余额', checkedAt: null, updatedAt: null });
@@ -88,5 +88,42 @@ describe('large upstream credential lists', () => {
     expect(credentialPage(values, NaN, NaN)).toMatchObject({ page: 1, pageCount: 4, start: 1, end: 20 });
     expect(credentialPage(values, -4, 0)).toMatchObject({ page: 1, start: 1, end: 20 });
     expect(credentialPage(values, 1, 0.5)).toMatchObject({ page: 1, pageCount: 67, start: 1, end: 1 });
+  });
+
+  it('submits deletions and other edits across hidden pages without validating discarded replacement fields', () => {
+    const keys = Array.from({ length: 67 }, (_, i) => key(String(i).padStart(2, '0')));
+    const drafts = keys.map(value => ({ id: value.id, label: value.label, secret: '' }));
+    drafts[0].label = 'First renamed'; drafts[40].secret = ' replacement-secret '; drafts[66].label = ''; drafts[66].secret = 'x'.repeat(16001);
+    const deletedIds = ['66'], before = JSON.stringify({ keys, drafts, deletedIds });
+    expect(ids(credentialPage(credentialList(keys, { query: 'First renamed', drafts, deletedIds }), 4, 20).items)).toEqual(['00']);
+    expect(credentialChanges(drafts, keys, deletedIds)).toEqual({ updates: [{ id: '00', label: 'First renamed' }, { id: '40', secret: 'replacement-secret' }], deletes: ['66'] });
+    expect(() => credentialChanges(drafts, keys)).toThrow('密钥名称须为 1–128 个字符');
+    expect(JSON.stringify({ keys, drafts, deletedIds })).toBe(before);
+    const changes = credentialChanges(drafts, keys, deletedIds);
+    changes.deletes.push('40');
+    expect(deletedIds).toEqual(['66']);
+  });
+
+  it('preserves a deleted row and its edits for undo while excluding it from status and modified filters', () => {
+    const keys = [key('available'), key('expired', { balance: balance(new Date(now).toISOString()) }), key('exhausted', { enabled: false, reason: BBDEVLAB_EXHAUSTED_REASON }), key('disabled', { enabled: false })];
+    const drafts = keys.map(value => ({ id: value.id, label: `Edited ${value.id}`, secret: `replacement-${value.id}` })), deletedIds = ids(keys);
+    for (const filter of ['available', 'expired', 'exhausted', 'disabled', 'modified'] as const) expect(credentialList(keys, { filter, drafts, deletedIds, now })).toEqual([]);
+    expect(ids(credentialList(keys, { filter: 'all', drafts, deletedIds, now }))).toEqual(deletedIds);
+    expect(ids(credentialList(keys, { filter: 'deleted', drafts, deletedIds, now }))).toEqual(deletedIds);
+    expect(ids(credentialList(keys, { filter: 'deleted', query: 'Edited exhausted', drafts, deletedIds, now }))).toEqual(['exhausted']);
+    expect(credentialChanges(drafts, keys, deletedIds)).toEqual({ updates: [], deletes: deletedIds });
+    const restored = deletedIds.filter(id => id !== 'exhausted');
+    expect(ids(credentialList(keys, { filter: 'modified', drafts, deletedIds: restored, now }))).toEqual(['exhausted']);
+    expect(credentialChanges(drafts, keys, restored)).toEqual({ updates: [{ id: 'exhausted', label: 'Edited exhausted', secret: 'replacement-exhausted' }], deletes: restored });
+    expect(credentialChanges(drafts, keys)).toEqual({ updates: credentialUpdates(drafts, keys), deletes: [] });
+  });
+
+  it('rejects stale, duplicate and oversized deletion sets and accepts the 100-key deletion boundary', () => {
+    const keys = Array.from({ length: 101 }, (_, i) => key(String(i))), drafts = keys.map(value => ({ id: value.id, label: value.label, secret: '' }));
+    expect(credentialChanges(drafts, keys, ids(keys.slice(0, 100)))).toEqual({ updates: [], deletes: ids(keys.slice(0, 100)) });
+    expect(() => credentialChanges(drafts, keys, ids(keys))).toThrow('每次最多删除 100 个密钥');
+    expect(() => credentialChanges(drafts, keys, ['0', '0'])).toThrow('密钥列表已变化');
+    expect(() => credentialChanges(drafts, keys, ['missing-key'])).toThrow('密钥列表已变化');
+    expect(() => credentialChanges(drafts, keys, ['0', 'missing-key'])).toThrow('密钥列表已变化');
   });
 });

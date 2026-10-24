@@ -1,7 +1,7 @@
 import type { CredentialMeta, GatewayBalance } from '../../../shared/types';
 import { credentialState, type CredentialDraft, type CredentialState } from './credential-utils';
 
-export type CredentialFilter = 'all' | CredentialState | 'modified';
+export type CredentialFilter = 'all' | CredentialState | 'modified' | 'deleted';
 export type CredentialSort = 'created' | 'name' | 'expiry' | 'balance';
 
 export function credentialChanged(key: CredentialMeta, draft?: CredentialDraft): boolean {
@@ -9,14 +9,17 @@ export function credentialChanged(key: CredentialMeta, draft?: CredentialDraft):
 }
 
 /** Filtering never trims or mutates the full set of editable drafts. */
-export function credentialList(keys: CredentialMeta[], options: { query?: string; filter?: CredentialFilter; sort?: CredentialSort; drafts?: CredentialDraft[]; now?: number } = {}): CredentialMeta[] {
+export function credentialList(keys: CredentialMeta[], options: { query?: string; filter?: CredentialFilter; sort?: CredentialSort; drafts?: CredentialDraft[]; deletedIds?: string[]; now?: number } = {}): CredentialMeta[] {
   const drafts = new Map((options.drafts ?? []).map(draft => [draft.id, draft]));
+  const deleted = new Set(options.deletedIds ?? []);
   const query = (options.query ?? '').trim().toLocaleLowerCase();
   const filter = options.filter ?? 'all', now = options.now ?? Date.now();
   const filtered = keys.filter(key => {
     const draft = drafts.get(key.id);
     if (query && !`${draft?.label ?? key.label} ${key.preview} ${key.reason ?? ''}`.toLocaleLowerCase().includes(query)) return false;
-    return filter === 'all' || (filter === 'modified' ? credentialChanged(key, draft) : credentialState(key, now) === filter);
+    if (filter === 'all') return true;
+    if (filter === 'deleted') return deleted.has(key.id);
+    return !deleted.has(key.id) && (filter === 'modified' ? credentialChanged(key, draft) : credentialState(key, now) === filter);
   });
   if (!options.sort || options.sort === 'created') return filtered;
   return filtered.sort((left, right) => {

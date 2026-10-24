@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { CredentialMeta, CredentialUpdate, GatewayChannel, ProviderProtocol } from '../../../shared/types';
+import type { CredentialMeta, GatewayChannel, ProviderProtocol } from '../../../shared/types';
 import { defaultChannelConfig } from '../../../shared/types';
 import { api } from '../../api';
 import { changedChannelConfig } from '../../channel-config-patch';
@@ -10,7 +10,7 @@ import AppDialog from '../AppDialog.vue';
 import ChannelCooldownSettings from './ChannelCooldownSettings.vue';
 import CredentialBalance from './CredentialBalance.vue';
 import ChannelCredentialList from './ChannelCredentialList.vue';
-import { credentialStatus, credentialUpdates, type CredentialDraft } from './credential-utils';
+import { credentialChanges, credentialStatus, credentialUpdates, type CredentialDraft } from './credential-utils';
 const props = defineProps<{ channel?: GatewayChannel; tags: string[]; devMode?: boolean }>();
 const emit = defineEmits<{ close: []; saved: [] }>();
 const { notify } = useConsole();
@@ -37,12 +37,20 @@ const modelInput = ref(''); const batchInput = ref(''); const tagInput = ref('')
 const initial = snapshot();
 const savedCredentials = ref<CredentialMeta[]>([]);
 const credentialDrafts = ref<CredentialDraft[]>([]);
+const credentialDeletes = ref<string[]>([]);
+const deletedCredentialIds = computed(() => new Set(credentialDeletes.value));
 const credentialMeta = computed(() => new Map(savedCredentials.value.map(key => [key.id, key])));
 const credentialsLoading = ref(!!props.channel); const credentialsError = ref('');
 const editingCredentialId = ref<string | null>(null); const revealExisting = ref(false); const addKeysOpen = ref(!props.channel);
 const editingCredential = computed(() => credentialDrafts.value.find(key => key.id === editingCredentialId.value));
 const editingCredentialMeta = computed(() => credentialMeta.value.get(editingCredentialId.value ?? ''));
-function editCredential(key: CredentialMeta) { editingCredentialId.value = key.id; revealExisting.value = false; }
+function editCredential(key: CredentialMeta) { if (deletedCredentialIds.value.has(key.id)) return; editingCredentialId.value = key.id; revealExisting.value = false; }
+function deleteCredential(key: CredentialMeta) {
+  if (busy.value || deletedCredentialIds.value.has(key.id)) return;
+  if (credentialDeletes.value.length >= 100) { notify('每次最多删除 100 个密钥，请先保存当前更改', 'error'); return; }
+  credentialDeletes.value.push(key.id);
+}
+function restoreCredential(key: CredentialMeta) { if (!busy.value) credentialDeletes.value = credentialDeletes.value.filter(id => id !== key.id); }
 function finishCredentialEdit() {
   if (editingCredential.value && editingCredentialMeta.value) {
     try { credentialUpdates([editingCredential.value], [editingCredentialMeta.value]); }
@@ -53,7 +61,7 @@ function finishCredentialEdit() {
 function resetCredentialEdit() {
   if (editingCredential.value && editingCredentialMeta.value) { editingCredential.value.label = editingCredentialMeta.value.label; editingCredential.value.secret = ''; }
 }
-const dirty = computed(() => snapshot() !== initial || credentialDrafts.value.some(key => !!key.secret || key.label !== credentialMeta.value.get(key.id)?.label));
+const dirty = computed(() => snapshot() !== initial || !!credentialDeletes.value.length || credentialDrafts.value.some(key => !!key.secret || key.label !== credentialMeta.value.get(key.id)?.label));
 const busy = ref(false); const discard = ref(false); const revealSecret = ref(false);
 const discovered = ref<string[] | null>(null); const discoverySearch = ref(''); const selectedModels = ref<string[]>([]); const discovering = ref(false); const discoveryError = ref(''); const discoveryEndpoint = ref(''); const discoveryTruncated = ref(false);
 let discoveryController: AbortController | null = null; let sequence = 0;
@@ -66,6 +74,7 @@ async function loadCredentials() {
     if (!alive) return;
     savedCredentials.value = data.credentials;
     credentialDrafts.value = data.credentials.map(key => ({ id: key.id, label: key.label, secret: '' }));
+    credentialDeletes.value = [];
   } catch (error) { if (alive) credentialsError.value = error instanceof Error ? error.message : '密钥列表加载失败'; }
   finally { if (alive) credentialsLoading.value = false; }
 }
@@ -113,13 +122,13 @@ function addModels(models: string[]) {
 }
 function removeModel(model: string) { draft.value.models = draft.value.models.filter(item => item !== model); if (draft.value.model === model) draft.value.model = draft.value.models[0] ?? ''; }
 function addTags() { const next = [...new Set([...draft.value.tags, ...values(tagInput.value)])]; if (next.length > 100 || next.some(tag => tag.length > 256)) { notify('最多 100 个标签，每个不超过 256 个字符', 'error'); return; } draft.value.tags = next; tagInput.value = ''; }
-watch(() => [draft.value.endpoint, draft.value.protocol, draft.value.connection, draft.value.relayUrl, draft.value.slug, draft.value.secrets, ...credentialDrafts.value.map(key => key.secret)], () => { sequence++; discoveryController?.abort(); discovering.value = false; discovered.value = null; discoveryError.value = ''; selectedModels.value = []; });
+watch(() => [draft.value.endpoint, draft.value.protocol, draft.value.connection, draft.value.relayUrl, draft.value.slug, draft.value.secrets, ...credentialDrafts.value.map(key => key.secret), ...credentialDeletes.value], () => { sequence++; discoveryController?.abort(); discovering.value = false; discovered.value = null; discoveryError.value = ''; selectedModels.value = []; });
 async function discover() {
   if (busy.value || discovering.value || simulated.value) return;
   try { endpointValid(draft.value.endpoint.trim(), 'Base URL'); if (draft.value.connection === 'relay') endpointValid(draft.value.relayUrl.trim(), '中继地址'); if (draft.value.connection === 'ai-gateway' && !/^[\w-]{1,128}$/.test(draft.value.slug.trim())) throw new Error('请填写有效的自定义服务商 slug'); } catch (error) { editorTab.value = 'connection'; notify(error instanceof Error ? error.message : '请检查连接配置', 'error'); return; }
   const current = ++sequence; discoveryController?.abort(); discoveryController = new AbortController(); discovering.value = true; discoveryError.value = ''; discovered.value = null;
   try {
-    const discoveryKey = credentialDrafts.value.find(key => key.secret.trim() && credentialMeta.value.get(key.id)?.enabled)?.secret.trim() || draft.value.secrets.trim().split(/\r?\n/)[0];
+    const discoveryKey = credentialDrafts.value.find(key => !deletedCredentialIds.value.has(key.id) && key.secret.trim() && credentialMeta.value.get(key.id)?.enabled)?.secret.trim() || draft.value.secrets.trim().split(/\r?\n/)[0];
     const result = await api<{ models: string[]; endpoint: string; truncated?: boolean }>('/api/channels/discover-models', { method: 'POST', signal: discoveryController.signal, body: JSON.stringify({ ...(props.channel ? { channelId: props.channel.id } : {}), endpoint: draft.value.endpoint.trim(), protocol: draft.value.protocol, config: connectionConfig(), ...(discoveryKey ? { apiKey: discoveryKey } : {}) }) });
     if (current !== sequence) return;
     if (!Array.isArray(result.models) || result.models.some(model => typeof model !== 'string')) throw new Error('上游返回了无效的模型列表');
@@ -147,8 +156,8 @@ async function save() {
     try { website = websiteValue(d.website ?? ''); } catch (error) { editorTab.value = 'models'; throw error; }
     const apiKeys = [...new Set(d.secrets.split(/\r?\n/).map(key => key.trim()).filter(Boolean))];
     if (apiKeys.length > 100 || apiKeys.some(key => key.length > 16000)) { editorTab.value = props.channel ? 'keys' : 'connection'; throw new Error('最多 100 个密钥，每个不超过 16,000 个字符'); }
-    let updates: CredentialUpdate[];
-    try { updates = credentialUpdates(credentialDrafts.value, savedCredentials.value); }
+    let changes: ReturnType<typeof credentialChanges>;
+    try { changes = credentialChanges(credentialDrafts.value, savedCredentials.value, credentialDeletes.value); }
     catch (error) { editorTab.value = props.channel ? 'keys' : 'connection'; throw error; }
     let accountCredentials: Record<string, string> | undefined;
     if (d.balance && !simulated.value && d.backend !== 'bbdevlab') {
@@ -172,7 +181,7 @@ async function save() {
       }
     }
     busy.value = true;
-    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: { ...connectionConfig(), ...changedChannelConfig({ cooldown: d.cooldown }, baseline) }, ...(apiKeys.length ? { apiKeys } : {}), ...(updates.length ? { credentialUpdates: updates } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
+    await api(props.channel ? `/api/channels/${encodeURIComponent(props.channel.id)}` : '/api/channels', { method: props.channel ? 'PATCH' : 'POST', body: JSON.stringify({ name: d.name.trim(), provider: d.provider.trim(), endpoint: d.endpoint.trim(), models: [d.model, ...d.models.filter(model => model !== d.model)], model: d.model, tags: d.tags, priority: Number(d.priority), weight: Number(d.weight), displayMultiplier: Number(d.displayMultiplier), website, enabled: d.enabled, config: { ...connectionConfig(), ...changedChannelConfig({ cooldown: d.cooldown }, baseline) }, ...(apiKeys.length ? { apiKeys } : {}), ...(changes.updates.length ? { credentialUpdates: changes.updates } : {}), ...(changes.deletes.length ? { credentialDeletes: changes.deletes } : {}), ...(accountCredentials ? { accountCredentials } : {}) }) });
     d.secrets = ''; credentialDrafts.value.forEach(key => { key.secret = ''; }); accounts.value.newapi.password = ''; accounts.value.newapi.accessToken = ''; accounts.value.sub2api.password = ''; accounts.value.sub2api.cookie = ''; accounts.value.sub2api.accessToken = ''; notify(props.channel ? '渠道已保存' : '渠道已创建', 'success'); emit('saved');
   } catch (error) { notify(error instanceof Error ? error.message : '保存失败', 'error'); }
   finally { busy.value = false; }
@@ -205,11 +214,11 @@ async function save() {
           <v-expansion-panels v-model="connectionPanels" variant="accordion" class="mt-4"><v-expansion-panel value="connection" title="高级连接方式"><v-expansion-panel-text><v-select v-model="draft.connection" :items="[{ title: '直连上游', value: 'direct' }, { title: 'HTTPS API 中继', value: 'relay' }, { title: 'Cloudflare AI Gateway', value: 'ai-gateway' }]" :disabled="simulated" label="连接方式" /><v-text-field v-if="draft.connection === 'relay'" v-model="draft.relayUrl" label="中继 Base URL *" class="mt-4" /><v-text-field v-if="draft.connection === 'ai-gateway'" v-model="draft.slug" label="自定义服务商 slug *" class="mt-4" hint="Account ID、Gateway ID 与网关令牌在全局设置中配置。" persistent-hint /></v-expansion-panel-text></v-expansion-panel></v-expansion-panels>
         </section>
         <section v-if="channel" v-show="editorTab === 'keys'">
-          <div class="editor-section-heading credential-heading"><div><h3>API Key 池</h3><p>搜索、筛选并编辑密钥，修改随渠道一起保存。</p></div><v-btn size="small" color="primary" variant="tonal" prepend-icon="mdi-plus" @click="addKeysOpen = !addKeysOpen">批量添加</v-btn></div>
+          <div class="editor-section-heading credential-heading"><div><h3>API Key 池</h3><p>编辑或删除密钥，点击「保存更改」后生效；保存前可撤销删除。</p></div><v-btn size="small" color="primary" variant="tonal" prepend-icon="mdi-plus" @click="addKeysOpen = !addKeysOpen">批量添加</v-btn></div>
           <v-expand-transition><div v-show="addKeysOpen || !!draft.secrets" class="credential-add-panel"><v-textarea v-model="draft.secrets" label="批量新增 API Key（可选）" rows="3" autocomplete="off" :class="{ 'secret-masked': !revealSecret }" hint="每行一个，仅用于新增密钥；已有密钥请点击列表中的编辑按钮。" persistent-hint :append-inner-icon="revealSecret ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="revealSecret = !revealSecret" /></div></v-expand-transition>
           <v-progress-linear v-if="credentialsLoading" indeterminate class="mb-4" aria-label="加载已有密钥" />
           <v-alert v-if="credentialsError" type="error" variant="tonal" density="compact" class="mb-4">{{ credentialsError }}<v-btn variant="text" size="small" :disabled="credentialsLoading" @click="loadCredentials">重新加载</v-btn></v-alert>
-          <ChannelCredentialList v-if="!credentialsLoading && !credentialsError" :credentials="savedCredentials" :drafts="credentialDrafts" :monitoring="draft.balance && draft.backend === 'bbdevlab'" :busy="busy" @edit="editCredential" />
+          <ChannelCredentialList v-if="!credentialsLoading && !credentialsError" :credentials="savedCredentials" :drafts="credentialDrafts" :deleted-ids="credentialDeletes" :monitoring="draft.balance && draft.backend === 'bbdevlab'" :busy="busy" deletable @edit="editCredential" @delete="deleteCredential" @restore="restoreCredential" />
         </section>
         <section v-show="editorTab === 'models'">
           <div class="editor-section-heading d-flex align-center"><div><h3>支持的模型</h3><p>添加上游实际支持的模型，选择默认探测模型。</p></div><v-spacer /><v-btn variant="tonal" color="primary" :loading="discovering" :disabled="busy || simulated" prepend-icon="mdi-cloud-download-outline" @click="discover">获取模型</v-btn><v-btn v-if="discovering" variant="text" @click="sequence++; discoveryController?.abort(); discovering = false">取消</v-btn></div>
@@ -250,7 +259,7 @@ async function save() {
         </section>
       </div>
     </v-form>
-    <template #actions><span class="text-caption text-medium-emphasis">{{ dirty ? '有未保存的更改' : '密钥加密保存' }}</span><v-spacer /><v-btn :disabled="busy" @click="close()">取消</v-btn><v-btn color="primary" :loading="busy" :disabled="credentialsLoading" @click="save">{{ channel ? '保存更改' : '创建渠道' }}</v-btn></template>
+    <template #actions><span class="text-caption" :class="credentialDeletes.length ? 'text-error' : 'text-medium-emphasis'">{{ credentialDeletes.length ? `${credentialDeletes.length} 个 Key 保存后永久删除` : dirty ? '有未保存的更改' : '密钥加密保存' }}</span><v-spacer /><v-btn :disabled="busy" @click="close()">取消</v-btn><v-btn color="primary" :loading="busy" :disabled="credentialsLoading" @click="save">{{ channel ? '保存更改' : '创建渠道' }}</v-btn></template>
   </AppDialog>
   <AppDialog :model-value="!!editingCredential" title="编辑 API Key" :max-width="560" :busy="busy" @update:model-value="finishCredentialEdit"><template v-if="editingCredential"><div class="d-flex align-center ga-2 mb-4"><code>{{ editingCredentialMeta?.preview }}</code><v-chip size="x-small" variant="tonal">{{ credentialStatus(editingCredentialMeta) }}</v-chip></div><p class="text-caption text-medium-emphasis mb-4">修改会随渠道一起保存，API Key 留空则保留原值。</p><v-text-field v-model="editingCredential.label" label="密钥名称" maxlength="128" class="mb-4" /><v-text-field v-model="editingCredential.secret" label="替换 API Key（留空保留）" :type="revealExisting ? 'text' : 'password'" :append-inner-icon="revealExisting ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="new-password" maxlength="16000" @click:append-inner="revealExisting = !revealExisting" /><p v-if="editingCredential.secret.trim()" class="text-caption text-medium-emphasis mt-4">保存后将清除旧余额与到期时间，使用新 Key 重新查询。</p><CredentialBalance v-else-if="draft.balance && draft.backend === 'bbdevlab'" :balance="editingCredentialMeta?.balance" class="mt-4" /></template><template #actions><v-btn variant="text" @click="resetCredentialEdit">还原此项</v-btn><v-spacer /><v-btn color="primary" @click="finishCredentialEdit">完成编辑</v-btn></template></AppDialog>
   <AppDialog v-model="discard" title="放弃渠道更改？" :max-width="440"><p>尚未保存的设置和密钥将丢失。</p><template #actions><v-btn @click="discard = false">继续编辑</v-btn><v-btn color="error" @click="close(true)">放弃并关闭</v-btn></template></AppDialog>

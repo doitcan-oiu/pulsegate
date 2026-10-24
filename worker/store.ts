@@ -59,15 +59,23 @@ export class Store implements GatewayStore {
     channel.accountBalance = channel.config.integration === 'bbdevlab' ? await channelCredentialBalance(this.env,id) : account?.balance ? JSON.parse(account.balance) : account ? { status:'pending',amount:null,unit:'',updatedAt:null,checkedAt:null } : undefined;
     return channel;
   }
-  async saveChannel(channel: GatewayChannel, fixture = false, credentials: CredentialInput[] = [], account?: AccountCredentials, credentialUpdates: CredentialUpdate[] = []): Promise<void> {
+  async saveChannel(channel: GatewayChannel, fixture = false, credentials: CredentialInput[] = [], account?: AccountCredentials, credentialUpdates: CredentialUpdate[] = [], credentialDeletes: string[] = []): Promise<void> {
     if (credentials.length > 100) throw new HttpError(400, 'Upstream API keys must be a bounded array');
     credentials.forEach(validateCredential);
     if (!Array.isArray(credentialUpdates) || credentialUpdates.length > 100) throw new HttpError(400, 'Credential updates must be a bounded array');
     const updates = credentialUpdates.map(normalizeCredentialUpdate);
     if (new Set(updates.map(update => update.id)).size !== updates.length) throw new HttpError(400, 'Credential IDs must be unique');
-    if (updates.length) {
+    if (!Array.isArray(credentialDeletes) || credentialDeletes.length > 100) throw new HttpError(400, 'Credential deletes must be a bounded array');
+    const deletes = Array.from(credentialDeletes,id => {
+      if (typeof id !== 'string' || !id.trim() || id.length > 128) throw new HttpError(400, 'Invalid credential ID');
+      return id.trim();
+    });
+    if (new Set(deletes).size !== deletes.length) throw new HttpError(400, 'Credential IDs must be unique');
+    const deletedIds = new Set(deletes);
+    if (updates.some(update => deletedIds.has(update.id))) throw new HttpError(400, 'A credential cannot be updated and deleted together');
+    if (updates.length || deletes.length) {
       const existing = new Set((await this.listCredentialMeta(channel.id)).map(credential => credential.id));
-      if (updates.some(update => !existing.has(update.id))) throw new HttpError(404, 'Credential not found');
+      if (updates.some(update => !existing.has(update.id)) || deletes.some(id => !existing.has(id))) throw new HttpError(404, 'Credential not found');
     }
     const stored = await this.env.DB.prepare('SELECT data,EXISTS(SELECT 1 FROM channel_accounts a WHERE a.channel_id=channels.id) AS has_account,(SELECT version FROM channel_accounts a WHERE a.channel_id=channels.id) AS account_version FROM channels WHERE id=?').bind(channel.id).first<{ data: string; has_account: number; account_version: number | null }>();
     const previous = stored ? { ...decode<GatewayChannel>(stored), hasAccountCredentials: !!stored.has_account } : null;
@@ -94,6 +102,7 @@ export class Store implements GatewayStore {
     statements.push(...prepared.map(entry => entry.statement));
     statements.push(...preparedUpdates.filter((statement): statement is D1PreparedStatement => statement !== null));
     statements.push(...updates.filter(update => update.secret !== undefined).map(update => this.invalidateCredentialBalance(update.id)));
+    if (deletes.length) statements.push(this.env.DB.prepare('DELETE FROM credentials WHERE channel_id=? AND id IN (SELECT value FROM json_each(?))').bind(channel.id,JSON.stringify(deletes)));
     if (previous && (previous.endpoint !== channel.endpoint || previous.config.integration !== channel.config.integration)) {
       statements.push(this.env.DB.prepare("UPDATE credential_balances SET balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE credential_id IN (SELECT id FROM credentials WHERE channel_id=?) AND EXISTS (SELECT 1 FROM channels WHERE id=? AND json_extract(data,'$.endpoint')=? AND COALESCE(json_extract(data,'$.config.integration'),'native')=?)").bind(channel.id,channel.id,channel.endpoint,channel.config.integration ?? 'native'));
       statements.push(this.env.DB.prepare("UPDATE credentials SET enabled=1,reason=NULL,disabled_at=NULL,failure_count=0,recovery_count=0 WHERE channel_id=? AND enabled=0 AND reason IN (?,?) AND EXISTS (SELECT 1 FROM channels WHERE id=? AND json_extract(data,'$.endpoint')=? AND COALESCE(json_extract(data,'$.config.integration'),'native')=?)").bind(channel.id,BBDEVLAB_EXHAUSTED_REASON,BBDEVLAB_EXPIRED_REASON,channel.id,channel.endpoint,channel.config.integration ?? 'native'));

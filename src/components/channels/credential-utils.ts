@@ -40,3 +40,12 @@ export function credentialUpdates(drafts: CredentialDraft[], baseline: Credentia
   if (updates.length > 100) throw new Error('每次最多修改 100 个密钥');
   return updates;
 }
+
+/** Deletions supersede edits, while keeping drafts intact for an undo. */
+export function credentialChanges(drafts: CredentialDraft[], baseline: CredentialMeta[], deletedIds: string[] = []): { updates: CredentialUpdate[]; deletes: string[] } {
+  if (deletedIds.length > 100) throw new Error('每次最多删除 100 个密钥');
+  const saved = new Set(baseline.map(key => key.id));
+  const deleted = new Set(deletedIds);
+  if (deleted.size !== deletedIds.length || deletedIds.some(id => !saved.has(id))) throw new Error('密钥列表已变化，请重新打开渠道编辑器');
+  return { updates: credentialUpdates(drafts.filter(draft => !deleted.has(draft.id)), baseline), deletes: [...deletedIds] };
+}

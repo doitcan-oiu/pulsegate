@@ -31,6 +31,7 @@ async function snapshot() {
   return Promise.all([
     testEnv.DB.prepare('SELECT * FROM channels ORDER BY id').all(),
     testEnv.DB.prepare('SELECT * FROM credentials ORDER BY id').all(),
+    testEnv.DB.prepare('SELECT * FROM credential_balances ORDER BY credential_id').all(),
     testEnv.DB.prepare('SELECT * FROM channel_accounts ORDER BY channel_id').all(),
     testEnv.DB.prepare('SELECT * FROM tags ORDER BY name').all(),
     testEnv.DB.prepare('SELECT * FROM gateway_state ORDER BY id').all(),
@@ -43,7 +44,7 @@ async function markUnhealthy(id: string, enabled = 1) {
 
 beforeAll(async () => { await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS); });
 beforeEach(async () => {
-  await testEnv.DB.batch(['channel_accounts', 'credentials', 'channels', 'profile_usage', 'api_keys', 'attempts', 'request_logs', 'events', 'tags', 'settings', 'gateway_state'].map(table => testEnv.DB.prepare('DELETE FROM ' + table)));
+  await testEnv.DB.batch(['credential_balances', 'channel_accounts', 'credentials', 'channels', 'profile_usage', 'api_keys', 'attempts', 'request_logs', 'events', 'tags', 'settings', 'gateway_state'].map(table => testEnv.DB.prepare('DELETE FROM ' + table)));
 });
 
 describe('editing saved channel credentials', () => {
@@ -177,5 +178,127 @@ describe('editing saved channel credentials', () => {
     expect(response.status).toBe(200); expect(content).toContain('runtime JSON reply'); expect(response.headers.get('x-pulsegate-channel-id')).toBe(channel.id);
     expect(await rows(channel.id)).toHaveLength(1); expect((await rows(channel.id))[0].id).toBe(credential.id);
     expect(content).not.toContain('runtime-upstream-secret');
+  });
+});
+
+describe('deleting keys from the channel editor', () => {
+  it('atomically saves channel settings, added keys, edited keys and deletions, including balance cleanup', async () => {
+    const created = await call('/api/channels', 'POST', {
+      name: 'Editable BBDevLab pool', endpoint: 'https://keys.example/v1', models: ['test'], config: { integration: 'bbdevlab' },
+      apiKeys: [{ label: 'Remove', secret: 'removed-private-key' }, { label: 'Edit', secret: 'edited-private-key' }, { label: 'Keep', secret: 'kept-private-key' }],
+    });
+    expect(created.status).toBe(201);
+    const channel = created.json.channel as GatewayChannel, initial = await rows(channel.id);
+    const removed = initial.find(key => key.label === 'Remove')!, edited = initial.find(key => key.label === 'Edit')!, kept = initial.find(key => key.label === 'Keep')!;
+    const updatedAt = new Date().toISOString();
+    await testEnv.DB.batch(initial.map(key => testEnv.DB.prepare('INSERT INTO credential_balances(credential_id,balance,next_refresh_at) VALUES(?,?,?)')
+      .bind(key.id, JSON.stringify({ status: 'ok', amount: key.id === kept.id ? 3.25 : 8, unit: '余额', updatedAt, checkedAt: updatedAt }), Date.now() + 60000)));
+    const result = await call(`/api/channels/${channel.id}`, 'PATCH', {
+      name: 'Saved pool', tags: ['pool-edit'], weight: 4,
+      apiKeys: [{ label: 'Added', secret: 'added-private-key' }],
+      credentialUpdates: [{ id: edited.id, label: 'Edited', secret: 'replacement-private-key' }],
+      credentialDeletes: [`  ${removed.id}  `],
+    });
+    expect(result.status).toBe(200);
+    expect(result.json.channel).toMatchObject({ name: 'Saved pool', tags: ['pool-edit'], weight: 4, credentialCount: 3, accountBalance: { amount: 3.25, keyCount: 3, availableKeys: 3 } });
+    const saved = await rows(channel.id);
+    expect(saved).toHaveLength(3); expect(saved.find(key => key.id === removed.id)).toBeUndefined();
+    expect(saved.find(key => key.id === kept.id)).toEqual(kept);
+    const replacement = saved.find(key => key.id === edited.id)!;
+    expect(replacement).toMatchObject({ label: 'Edited', created_at: edited.created_at });
+    expect(await decryptSecret(replacement.secret, testEnv)).toBe('replacement-private-key');
+    expect(await decryptSecret(saved.find(key => key.label === 'Added')!.secret, testEnv)).toBe('added-private-key');
+    const store = new Store(testEnv), listed = await call(`/api/channels/${channel.id}/credentials`);
+    expect(listed.json.credentials.map((key: { id: string }) => key.id)).not.toContain(removed.id);
+    expect((await store.getCredentials(channel.id)).map(key => key.id)).not.toContain(removed.id);
+    expect((await store.listCredentialMeta(channel.id)).map(key => key.id)).not.toContain(removed.id);
+    expect((await store.listChannels()).find(value => value.id === channel.id)?.credentialCount).toBe(3);
+    expect(await testEnv.DB.prepare('SELECT * FROM credential_balances WHERE credential_id=?').bind(removed.id).first()).toBeNull();
+    expect(await testEnv.DB.prepare('SELECT balance FROM credential_balances WHERE credential_id=?').bind(edited.id).first()).toEqual({ balance: null });
+    for (const privateValue of ['removed-private-key', 'edited-private-key', 'replacement-private-key', 'added-private-key']) expect(result.content + listed.content).not.toContain(privateValue);
+  });
+
+  it('allows deleting all 100 keys in one bounded edit while retaining the channel and request history', async () => {
+    const channel = await createChannel(), store = new Store(testEnv);
+    await store.saveChannel(channel, false, Array.from({ length: 99 }, (_, index) => ({ label: `Pool ${index}`, secret: `pool-private-key-${index}` })));
+    const keys = await rows(channel.id), startedAt = new Date().toISOString();
+    await testEnv.DB.prepare('INSERT INTO attempts(id,request_id,channel_id,stream,started_at,data) VALUES(?,?,?,?,?,?)')
+      .bind('retained-attempt', 'retained-request', channel.id, 0, startedAt, JSON.stringify({ credentialId: keys[0].id })).run();
+    await testEnv.DB.prepare('INSERT INTO request_logs(id,created_at,channel_id,result,source,model,data) VALUES(?,?,?,?,?,?,?)')
+      .bind('retained-log', startedAt, channel.id, 'success', 'api', 'test', JSON.stringify({ attempts: 1 })).run();
+    const history = () => Promise.all([testEnv.DB.prepare('SELECT * FROM attempts').all(), testEnv.DB.prepare('SELECT * FROM request_logs').all()]).then(results => results.map(result => result.results));
+    const historyBefore = await history();
+    const result = await call(`/api/channels/${channel.id}`, 'PATCH', { credentialDeletes: keys.map(key => key.id) });
+    expect(result.status).toBe(200); expect(result.json.channel.credentialCount).toBe(0);
+    expect(await rows(channel.id)).toEqual([]); expect(await store.listCredentialMeta(channel.id)).toEqual([]);
+    expect(await store.getCredentials(channel.id, true)).toEqual([]); expect(await store.getChannel(channel.id)).not.toBeNull();
+    expect(await history()).toEqual(historyBefore);
+  });
+
+  it('rejects malformed, duplicate, oversized and conflicting delete lists before saving any changes', async () => {
+    const channel = await createChannel(), [key] = await rows(channel.id), before = await snapshot();
+    const invalidDeletes: unknown[] = [null, {}, 'invalid', 1, [null], [1], [{}], [''], ['   '], ['x'.repeat(129)], [key.id, key.id], [key.id, ` ${key.id} `], Array.from({ length: 101 }, (_, index) => `key-${index}`)];
+    for (const credentialDeletes of invalidDeletes) {
+      const result = await call(`/api/channels/${channel.id}`, 'PATCH', { name: 'Must not save', tags: ['must-not-save'], apiKeys: ['must-not-insert-private-key'], credentialDeletes });
+      expect(result.status).toBe(400); expect(await snapshot()).toEqual(before);
+    }
+    for (const update of [{ id: key.id, label: 'Must not rename' }, { id: ` ${key.id} `, secret: 'must-not-replace-private-key' }]) {
+      const result = await call(`/api/channels/${channel.id}`, 'PATCH', { name: 'Must not save', credentialUpdates: [update], credentialDeletes: [key.id] });
+      expect(result.status).toBe(400); expect(await snapshot()).toEqual(before);
+    }
+  });
+
+  it('rejects missing or foreign deletions without applying valid edits, additions or earlier deletions', async () => {
+    const channel = await createChannel(), [key] = await rows(channel.id), store = new Store(testEnv);
+    const second = await store.addCredential(channel.id, 'Second', 'second-private-key'), foreignChannel = await createChannel('Foreign pool'), [foreign] = await rows(foreignChannel.id), before = await snapshot();
+    for (const id of ['missing-key', foreign.id]) {
+      const result = await call(`/api/channels/${channel.id}`, 'PATCH', { name: 'Must not save', tags: ['must-not-save'], apiKeys: ['must-not-insert-private-key'], credentialUpdates: [{ id: key.id, secret: 'must-not-replace-private-key' }], credentialDeletes: [second.id, id] });
+      expect(result.status).toBe(404); expect(await snapshot()).toEqual(before);
+    }
+  });
+
+  it('retains pending deletions when any update is invalid or its replacement cannot be encrypted', async () => {
+    const channel = await createChannel(), [removed] = await rows(channel.id), edited = await new Store(testEnv).addCredential(channel.id, 'Keep unchanged', 'keep-private-key'), before = await snapshot();
+    for (const credentialUpdates of [[{ id: edited.id, secret: '' }], [{ id: 'missing-key', secret: 'must-not-save-private-key' }]]) {
+      const result = await call(`/api/channels/${channel.id}`, 'PATCH', { name: 'Must not save', credentialUpdates, credentialDeletes: [removed.id] });
+      expect([400, 404]).toContain(result.status); expect(await snapshot()).toEqual(before);
+    }
+    const encryptionFailure = await call(`/api/channels/${channel.id}`, 'PATCH', { name: 'Must not save', credentialUpdates: [{ id: edited.id, secret: 'must-not-save-private-key' }], credentialDeletes: [removed.id] }, { ...testEnv, ENCRYPTION_KEY: 'invalid-encryption-key' });
+    expect(encryptionFailure.status).toBe(500); expect(await snapshot()).toEqual(before);
+  });
+
+  it('rolls back channel settings, additions, edits and cascading balance deletes when a database deletion fails', async () => {
+    const channel = await createChannel(), [removed] = await rows(channel.id), store = new Store(testEnv);
+    const edited = await store.addCredential(channel.id, 'Unchanged', 'unchanged-private-key');
+    await testEnv.DB.prepare('INSERT INTO credential_balances(credential_id,balance) VALUES(?,?)').bind(removed.id, JSON.stringify({ status: 'ok', amount: 7 })).run();
+    const before = await snapshot();
+    await testEnv.DB.exec("CREATE TRIGGER reject_pool_credential_delete BEFORE DELETE ON credentials WHEN OLD.label='Original label' BEGIN SELECT RAISE(ABORT,'synthetic key delete failure'); END");
+    try {
+      const result = await call(`/api/channels/${channel.id}`, 'PATCH', { name: 'Must roll back', tags: ['must-roll-back'], weight: 8, apiKeys: ['must-not-insert-private-key'], credentialUpdates: [{ id: edited.id, label: 'Must roll back', secret: 'must-not-replace-private-key' }], credentialDeletes: [removed.id] });
+      expect(result.status).toBe(500); expect(await snapshot()).toEqual(before);
+    } finally { await testEnv.DB.exec('DROP TRIGGER reject_pool_credential_delete'); }
+  });
+
+  it('does not accept deletions while creating a new channel and accepts an empty delete list', async () => {
+    const channel = await createChannel(), [key] = await rows(channel.id), before = await snapshot();
+    const failed = await call('/api/channels', 'POST', { name: 'Must not create', endpoint: 'https://keys.example/v1', models: ['test'], apiKeys: ['must-not-insert-private-key'], credentialDeletes: [key.id] });
+    expect(failed.status).toBe(400); expect(await snapshot()).toEqual(before);
+    expect((await call(`/api/channels/${channel.id}`, 'PATCH', { credentialDeletes: [] })).status).toBe(200);
+    expect((await call('/api/channels', 'POST', { name: 'Empty delete list', endpoint: 'https://keys.example/v1', models: ['test'], credentialDeletes: [] })).status).toBe(201);
+  });
+
+  it('guards direct Store saves against malformed, duplicate, conflicting and unowned delete ids', async () => {
+    const channel = await createChannel(), [key] = await rows(channel.id), foreignChannel = await createChannel('Foreign pool'), [foreign] = await rows(foreignChannel.id), store = new Store(testEnv), before = await snapshot();
+    const invalidLists: unknown[] = [null, {}, 'invalid', [''], [null], [123], ['x'.repeat(129)], [key.id, ` ${key.id} `], Array.from({ length: 101 }, (_, index) => `key-${index}`)];
+    for (const ids of invalidLists) {
+      await expect(store.saveChannel({ ...channel, name: 'Must not save' }, false, [], undefined, [], ids as string[])).rejects.toMatchObject({ status: 400 });
+      expect(await snapshot()).toEqual(before);
+    }
+    for (const id of ['missing-key', foreign.id]) {
+      await expect(store.saveChannel({ ...channel, name: 'Must not save' }, false, [], undefined, [], [id])).rejects.toMatchObject({ status: 404 });
+      expect(await snapshot()).toEqual(before);
+    }
+    await expect(store.saveChannel({ ...channel, name: 'Must not save' }, false, [], undefined, [{ id: key.id, label: 'Must not rename' }], [key.id])).rejects.toMatchObject({ status: 400 });
+    expect(await snapshot()).toEqual(before);
   });
 });

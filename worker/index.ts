@@ -79,7 +79,19 @@ function credentialUpdates(b: Record<string,unknown>): CredentialUpdate[] {
   assert(new Set(updates.map(update => update.id)).size === updates.length,'Credential IDs must be unique');
   return updates;
 }
+function credentialDeletes(b: Record<string,unknown>): string[] {
+  if (b.credentialDeletes === undefined) return [];
+  assert(Array.isArray(b.credentialDeletes) && b.credentialDeletes.length <= 100,'Credential deletes must be a bounded array');
+  const deletes = (b.credentialDeletes as unknown[]).map(value => {
+    const id = text(value,'',128).trim();
+    assert(id,'Credential ID is required');
+    return id;
+  });
+  assert(new Set(deletes).size === deletes.length,'Credential IDs must be unique');
+  return deletes;
+}
 async function createChannel(store: Store,b: Record<string,unknown>,dev: boolean,fixture = false): Promise<GatewayChannel> {
+  assert(!credentialDeletes(b).length,'Cannot delete existing credentials when creating a channel');
   const c = channel(b,dev); const creds = importedCredentials(b);
   const account = parseAccountCredentials(b.accountCredentials);
   assertAccountReuse(c,null,account);
@@ -159,7 +171,7 @@ async function admin(request: Request,env: Env,ctx: ExecutionContext,store: Stor
         const b = await body(request); const changed = channel(b,dev,c);
         const account = parseAccountCredentials(b.accountCredentials);
         assertAccountReuse(changed,c,account);
-        await store.saveChannel(changed,false,importedCredentials(b),account,credentialUpdates(b));
+        await store.saveChannel(changed,false,importedCredentials(b),account,credentialUpdates(b),credentialDeletes(b));
         return response({ channel:await store.getChannel(c.id) });
       }
       if (method === 'DELETE') { await store.deleteChannel(c.id); return noContent(); }

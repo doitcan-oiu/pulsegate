@@ -577,11 +577,17 @@ describe('BBDevLab refresh scheduling and stale responses', () => {
     expect(row.lease_until).toBe(0); expect(row.next_refresh_at).toBeGreaterThanOrEqual(startedAt + 60000);
   });
 
-  it('deletes the balance row with its API key and safely ignores results returned after deletion', async () => {
+  it.each(['single-key delete', 'channel editor save'])('deletes the balance row and ignores late refresh results after a %s', async mode => {
     const { channel, keys } = await seed(), held = holdFetch(), refreshing = refreshCredentialBalance(testEnv, channel, keys[0].id, false, true); await held.started;
-    await store().deleteCredential(channel.id, keys[0].id);
+    if (mode === 'single-key delete') await store().deleteCredential(channel.id, keys[0].id);
+    else {
+      const saved = await call(`/api/channels/${channel.id}`, 'PATCH', { credentialDeletes: [keys[0].id] });
+      expect(saved.status).toBe(200); expect(saved.json.channel.credentialCount).toBe(0);
+    }
     held.finish(usage(0)); await refreshing;
     expect(await keyRow(keys[0].id)).toBeNull(); expect(await balanceRow(keys[0].id)).toBeNull();
+    expect(await store().getCredentials(channel.id, true)).toEqual([]);
+    expect((await store().getChannel(channel.id))?.accountBalance).toMatchObject({ keyCount: 0, availableKeys: 0, exhaustedKeys: 0, expiredKeys: 0 });
   });
 });
 
