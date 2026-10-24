@@ -1,9 +1,19 @@
 import type { CredentialMeta, CredentialUpdate } from '../../../shared/types';
+import { BBDEVLAB_EXHAUSTED_REASON, BBDEVLAB_EXPIRED_REASON, credentialExpired } from '../../../shared/credential-policy';
 
 export type CredentialDraft = { id: string; label: string; secret: string };
 
-export function credentialStatus(key: CredentialMeta | undefined): string {
-  return key?.enabled ? '可用' : key?.reason === 'BBDevLab 额度耗尽' ? '额度耗尽' : '已停用';
+export type CredentialState = 'available' | 'expired' | 'exhausted' | 'disabled';
+
+export function credentialState(key: CredentialMeta | undefined, now = Date.now()): CredentialState {
+  if (!key || (!key.enabled && !key.reason)) return 'disabled';
+  if (key.reason === BBDEVLAB_EXPIRED_REASON || credentialExpired(key.balance, now)) return 'expired';
+  if (key.reason === BBDEVLAB_EXHAUSTED_REASON) return 'exhausted';
+  return key.enabled ? 'available' : 'disabled';
+}
+
+export function credentialStatus(key: CredentialMeta | undefined, now = Date.now()): string {
+  return { available: '可用', expired: '已到期', exhausted: '额度耗尽', disabled: '已停用' }[credentialState(key, now)];
 }
 
 /** Empty replacement fields preserve saved secrets; send only edited fields. */

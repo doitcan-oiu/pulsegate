@@ -8,7 +8,8 @@ export type AccountIntegration = 'newapi' | 'sub2api' | 'bbdevlab';
 export type GatewayBalance = {
   status: 'pending' | 'ok' | 'error'; amount: number | null; unit: string;
   updatedAt: string | null; checkedAt: string | null; error?: string;
-  keyCount?: number; availableKeys?: number; exhaustedKeys?: number;
+  expiresAt?: string | null;
+  keyCount?: number; availableKeys?: number; exhaustedKeys?: number; expiredKeys?: number;
 };
 export type ChannelConfig = {
   integration?: 'native' | AccountIntegration;
@@ -69,7 +70,7 @@ export type GatewaySettings = {
   notifications: boolean; logRetentionDays: number;
 };
 export type AttemptRecord = {
-  /** A verified exhausted pool Key does not indicate a channel health failure. */
+  /** A verified exhausted or expired pool Key does not indicate a channel health failure. */
   healthIgnored?: boolean;
   id: string; requestId: string; channelId: string; channelName: string;
   credentialId: string | null; model: string; stream: boolean; startedAt: string;

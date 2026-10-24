@@ -6,7 +6,8 @@ import { autoDisableDecision, cooldownExemptsHealth, credentialRecoveryAllowed, 
 import { HttpError } from './validation';
 import { accountAuthMode, assertAccountCredentials, assertAccountReuse, prepareAccountSave, type AccountCredentials } from './accounts';
 import { buildAnalytics, completed } from './analytics';
-import { BBDEVLAB_EXHAUSTED_REASON, channelCredentialBalance } from './credential-balances';
+import { channelCredentialBalance } from './credential-balances';
+import { BBDEVLAB_EXHAUSTED_REASON, BBDEVLAB_EXPIRED_REASON, credentialExpired, isBbCredentialRestriction } from '../shared/credential-policy';
 
 type DataRow = { id: string; data: string; health_version?: number };
 type CredRow = { id: string; channel_id: string; label: string; preview: string; secret: string; enabled: number; failure_count: number; recovery_count: number; disabled_at: string | null; reason: string | null; created_at: string };
@@ -95,7 +96,7 @@ export class Store implements GatewayStore {
     statements.push(...updates.filter(update => update.secret !== undefined).map(update => this.invalidateCredentialBalance(update.id)));
     if (previous && (previous.endpoint !== channel.endpoint || previous.config.integration !== channel.config.integration)) {
       statements.push(this.env.DB.prepare("UPDATE credential_balances SET balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE credential_id IN (SELECT id FROM credentials WHERE channel_id=?) AND EXISTS (SELECT 1 FROM channels WHERE id=? AND json_extract(data,'$.endpoint')=? AND COALESCE(json_extract(data,'$.config.integration'),'native')=?)").bind(channel.id,channel.id,channel.endpoint,channel.config.integration ?? 'native'));
-      statements.push(this.env.DB.prepare("UPDATE credentials SET enabled=1,reason=NULL,disabled_at=NULL,failure_count=0,recovery_count=0 WHERE channel_id=? AND enabled=0 AND reason=? AND EXISTS (SELECT 1 FROM channels WHERE id=? AND json_extract(data,'$.endpoint')=? AND COALESCE(json_extract(data,'$.config.integration'),'native')=?)").bind(channel.id,BBDEVLAB_EXHAUSTED_REASON,channel.id,channel.endpoint,channel.config.integration ?? 'native'));
+      statements.push(this.env.DB.prepare("UPDATE credentials SET enabled=1,reason=NULL,disabled_at=NULL,failure_count=0,recovery_count=0 WHERE channel_id=? AND enabled=0 AND reason IN (?,?) AND EXISTS (SELECT 1 FROM channels WHERE id=? AND json_extract(data,'$.endpoint')=? AND COALESCE(json_extract(data,'$.config.integration'),'native')=?)").bind(channel.id,BBDEVLAB_EXHAUSTED_REASON,BBDEVLAB_EXPIRED_REASON,channel.id,channel.endpoint,channel.config.integration ?? 'native'));
     }
     if (accountStatement) statements.push(accountStatement);
     else if (previous && previous.endpoint !== channel.endpoint) statements.push(this.env.DB.prepare("UPDATE channel_accounts SET auth_secret=NULL,balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE channel_id=? AND version=? AND EXISTS (SELECT 1 FROM channels c WHERE c.id=? AND json_extract(c.data,'$.endpoint')=? AND (? NOT IN ('newapi','sub2api','bbdevlab') OR COALESCE(json_extract(c.data,'$.accountIntegration'),json_extract(c.data,'$.config.integration'),'native')=?))").bind(channel.id,accountVersion,channel.id,channel.endpoint,channel.config.integration ?? 'native',channel.config.integration ?? 'native'));
@@ -160,7 +161,7 @@ export class Store implements GatewayStore {
     if (update.secret !== undefined) {
       columns.push('secret=?','preview=?');
       values.push(await encryptSecret(update.secret,this.env),`••••${update.secret.slice(-4)}`);
-      if (enabled === undefined) { columns.push('enabled=CASE WHEN reason=? THEN 1 ELSE enabled END'); values.push(BBDEVLAB_EXHAUSTED_REASON); }
+      if (enabled === undefined) { columns.push('enabled=CASE WHEN reason IN (?,?) THEN 1 ELSE enabled END'); values.push(BBDEVLAB_EXHAUSTED_REASON,BBDEVLAB_EXPIRED_REASON); }
     }
     if (enabled !== undefined) { columns.push('enabled=?'); values.push(enabled ? 1 : 0); }
     if (update.secret !== undefined || enabled !== undefined) columns.push('failure_count=0','recovery_count=0','disabled_at=NULL','reason=NULL');
@@ -170,15 +171,19 @@ export class Store implements GatewayStore {
     return this.env.DB.prepare('UPDATE credential_balances SET balance=NULL,next_refresh_at=0,lease_until=0,version=version+1 WHERE credential_id=?').bind(id);
   }
   async deleteCredential(channelId: string, id: string): Promise<void> { await this.env.DB.prepare('DELETE FROM credentials WHERE id=? AND channel_id=?').bind(id,channelId).run(); }
-  async isCredentialExhausted(channelId: string, credentialId: string): Promise<boolean> {
-    return !!await this.env.DB.prepare("SELECT k.id FROM credentials k JOIN channels c ON c.id=k.channel_id WHERE k.id=? AND k.channel_id=? AND k.enabled=0 AND k.reason=? AND json_extract(c.data,'$.config.integration')='bbdevlab'").bind(credentialId,channelId,BBDEVLAB_EXHAUSTED_REASON).first();
+  async isCredentialRestricted(channelId: string, credentialId: string): Promise<boolean> {
+    const row = await this.env.DB.prepare("SELECT k.enabled,k.reason,b.balance FROM credentials k JOIN channels c ON c.id=k.channel_id LEFT JOIN credential_balances b ON b.credential_id=k.id WHERE k.id=? AND k.channel_id=? AND json_extract(c.data,'$.config.integration')='bbdevlab'").bind(credentialId,channelId).first<{ enabled:number; reason:string|null; balance:string|null }>();
+    return !!row && ((!row.enabled && isBbCredentialRestriction(row.reason)) || credentialExpired(row.balance ? JSON.parse(row.balance) : undefined));
   }
   async getCredentials(channelId: string, includeDisabled = false): Promise<Credential[]> {
-    const rows = await this.env.DB.prepare('SELECT * FROM credentials WHERE channel_id=?' + (includeDisabled ? '' : ' AND enabled=1') + ' ORDER BY created_at').bind(channelId).all<CredRow>();
+    const rows = await this.env.DB.prepare("SELECT k.*,b.balance,json_extract(c.data,'$.config.integration') AS integration FROM credentials k JOIN channels c ON c.id=k.channel_id LEFT JOIN credential_balances b ON b.credential_id=k.id WHERE k.channel_id=?" + (includeDisabled ? '' : ' AND k.enabled=1') + ' ORDER BY k.created_at').bind(channelId).all<CredRow & { balance:string|null; integration:string }>();
     const channel = includeDisabled ? await this.getChannel(channelId) : null;
     const settings = includeDisabled ? await this.getSettings() : null;
     const eligible = rows.results.filter(r => r.enabled || (channel && settings && credentialRecoveryAllowed(channel, settings, { enabled: false, reason: r.reason, disabledAt: r.disabled_at })));
-    return Promise.all(eligible.map(async r => ({ id: r.id, label: r.label, secret: await decryptSecret(r.secret,this.env), enabled: !!r.enabled, failureCount: r.failure_count, disabledAt: r.disabled_at })));
+    const credentials = await Promise.all(eligible.map(async r => ({ id: r.id, label: r.label, secret: await decryptSecret(r.secret,this.env), enabled: !!r.enabled, failureCount: r.failure_count, disabledAt: r.disabled_at, ...(r.integration === 'bbdevlab' && r.balance ? { expiresAt:JSON.parse(r.balance).expiresAt as string | null | undefined } : {}) })));
+    // This gate also covers recovery probes and manual re-enabling, even before
+    // the next Cron persists the automatic expiry restriction.
+    return credentials.filter(credential => !credentialExpired(credential));
   }
   async getSettings(): Promise<GatewaySettings> {
     const row = await this.env.DB.prepare('SELECT value FROM settings WHERE id=?').bind('gateway').first<{ value: string }>();
@@ -276,7 +281,7 @@ export class Store implements GatewayStore {
   }
   async recordAttempt(attempt: AttemptRecord): Promise<void> {
     const clean: AttemptRecord = { ...attempt, error: redact(attempt.error) }; if (this.coordinate) { await this.coordinated('attempt',clean); return; }
-    if ((clean.result === 'error' || clean.result === 'empty') && clean.credentialId && await this.isCredentialExhausted(clean.channelId,clean.credentialId)) clean.healthIgnored = true;
+    if ((clean.result === 'error' || clean.result === 'empty') && clean.credentialId && await this.isCredentialRestricted(clean.channelId,clean.credentialId)) clean.healthIgnored = true;
     const inserted = await this.env.DB.prepare('INSERT OR IGNORE INTO attempts(id,request_id,channel_id,stream,started_at,data) VALUES(?,?,?,?,?,?)').bind(clean.id,clean.requestId,clean.channelId,clean.stream ? 1 : 0,clean.startedAt,JSON.stringify(clean)).run();
     if (!inserted.meta.changes) return;
     if (clean.result === 'cancelled') {

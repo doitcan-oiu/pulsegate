@@ -9,6 +9,7 @@ import { useConsole } from '../../composables/useConsole';
 import AppDialog from '../AppDialog.vue';
 import ChannelCooldownSettings from './ChannelCooldownSettings.vue';
 import CredentialBalance from './CredentialBalance.vue';
+import ChannelCredentialList from './ChannelCredentialList.vue';
 import { credentialStatus, credentialUpdates, type CredentialDraft } from './credential-utils';
 const props = defineProps<{ channel?: GatewayChannel; tags: string[]; devMode?: boolean }>();
 const emit = defineEmits<{ close: []; saved: [] }>();
@@ -37,7 +38,21 @@ const initial = snapshot();
 const savedCredentials = ref<CredentialMeta[]>([]);
 const credentialDrafts = ref<CredentialDraft[]>([]);
 const credentialMeta = computed(() => new Map(savedCredentials.value.map(key => [key.id, key])));
-const credentialsLoading = ref(!!props.channel); const credentialsError = ref(''); const revealExisting = ref<string[]>([]);
+const credentialsLoading = ref(!!props.channel); const credentialsError = ref('');
+const editingCredentialId = ref<string | null>(null); const revealExisting = ref(false); const addKeysOpen = ref(!props.channel);
+const editingCredential = computed(() => credentialDrafts.value.find(key => key.id === editingCredentialId.value));
+const editingCredentialMeta = computed(() => credentialMeta.value.get(editingCredentialId.value ?? ''));
+function editCredential(key: CredentialMeta) { editingCredentialId.value = key.id; revealExisting.value = false; }
+function finishCredentialEdit() {
+  if (editingCredential.value && editingCredentialMeta.value) {
+    try { credentialUpdates([editingCredential.value], [editingCredentialMeta.value]); }
+    catch (error) { notify(error instanceof Error ? error.message : '请检查密钥设置', 'error'); return; }
+  }
+  editingCredentialId.value = null; revealExisting.value = false;
+}
+function resetCredentialEdit() {
+  if (editingCredential.value && editingCredentialMeta.value) { editingCredential.value.label = editingCredentialMeta.value.label; editingCredential.value.secret = ''; }
+}
 const dirty = computed(() => snapshot() !== initial || credentialDrafts.value.some(key => !!key.secret || key.label !== credentialMeta.value.get(key.id)?.label));
 const busy = ref(false); const discard = ref(false); const revealSecret = ref(false);
 const discovered = ref<string[] | null>(null); const discoverySearch = ref(''); const selectedModels = ref<string[]>([]); const discovering = ref(false); const discoveryError = ref(''); const discoveryEndpoint = ref(''); const discoveryTruncated = ref(false);
@@ -131,10 +146,10 @@ async function save() {
     let website: string;
     try { website = websiteValue(d.website ?? ''); } catch (error) { editorTab.value = 'models'; throw error; }
     const apiKeys = [...new Set(d.secrets.split(/\r?\n/).map(key => key.trim()).filter(Boolean))];
-    if (apiKeys.length > 100 || apiKeys.some(key => key.length > 16000)) { editorTab.value = 'connection'; throw new Error('最多 100 个密钥，每个不超过 16,000 个字符'); }
+    if (apiKeys.length > 100 || apiKeys.some(key => key.length > 16000)) { editorTab.value = props.channel ? 'keys' : 'connection'; throw new Error('最多 100 个密钥，每个不超过 16,000 个字符'); }
     let updates: CredentialUpdate[];
     try { updates = credentialUpdates(credentialDrafts.value, savedCredentials.value); }
-    catch (error) { editorTab.value = 'connection'; throw error; }
+    catch (error) { editorTab.value = props.channel ? 'keys' : 'connection'; throw error; }
     let accountCredentials: Record<string, string> | undefined;
     if (d.balance && !simulated.value && d.backend !== 'bbdevlab') {
       editorTab.value = 'account';
@@ -170,7 +185,8 @@ async function save() {
       <aside class="editor-navigation">
         <span class="editor-nav-label">渠道配置</span>
         <v-list nav density="compact" bg-color="transparent">
-          <v-list-item tag="button" type="button" role="button" :tabindex="0" title="连接上游" subtitle="地址与密钥" prepend-icon="mdi-connection" :active="editorTab === 'connection'" :aria-pressed="editorTab === 'connection'" color="primary" @click="editorTab = 'connection'" />
+          <v-list-item tag="button" type="button" role="button" :tabindex="0" title="连接上游" subtitle="地址与认证" prepend-icon="mdi-connection" :active="editorTab === 'connection'" :aria-pressed="editorTab === 'connection'" color="primary" @click="editorTab = 'connection'" />
+          <v-list-item v-if="channel" tag="button" type="button" role="button" :tabindex="0" title="API Key 池" :subtitle="`${credentialsLoading ? channel.credentialCount : savedCredentials.length} 个 Key`" prepend-icon="mdi-key-chain-variant" :active="editorTab === 'keys'" :aria-pressed="editorTab === 'keys'" color="primary" @click="editorTab = 'keys'" />
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="模型与路由" :subtitle="`${draft.models.length} 个模型`" prepend-icon="mdi-cube-outline" :active="editorTab === 'models'" :aria-pressed="editorTab === 'models'" color="primary" @click="editorTab = 'models'" />
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="健康与冷却" subtitle="当前渠道独立设置" prepend-icon="mdi-shield-check-outline" :active="editorTab === 'health'" :aria-pressed="editorTab === 'health'" color="primary" @click="editorTab = 'health'" />
           <v-list-item tag="button" type="button" role="button" :tabindex="0" title="余额监控" :subtitle="draft.balance ? '已启用' : '按需配置'" prepend-icon="mdi-wallet-outline" :active="editorTab === 'account'" :aria-pressed="editorTab === 'account'" color="primary" @click="editorTab = 'account'" />
@@ -184,19 +200,16 @@ async function save() {
           <v-btn-toggle :model-value="draft.protocol" color="primary" mandatory divided class="protocol-selector mb-4" :disabled="simulated || busy" @update:model-value="chooseProtocol($event)"><v-btn v-for="service in services" :key="service.value" :value="service.value">{{ service.title }}</v-btn></v-btn-toggle>
           <div class="editor-field-grid editor-field-grid--responsive"><v-text-field v-model="draft.name" label="渠道名称 *" maxlength="128" /><v-text-field v-model="draft.provider" label="服务商名称 *" maxlength="128" /></div>
           <v-text-field v-model="draft.endpoint" label="Base URL *" maxlength="2048" class="mb-4" hint="只填域名时，模型获取与测试自动补充协议路径。" persistent-hint />
-          <template v-if="channel">
-            <div class="editor-section-heading"><h3>已有 API Key</h3><p>可直接修改名称或填写新 Key 替换原记录，Key 留空则保持原值。</p></div>
-            <v-progress-linear v-if="credentialsLoading" indeterminate class="mb-4" aria-label="加载已有密钥" />
-            <v-alert v-if="credentialsError" type="error" variant="tonal" density="compact" class="mb-4">{{ credentialsError }}<v-btn variant="text" size="small" :disabled="credentialsLoading" @click="loadCredentials">重新加载</v-btn></v-alert>
-            <div v-for="key in credentialDrafts" :key="key.id" class="saved-credential mb-4">
-              <div class="d-flex align-center ga-2 mb-3"><code class="text-caption">{{ credentialMeta.get(key.id)?.preview }}</code><v-chip :color="credentialMeta.get(key.id)?.enabled ? 'success' : 'warning'" size="x-small" variant="tonal">{{ credentialStatus(credentialMeta.get(key.id)) }}</v-chip></div>
-              <template v-if="draft.balance && draft.backend === 'bbdevlab'"><p v-if="key.secret.trim()" class="text-caption text-medium-emphasis mb-3">保存后将使用新 Key 重新查询余额。</p><CredentialBalance v-else :balance="credentialMeta.get(key.id)?.balance" class="mb-3" /></template>
-              <div class="editor-field-grid editor-field-grid--responsive mb-0"><v-text-field v-model="key.label" label="密钥名称" maxlength="128" /><v-text-field v-model="key.secret" label="替换 API Key（留空保留）" :type="revealExisting.includes(key.id) ? 'text' : 'password'" :append-inner-icon="revealExisting.includes(key.id) ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="new-password" maxlength="16000" @click:append-inner="revealExisting = revealExisting.includes(key.id) ? revealExisting.filter(id => id !== key.id) : [...revealExisting, key.id]" /></div>
-            </div>
-            <p v-if="!credentialsLoading && !credentialsError && !credentialDrafts.length" class="text-caption text-medium-emphasis mb-4">尚未配置上游密钥，可在下方添加。</p>
-          </template>
-          <v-textarea v-model="draft.secrets" :label="channel ? '新增 API Key（可选）' : '上游 API Key'" rows="3" autocomplete="off" :class="{ 'secret-masked': !revealSecret }" hint="每行一个，仅用于新增密钥。" persistent-hint :append-inner-icon="revealSecret ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="revealSecret = !revealSecret" />
+          <div v-if="channel" class="connection-keys-summary"><v-icon size="20" color="primary">mdi-key-chain-variant</v-icon><div><strong>{{ credentialsLoading ? channel.credentialCount : savedCredentials.length }} 个上游 API Key</strong><p>在密钥池中批量添加、查询和编辑。</p></div><v-spacer /><v-btn size="small" color="primary" variant="tonal" @click="editorTab = 'keys'">管理 API Key</v-btn></div>
+          <v-textarea v-else v-model="draft.secrets" label="上游 API Key" rows="3" autocomplete="off" :class="{ 'secret-masked': !revealSecret }" hint="每行一个，可批量添加。" persistent-hint :append-inner-icon="revealSecret ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="revealSecret = !revealSecret" />
           <v-expansion-panels v-model="connectionPanels" variant="accordion" class="mt-4"><v-expansion-panel value="connection" title="高级连接方式"><v-expansion-panel-text><v-select v-model="draft.connection" :items="[{ title: '直连上游', value: 'direct' }, { title: 'HTTPS API 中继', value: 'relay' }, { title: 'Cloudflare AI Gateway', value: 'ai-gateway' }]" :disabled="simulated" label="连接方式" /><v-text-field v-if="draft.connection === 'relay'" v-model="draft.relayUrl" label="中继 Base URL *" class="mt-4" /><v-text-field v-if="draft.connection === 'ai-gateway'" v-model="draft.slug" label="自定义服务商 slug *" class="mt-4" hint="Account ID、Gateway ID 与网关令牌在全局设置中配置。" persistent-hint /></v-expansion-panel-text></v-expansion-panel></v-expansion-panels>
+        </section>
+        <section v-if="channel" v-show="editorTab === 'keys'">
+          <div class="editor-section-heading credential-heading"><div><h3>API Key 池</h3><p>搜索、筛选并编辑密钥，修改随渠道一起保存。</p></div><v-btn size="small" color="primary" variant="tonal" prepend-icon="mdi-plus" @click="addKeysOpen = !addKeysOpen">批量添加</v-btn></div>
+          <v-expand-transition><div v-show="addKeysOpen || !!draft.secrets" class="credential-add-panel"><v-textarea v-model="draft.secrets" label="批量新增 API Key（可选）" rows="3" autocomplete="off" :class="{ 'secret-masked': !revealSecret }" hint="每行一个，仅用于新增密钥；已有密钥请点击列表中的编辑按钮。" persistent-hint :append-inner-icon="revealSecret ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="revealSecret = !revealSecret" /></div></v-expand-transition>
+          <v-progress-linear v-if="credentialsLoading" indeterminate class="mb-4" aria-label="加载已有密钥" />
+          <v-alert v-if="credentialsError" type="error" variant="tonal" density="compact" class="mb-4">{{ credentialsError }}<v-btn variant="text" size="small" :disabled="credentialsLoading" @click="loadCredentials">重新加载</v-btn></v-alert>
+          <ChannelCredentialList v-if="!credentialsLoading && !credentialsError" :credentials="savedCredentials" :drafts="credentialDrafts" :monitoring="draft.balance && draft.backend === 'bbdevlab'" :busy="busy" @edit="editCredential" />
         </section>
         <section v-show="editorTab === 'models'">
           <div class="editor-section-heading d-flex align-center"><div><h3>支持的模型</h3><p>添加上游实际支持的模型，选择默认探测模型。</p></div><v-spacer /><v-btn variant="tonal" color="primary" :loading="discovering" :disabled="busy || simulated" prepend-icon="mdi-cloud-download-outline" @click="discover">获取模型</v-btn><v-btn v-if="discovering" variant="text" @click="sequence++; discoveryController?.abort(); discovering = false">取消</v-btn></div>
@@ -226,10 +239,10 @@ async function save() {
         </section>
         <section v-show="editorTab === 'account'">
           <div class="editor-section-heading"><h3>上游余额监控</h3><p>支持 NewAPI、Sub2API 和 BBDevLab，由 Worker 定时刷新。</p></div>
-          <div class="account-toggle"><div><strong class="text-body-2">自动读取上游余额</strong><p class="text-caption text-medium-emphasis mt-1">{{ draft.backend === 'bbdevlab' ? '逐个监控渠道 API Key，额度耗尽时仅停用对应 Key。' : '关闭监控后，已保存的凭据仍然保留。' }}</p></div><v-switch v-model="draft.balance" :disabled="simulated" color="primary" hide-details aria-label="自动刷新上游余额" /></div>
+          <div class="account-toggle"><div><strong class="text-body-2">自动读取上游余额</strong><p class="text-caption text-medium-emphasis mt-1">{{ draft.backend === 'bbdevlab' ? '逐个监控渠道 API Key，额度耗尽或到期时仅停用对应 Key。' : '关闭监控后，已保存的凭据仍然保留。' }}</p></div><v-switch v-model="draft.balance" :disabled="simulated" color="primary" hide-details aria-label="自动刷新上游余额" /></div>
           <template v-if="draft.balance && !simulated">
             <div class="editor-field-grid editor-field-grid--responsive mt-4" :class="{ 'editor-field-grid--single': draft.backend === 'bbdevlab' }"><v-select v-model="draft.backend" :items="balanceBackends" label="余额后台类型" /><v-select v-if="draft.backend !== 'bbdevlab'" v-model="account.mode" :items="[{ title: '账号密码', value: 'password' }, ...(draft.backend === 'newapi' ? [{ title: '后台访问令牌', value: 'token' }] : [{ title: 'Cookie / 登录 Token', value: 'cookie' }])]" label="认证方式" /></div>
-            <v-alert v-if="draft.backend === 'bbdevlab'" type="info" variant="tonal" density="compact">直接使用「连接上游」中的 API Key 逐个查询，无需单独填写后台令牌。余额耗尽只停用对应 Key，其余 Key 继续轮换；查询失败不会停用 Key。充值后确认余额大于 0，会自动恢复因额度耗尽停用的 Key，手动停用的 Key 保持停用。<p class="mt-2">可在「连接上游」每行添加一个 Key，保存后由 Worker 分批刷新，也可在渠道列表或密钥管理中手动刷新。</p></v-alert>
+            <v-alert v-if="draft.backend === 'bbdevlab'" type="info" variant="tonal" density="compact">直接使用渠道已保存的 API Key 逐个查询，无需填写后台令牌。额度耗尽或到期后，对应 Key 退出调度，其余 Key 继续轮换。余额查询失败仍沿用已知到期时间。充值或延期后，确认 Key 未到期且余额大于 0，会自动恢复因此停用的 Key；手动停用保持停用。<p class="mt-2">可在「{{ channel ? 'API Key 池' : '连接上游' }}」批量添加 Key，保存后自动分批刷新，也可在渠道列表或密钥管理中手动刷新。</p></v-alert>
             <v-alert v-if="savedAccount" type="info" variant="tonal" density="compact" class="mb-4">已有加密保存的账户凭据，全部留空即可沿用。</v-alert>
             <div v-if="draft.backend !== 'bbdevlab'" class="account-fields"><template v-if="account.mode === 'password'"><v-text-field v-model="account.username" label="后台账号" autocomplete="off" /><v-text-field v-model="account.password" label="后台密码" type="password" autocomplete="new-password" /></template><template v-else><v-text-field v-if="account.mode === 'cookie'" v-model="account.cookie" label="Cookie" type="password" maxlength="16000" autocomplete="off" /><v-text-field v-model="account.accessToken" label="后台访问 Token" type="password" autocomplete="off" /><v-text-field v-if="account.mode === 'token'" v-model="account.userId" label="用户 ID（可选）" /></template></div>
           </template>
@@ -239,6 +252,7 @@ async function save() {
     </v-form>
     <template #actions><span class="text-caption text-medium-emphasis">{{ dirty ? '有未保存的更改' : '密钥加密保存' }}</span><v-spacer /><v-btn :disabled="busy" @click="close()">取消</v-btn><v-btn color="primary" :loading="busy" :disabled="credentialsLoading" @click="save">{{ channel ? '保存更改' : '创建渠道' }}</v-btn></template>
   </AppDialog>
+  <AppDialog :model-value="!!editingCredential" title="编辑 API Key" :max-width="560" :busy="busy" @update:model-value="finishCredentialEdit"><template v-if="editingCredential"><div class="d-flex align-center ga-2 mb-4"><code>{{ editingCredentialMeta?.preview }}</code><v-chip size="x-small" variant="tonal">{{ credentialStatus(editingCredentialMeta) }}</v-chip></div><p class="text-caption text-medium-emphasis mb-4">修改会随渠道一起保存，API Key 留空则保留原值。</p><v-text-field v-model="editingCredential.label" label="密钥名称" maxlength="128" class="mb-4" /><v-text-field v-model="editingCredential.secret" label="替换 API Key（留空保留）" :type="revealExisting ? 'text' : 'password'" :append-inner-icon="revealExisting ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="new-password" maxlength="16000" @click:append-inner="revealExisting = !revealExisting" /><p v-if="editingCredential.secret.trim()" class="text-caption text-medium-emphasis mt-4">保存后将清除旧余额与到期时间，使用新 Key 重新查询。</p><CredentialBalance v-else-if="draft.balance && draft.backend === 'bbdevlab'" :balance="editingCredentialMeta?.balance" class="mt-4" /></template><template #actions><v-btn variant="text" @click="resetCredentialEdit">还原此项</v-btn><v-spacer /><v-btn color="primary" @click="finishCredentialEdit">完成编辑</v-btn></template></AppDialog>
   <AppDialog v-model="discard" title="放弃渠道更改？" :max-width="440"><p>尚未保存的设置和密钥将丢失。</p><template #actions><v-btn @click="discard = false">继续编辑</v-btn><v-btn color="error" @click="close(true)">放弃并关闭</v-btn></template></AppDialog>
 </template>
 <style scoped>
@@ -268,7 +282,11 @@ async function save() {
 .discovery-panel { border: 1px solid rgba(var(--v-theme-primary), .24); background: rgba(var(--v-theme-primary), .04); padding: 12px; border-radius: 4px; }
 .discovery-list { max-height: 260px; overflow: auto; }
 .secret-masked :deep(textarea) { -webkit-text-security: disc; }
-.saved-credential { padding: 14px; border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 4px; }
+.credential-heading { display: flex; justify-content: space-between; align-items: center; }
+.connection-keys-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 14px; margin-block: 20px 16px; border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 6px; }
+.connection-keys-summary strong { font-size: 13px; }
+.connection-keys-summary p { margin-top: 3px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .55); }
+.credential-add-panel { padding: 14px; margin-bottom: 16px; border: 1px dashed rgba(var(--v-theme-on-surface), .18); border-radius: 6px; background: rgba(var(--v-theme-on-surface), .02); }
 .account-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; background: rgba(var(--v-theme-on-surface), .04); border-radius: 4px; }
 .account-toggle > .v-switch { flex: 0 0 auto; }
 .account-fields { display: grid; gap: 16px; }

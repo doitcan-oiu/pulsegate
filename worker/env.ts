@@ -9,7 +9,7 @@ export type Env = {
   AI_GATEWAY_TOKEN?: string;
   GATEWAY_STATE: DurableObjectNamespace;
 };
-export type Credential = { id: string; label: string; secret: string; enabled: boolean; failureCount: number; disabledAt: string | null };
+export type Credential = { id: string; label: string; secret: string; enabled: boolean; failureCount: number; disabledAt: string | null; expiresAt?: string | null };
 export type KeyRecord = GatewayApiKey & { tokenHash: string };
 export type GatewayContext = {
   env: Env;
@@ -27,7 +27,7 @@ export type GatewayContext = {
 /** Implemented by store.ts; consumed by the routing engine. */
 export type GatewayStore = {
   getChannel?(channelId: string): Promise<GatewayChannel | null>;
-  isCredentialExhausted?(channelId: string, credentialId: string): Promise<boolean>;
+  isCredentialRestricted?(channelId: string, credentialId: string): Promise<boolean>;
   getCredentials(channelId: string, includeDisabled?: boolean): Promise<Credential[]>;
   recordAttempt(attempt: AttemptRecord): Promise<void>;
   recordLog(log: GatewayLog): Promise<void>;

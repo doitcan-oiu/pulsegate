@@ -5,6 +5,7 @@ import { meaningfulOpenAIChunk, sseBytes, StreamFailure } from './sse';
 import { mockUpstream, sleep } from './mock';
 import { relayJSON, relayStream, type RelayFrame } from './relay';
 import { refreshCredentialBalance } from './credential-balances';
+import { credentialExpired } from '../shared/credential-policy';
 
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_RESPONSE = 8 * 1024 * 1024;
@@ -277,6 +278,10 @@ export async function handleGateway(request: Request, context: GatewayContext, s
       }
       if (!await store.reserveChannel(channel, estimatedTokens)) { lastFailure = { status: 429, message: '渠道速率限制已触发', kind: 'error', retry: true }; break; }
       if (request.signal.aborted) { lastFailure = cancelledFailure(); break; }
+      // The rate-limit reservation can await the state writer. Recheck the
+      // deadline immediately before sending any request with the selected Key.
+      const restricted = channel.config.integration === 'bbdevlab' && credential && store.isCredentialRestricted && await store.isCredentialRestricted(channel.id,credential.id);
+      if (restricted || credentialExpired(credential ?? undefined)) { lastFailure = { status:503,message:'上游密钥已耗尽或到期',kind:'error',retry:true }; continue; }
       const attemptStart = Date.now(), startedAt = new Date(attemptStart).toISOString(); attempts++;
       const controller = new AbortController(); let timedOut = false, timeout: ReturnType<typeof setTimeout> | undefined;
       const cancel = () => controller.abort(request.signal.reason);
@@ -430,14 +435,14 @@ export async function handleGateway(request: Request, context: GatewayContext, s
         const message = redact(probeDeadlineExpired() ? '渠道探测整体响应超时' : timedOut ? original.stream ? '流式首字等待超时' : '非流式响应等待超时' : error instanceof Error ? error.message : '上游连接失败', secrets);
         const kind = probeDeadlineExpired() ? 'error' : request.signal.aborted ? 'cancelled' : error instanceof StreamFailure ? error.kind : 'error';
         const failedDuration = seconds(attemptStart);
-        let exhausted = false;
-        if (!request.signal.aborted && context.source !== 'probe' && channel.config.integration === 'bbdevlab' && credential && store.isCredentialExhausted && [401,402,403,429].includes(status)) {
-          // Confirm quota exhaustion outside the serialized state writer. An HTTP
-          // error alone must never be treated as a zero balance.
-          try { await refreshCredentialBalance(context.env,channel,credential.id,context.env.DEV_MODE === 'true',true); exhausted = await store.isCredentialExhausted(channel.id,credential.id); }
+        let restricted = false;
+        if (!request.signal.aborted && context.source !== 'probe' && channel.config.integration === 'bbdevlab' && credential && store.isCredentialRestricted && [401,402,403,429].includes(status)) {
+          // Confirm quota or expiry outside the serialized state writer. An
+          // HTTP error alone is not proof that the Key is no longer usable.
+          try { await refreshCredentialBalance(context.env,channel,credential.id,context.env.DEV_MODE === 'true',true); restricted = await store.isCredentialRestricted(channel.id,credential.id); }
           catch { /* Balance uncertainty retains the normal retry/health policy. */ }
         }
-        const retry = !request.signal.aborted && !(error instanceof RequestFailure) && (exhausted || timedOut || kind === 'empty' || !(error instanceof StreamFailure) || context.settings.retryStatuses.includes(status));
+        const retry = !request.signal.aborted && !(error instanceof RequestFailure) && (restricted || timedOut || kind === 'empty' || !(error instanceof StreamFailure) || context.settings.retryStatuses.includes(status));
         lastFailure = { status, message, kind, retry }; await record(kind, status, message,failedDuration);
         if (!retry || !context.settings.retryEnabled) break;
       }
