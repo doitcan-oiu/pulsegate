@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { defaultChannelConfig } from "../shared/types";
 import { changedChannelConfig, channelConfigPatchForPanel } from "../src/channel-config-patch";
 import { config as applyConfigPatch } from "../worker/validation";
-import type { CredentialMeta, GatewayBalance } from "../shared/types";
+import type { CredentialMeta, GatewayBalance, GatewayChannel } from "../shared/types";
 import { credentialStatus, credentialUpdates } from "../src/components/channels/credential-utils";
-import { balanceAmount } from "../src/channel-balance";
+import { balanceAmount, channelBalancePresentation } from "../src/channel-balance";
 
 describe("BBDevLab key balance presentation", () => {
   const balance = (amount: number | null, status: GatewayBalance["status"] = "ok"): GatewayBalance => ({ amount, status, unit: "余额", updatedAt: null, checkedAt: null });
@@ -28,6 +28,88 @@ describe("BBDevLab key balance presentation", () => {
     expect(credentialStatus(key)).toBe("已停用");
     expect(credentialStatus({ ...key, reason: "BBDevLab 额度耗尽" })).toBe("额度耗尽");
     expect(credentialStatus({ ...key, enabled: true })).toBe("可用");
+  });
+});
+
+describe("channel list balance summary", () => {
+  const balance = (amount: number | null, overrides: Partial<GatewayBalance> = {}): GatewayBalance => ({
+    amount, status: "ok", unit: "余额", updatedAt: "2026-10-25T20:05:30Z", checkedAt: "2026-10-25T20:06:00Z", ...overrides,
+  });
+  const channel = (overrides: Partial<GatewayChannel> = {}): GatewayChannel => ({
+    id: "balance-channel", name: "Balance channel", provider: "OpenAI", model: "test", models: ["test"],
+    tags: [], weight: 1, endpoint: "https://upstream.example", status: "healthy", priority: 0, ttft: 0,
+    successRate: 100, requests: 0, enabled: true, color: "primary", history: [], createdAt: "2026-10-24T00:00:00Z",
+    archived: false, config: { ...structuredClone(defaultChannelConfig), integration: "bbdevlab" }, credentialCount: 7,
+    health: { averageTtft: null, averageDuration: null, samples: 0, cooldownUntil: null, recoveryCount: 0, failureCount: 0, reason: null, autoDisabled: false },
+    ...overrides,
+  });
+
+  it("preserves spendable BBDevLab precision and separates an actual zero from unknown balance or Key availability", () => {
+    expect(channelBalancePresentation(channel({ accountBalance: balance(0.00001, { availableKeys: 1 }) }))).toMatchObject({
+      amount: "0.00001", unit: "额度", hasAmount: true, state: "ok", availableKeys: 1, keyCount: 7,
+    });
+    expect(channelBalancePresentation(channel({ accountBalance: balance(0, { availableKeys: 0, keyCount: 7, expiredKeys: 4, exhaustedKeys: 3 }) }))).toMatchObject({
+      amount: "0", hasAmount: true, availableKeys: 0, expiredKeys: 4, exhaustedKeys: 3,
+    });
+    expect(channelBalancePresentation(channel())).toMatchObject({ amount: "—", hasAmount: false, state: "pending", stateLabel: "待查询", availableKeys: null });
+    expect(channelBalancePresentation(channel({ accountBalance: balance(1) })).availableKeys).toBeNull();
+  });
+
+  it("hides an old integration's balance and pool restrictions when balance monitoring is not enabled", () => {
+    const native = channel({ config: { ...structuredClone(defaultChannelConfig), integration: "native" }, accountBalance: balance(123, { availableKeys: 0, keyCount: 9, expiredKeys: 5, exhaustedKeys: 4 }) });
+    expect(channelBalancePresentation(native)).toMatchObject({
+      monitored: false, state: "unmonitored", stateLabel: "未开启监控", hasAmount: false, amount: "—", unit: "",
+      refreshable: false, keyCount: 7, availableKeys: null, expiredKeys: 0, exhaustedKeys: 0, updatedText: "", updatedTitle: "",
+    });
+  });
+
+  it("formats USD once and retains explicit non-dollar units", () => {
+    const account = channel({ config: { ...structuredClone(defaultChannelConfig), integration: "sub2api" }, hasAccountCredentials: true });
+    expect(channelBalancePresentation({ ...account, accountBalance: balance(2174.5807, { unit: "USD" }) })).toMatchObject({ amount: "$2,174.5807", unit: "", monitorLabel: "Sub2API" });
+    expect(channelBalancePresentation({ ...account, accountBalance: balance(2174.5807, { unit: "CNY" }) })).toMatchObject({ amount: "2,174.5807", unit: "CNY" });
+    expect(channelBalancePresentation(channel({ accountBalance: balance(12.34567, { unit: "积分" }) }))).toMatchObject({ amount: "12.34567", unit: "积分" });
+  });
+
+  it("marks cached failed and partial refresh amounts without replacing them with zero", () => {
+    const failed = channelBalancePresentation(channel({ accountBalance: balance(0.00001, { status: "error", error: "查询超时" }) }));
+    expect(failed).toMatchObject({ amount: "0.00001", hasAmount: true, state: "cached-error", stateLabel: "更新失败", timeLabel: "上次更新" });
+    expect(failed.refreshTitle).toContain("查询超时");
+    expect(channelBalancePresentation(channel({ accountBalance: balance(18, { status: "pending" }) }))).toMatchObject({
+      amount: "18", hasAmount: true, state: "partial", stateLabel: "部分待更新", timeLabel: "上次更新",
+    });
+    expect(channelBalancePresentation(channel({ accountBalance: balance(null, { status: "error" }) }))).toMatchObject({
+      amount: "—", hasAmount: false, state: "error", stateLabel: "查询失败", timeLabel: "检查",
+    });
+  });
+
+  it("distinguishes missing pool Keys and missing account credentials from pending or failed queries", () => {
+    expect(channelBalancePresentation(channel({ credentialCount: 0, accountBalance: balance(999, { status: "error" }) }))).toMatchObject({
+      state: "unconfigured", stateLabel: "未配置 Key", hasAmount: false, amount: "—", refreshable: false,
+    });
+    expect(channelBalancePresentation(channel({ config: { ...structuredClone(defaultChannelConfig), integration: "newapi" }, hasAccountCredentials: false, accountBalance: balance(999) }))).toMatchObject({
+      state: "unconfigured", stateLabel: "未配置账户", hasAmount: false, amount: "—", refreshable: false,
+    });
+    expect(channelBalancePresentation(channel({ config: { ...structuredClone(defaultChannelConfig), integration: "newapi" }, hasAccountCredentials: true }))).toMatchObject({
+      state: "pending", stateLabel: "待查询", refreshable: true,
+    });
+  });
+
+  it("uses Beijing update dates and tolerates invalid refresh dates without misleading timestamps", () => {
+    const summary = channelBalancePresentation(channel({ accountBalance: balance(1) }));
+    expect(summary.updatedText).toContain("10/26");
+    expect(summary.updatedText).toContain("04:05");
+    expect(summary.updatedTitle).toContain("2026/10/26");
+    expect(summary.updatedTitle).toContain("04:05:30");
+    expect(summary.updatedTitle).toContain("北京时间");
+    const invalid = channelBalancePresentation(channel({ accountBalance: balance(1, { updatedAt: "bad date", checkedAt: "bad date" }) }));
+    expect(invalid).toMatchObject({ updatedText: "", updatedTitle: "" });
+    expect(invalid.refreshTitle).not.toMatch(/Invalid Date|更新于/);
+    expect(channelBalancePresentation(channel({ accountBalance: balance(null, { status: "error", checkedAt: "bad date" }) }))).toMatchObject({ updatedText: "", updatedTitle: "" });
+  });
+
+  it("keeps archived channel balances visible while disabling refresh", () => {
+    expect(channelBalancePresentation(channel({ accountBalance: balance(5), archived: true }))).toMatchObject({ amount: "5", hasAmount: true, refreshable: false });
+    expect(channelBalancePresentation(channel({ accountBalance: balance(5) })).refreshable).toBe(true);
   });
 });
 
