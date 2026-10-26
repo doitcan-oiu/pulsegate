@@ -7,7 +7,7 @@ import { credentialState, credentialStatus, type CredentialDraft } from './crede
 import CredentialBalance from './CredentialBalance.vue';
 import CredentialExpiry from './CredentialExpiry.vue';
 
-const props = withDefaults(defineProps<{ credentials: CredentialMeta[]; drafts?: CredentialDraft[]; deletedIds?: string[]; monitoring?: boolean; busy?: boolean; managed?: boolean; deletable?: boolean }>(), { deletedIds: () => [], monitoring: false, busy: false, managed: false, deletable: false });
+const props = withDefaults(defineProps<{ credentials: CredentialMeta[]; drafts?: CredentialDraft[]; deletedIds?: string[]; monitoring?: boolean; hideNames?: boolean; busy?: boolean; managed?: boolean; deletable?: boolean }>(), { deletedIds: () => [], monitoring: false, hideNames: false, busy: false, managed: false, deletable: false });
 const emit = defineEmits<{ edit: [key: CredentialMeta]; toggle: [key: CredentialMeta]; delete: [key: CredentialMeta]; restore: [key: CredentialMeta] }>();
 const query = ref(''); const filter = ref<CredentialFilter>('all'); const sort = ref<CredentialSort>('created');
 const page = ref(1); const pageSize = ref(20); const now = ref(Date.now());
@@ -15,15 +15,16 @@ const clock = window.setInterval(() => { now.value = Date.now(); }, 1000);
 onBeforeUnmount(() => window.clearInterval(clock));
 const draftsById = computed(() => new Map((props.drafts ?? []).map(draft => [draft.id, draft])));
 const deleted = computed(() => new Set(props.deletedIds));
-const filtered = computed(() => credentialList(props.credentials, { query: query.value, filter: filter.value, sort: sort.value, drafts: props.drafts, deletedIds: props.deletedIds, now: now.value }));
+const filtered = computed(() => credentialList(props.credentials, { query: query.value, filter: filter.value, sort: sort.value, drafts: props.drafts, deletedIds: props.deletedIds, hideNames: props.hideNames, now: now.value }));
 const pagination = computed(() => credentialPage(filtered.value, page.value, pageSize.value));
 const states = computed(() => props.credentials.reduce((result, key) => { if (!deleted.value.has(key.id)) result[credentialState(key, now.value)]++; return result; }, { available: 0, expired: 0, exhausted: 0, disabled: 0 }));
 const modified = computed(() => props.credentials.filter(key => !deleted.value.has(key.id) && credentialChanged(key, draftsById.value.get(key.id))).length);
 const filters = computed(() => [{ title: '全部状态', value: 'all' }, { title: `可用 (${states.value.available})`, value: 'available' }, ...(props.monitoring ? [{ title: `已到期 (${states.value.expired})`, value: 'expired' }, { title: `额度耗尽 (${states.value.exhausted})`, value: 'exhausted' }] : []), { title: `已停用 (${states.value.disabled})`, value: 'disabled' }, ...(props.drafts ? [{ title: `待保存 (${modified.value})`, value: 'modified' }] : []), ...(props.deletable ? [{ title: `待删除 (${deleted.value.size})`, value: 'deleted' }] : [])]);
-const sorts = computed(() => [{ title: '默认顺序', value: 'created' }, { title: '名称', value: 'name' }, ...(props.monitoring ? [{ title: '最早到期', value: 'expiry' }, { title: '余额从低到高', value: 'balance' }] : [])]);
+const sorts = computed(() => [{ title: '默认顺序', value: 'created' }, ...(props.hideNames ? [] : [{ title: '名称', value: 'name' }]), ...(props.monitoring ? [{ title: '最早到期', value: 'expiry' }, { title: '余额从低到高', value: 'balance' }] : [])]);
 watch([query, filter, sort, pageSize], () => { page.value = 1; });
+watch(() => props.hideNames, hidden => { if (hidden && sort.value === 'name') sort.value = 'created'; });
 watch(() => pagination.value.page, value => { page.value = value; });
-function name(key: CredentialMeta) { return draftsById.value.get(key.id)?.label || key.label; }
+function name(key: CredentialMeta) { return props.hideNames ? key.preview : draftsById.value.get(key.id)?.label || key.label; }
 function replacement(key: CredentialMeta) { return !!draftsById.value.get(key.id)?.secret.trim(); }
 function color(key: CredentialMeta) { const state = credentialState(key, now.value); return state === 'available' ? 'success' : state === 'disabled' ? 'secondary' : 'warning'; }
 </script>
@@ -39,15 +40,15 @@ function color(key: CredentialMeta) { const state = credentialState(key, now.val
       <v-chip v-if="deleted.size" size="x-small" color="error" variant="tonal">{{ deleted.size }} 个待删除 · 保存后生效</v-chip>
     </div>
     <div class="credential-list-toolbar">
-      <v-text-field v-model="query" label="搜索名称或 Key 尾号" prepend-inner-icon="mdi-magnify" clearable hide-details density="compact" variant="solo-filled" flat class="credential-search" />
+      <v-text-field v-model="query" :label="hideNames ? '搜索 Key 尾号' : '搜索名称或 Key 尾号'" prepend-inner-icon="mdi-magnify" clearable hide-details density="compact" variant="solo-filled" flat class="credential-search" />
       <v-select v-model="filter" :items="filters" label="状态" hide-details density="compact" class="credential-filter" />
       <v-select v-model="sort" :items="sorts" label="排序" hide-details density="compact" class="credential-sort" />
     </div>
     <v-table density="compact" hover fixed-header class="credential-list-table" :class="{ 'credential-list-table--monitored': monitoring }">
-      <thead><tr><th>密钥名称 / Key</th><th>状态</th><th v-if="monitoring">余额</th><th v-if="monitoring">到期时间</th><th v-else>失败次数</th><th class="credential-actions-column">操作</th></tr></thead>
+      <thead><tr><th>{{ hideNames ? 'API Key' : '密钥名称 / Key' }}</th><th>状态</th><th v-if="monitoring">余额</th><th v-if="monitoring">到期时间</th><th v-else>失败次数</th><th class="credential-actions-column">操作</th></tr></thead>
       <tbody>
         <tr v-for="key in pagination.items" :key="key.id" :class="{ 'credential-pending-delete': deleted.has(key.id) }">
-          <td class="credential-identity"><div class="credential-name"><strong :title="name(key)">{{ name(key) }}</strong><span v-if="!deleted.has(key.id) && credentialChanged(key, draftsById.get(key.id))" class="draft-dot" title="有待保存的修改" aria-label="有待保存的修改" /></div><code>{{ key.preview }}</code></td>
+          <td class="credential-identity" :class="{ 'credential-identity--preview': hideNames }"><div class="credential-name"><code v-if="hideNames">{{ key.preview }}</code><strong v-else :title="name(key)">{{ name(key) }}</strong><span v-if="!deleted.has(key.id) && credentialChanged(key, draftsById.get(key.id))" class="draft-dot" title="有待保存的修改" aria-label="有待保存的修改" /></div><code v-if="!hideNames">{{ key.preview }}</code></td>
           <td><v-chip v-if="deleted.has(key.id)" color="error" size="x-small" variant="tonal">待删除</v-chip><v-chip v-else :color="color(key)" size="x-small" variant="tonal" :title="key.reason || undefined">{{ credentialStatus(key, now) }}</v-chip><span v-if="key.failureCount" class="credential-cell-note">失败 {{ key.failureCount }} 次</span></td>
           <td v-if="monitoring"><span v-if="replacement(key)" class="text-caption text-medium-emphasis">保存后重新查询</span><CredentialBalance v-else :balance="key.balance" :show-expiry="false" compact /></td>
           <td v-if="monitoring"><span v-if="replacement(key)" class="text-caption text-medium-emphasis">待查询</span><CredentialExpiry v-else :balance="key.balance" :now="now" /></td>
@@ -76,9 +77,12 @@ function color(key: CredentialMeta) { const state = credentialState(key, now.val
 .credential-list-table :deep(th) { height: 34px; font-size: 12px; background: rgb(var(--v-theme-surface)); white-space: nowrap; }
 .credential-list-table :deep(td) { padding: 11px 14px; font-size: 13px; }
 .credential-identity { width: 30%; min-width: 150px; max-width: 240px; }
+.credential-identity--preview { width: 18%; min-width: 100px; }
 .credential-name { display: flex; align-items: center; gap: 6px; }
 .credential-name > strong { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.credential-name > code { font-size: 13px; font-weight: 500; white-space: nowrap; }
 .credential-pending-delete .credential-name > strong { text-decoration: line-through; color: rgba(var(--v-theme-on-surface), .5); }
+.credential-pending-delete .credential-name > code { text-decoration: line-through; color: rgba(var(--v-theme-on-surface), .5); }
 .credential-identity > code { display: block; margin-top: 4px; font-size: 11px; color: rgba(var(--v-theme-on-surface), .5); }
 .draft-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: rgb(var(--v-theme-primary)); }
 .credential-cell-note { display: block; margin-top: 5px; font-size: 11px; color: rgba(var(--v-theme-on-surface), .5); white-space: nowrap; }

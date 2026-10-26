@@ -29,8 +29,8 @@ const initial = configSnapshot();
 const busy = ref(false); const discard = ref(false); const deleteName = ref(''); const query = ref('');
 const credentials = ref<CredentialMeta[]>([]); const label = ref(''); const secret = ref(''); const editingCredentialId = ref<string | null>(null); const secretVisible = ref(false); const deleteCredential = ref<CredentialMeta | null>(null); const credentialEditorOpen = ref(false);
 const editingCredential = computed(() => credentials.value.find(item => item.id === editingCredentialId.value));
-const dirty = computed(() => isConfig.value ? configSnapshot() !== initial : props.panel === 'credentials' && (!!secret.value || label.value !== (editingCredential.value?.label ?? '')));
-const canSaveCredential = computed(() => !!label.value.trim() && label.value.trim().length <= 128 && secret.value.trim().length <= 16000 && (editingCredentialId.value ? !!editingCredential.value && (!!secret.value.trim() || label.value.trim() !== editingCredential.value.label) : !!secret.value.trim()));
+const dirty = computed(() => isConfig.value ? configSnapshot() !== initial : props.panel === 'credentials' && (!!secret.value || (!keyBalanceMonitoring.value && label.value !== (editingCredential.value?.label ?? ''))));
+const canSaveCredential = computed(() => (keyBalanceMonitoring.value || (!!label.value.trim() && label.value.trim().length <= 128)) && secret.value.trim().length <= 16000 && (editingCredentialId.value ? !!editingCredential.value && (!!secret.value.trim() || (!keyBalanceMonitoring.value && label.value.trim() !== editingCredential.value.label)) : !!secret.value.trim()));
 const path = `/api/channels/${encodeURIComponent(props.channel.id)}`;
 const current = computed(() => channels.value.find(channel => channel.id === props.channel.id) ?? props.channel);
 const keyBalanceMonitoring = computed(() => current.value.config.integration === 'bbdevlab');
@@ -97,9 +97,19 @@ async function saveCredential() {
   let patch: { label?: string; secret?: string };
   try {
     if (id) {
-      const update = credentialUpdates([{ id, label: label.value, secret: secret.value }], credentials.value)[0];
-      if (!update) { setCredentialDraft(null, false); return; }
-      patch = { ...(update.label === undefined ? {} : { label: update.label }), ...(update.secret === undefined ? {} : { secret: update.secret }) };
+      if (keyBalanceMonitoring.value) {
+        if (!editingCredential.value) throw new Error('密钥列表已变化，请重新打开密钥管理');
+        if (secret.value.trim().length > 16000) throw new Error('API Key 最多 16,000 个字符');
+        if (!secret.value.trim()) { setCredentialDraft(null, false); return; }
+        patch = { secret: secret.value.trim() };
+      } else {
+        const update = credentialUpdates([{ id, label: label.value, secret: secret.value }], credentials.value)[0];
+        if (!update) { setCredentialDraft(null, false); return; }
+        patch = { ...(update.label === undefined ? {} : { label: update.label }), ...(update.secret === undefined ? {} : { secret: update.secret }) };
+      }
+    } else if (keyBalanceMonitoring.value) {
+      if (!secret.value.trim() || secret.value.trim().length > 16000) throw new Error('请填写 API Key，最多 16,000 个字符');
+      patch = { secret: secret.value.trim() };
     } else {
       if (!label.value.trim() || !secret.value.trim() || label.value.trim().length > 128 || secret.value.trim().length > 16000) throw new Error('请填写密钥名称与 API Key，名称最多 128 字符，密钥最多 16,000 字符');
       patch = { label: label.value.trim(), secret: secret.value.trim() };
@@ -160,16 +170,16 @@ function addStatus() { const value = Number(customStatus.value); if (!Number.isI
     <template v-if="panel === 'credentials'">
       <div class="credential-summary"><v-icon color="primary">mdi-key-chain-variant</v-icon><div><strong>上游 API Key 池</strong><p>自动轮换可用密钥，原文加密保存。</p></div><v-spacer /><v-btn v-if="keyBalanceMonitoring" size="small" variant="tonal" prepend-icon="mdi-refresh" :loading="busy" :disabled="!credentials.length || current.archived" @click="refreshCredentialBalances">刷新余额</v-btn><v-btn size="small" color="primary" prepend-icon="mdi-plus" :disabled="busy" @click="beginCredentialEdit(null)">添加密钥</v-btn></div>
       <v-alert v-if="keyBalanceMonitoring" type="info" variant="tonal" density="compact" class="mb-4">BBDevLab 按 Key 监控余额与到期时间。额度耗尽或到期时仅停用对应 Key；确认未到期且余额充足后自动恢复，手动停用保持停用。<p v-if="credentials.length > 40" class="mt-1">单次手动刷新最多查询 40 个 Key，其余由 Worker 定时分批刷新。</p></v-alert>
-      <ChannelCredentialList :credentials="credentials" :monitoring="keyBalanceMonitoring" :busy="busy" managed class="mb-4" @edit="beginCredentialEdit" @toggle="toggleCredential" @delete="deleteCredential = $event" />
+      <ChannelCredentialList :credentials="credentials" :monitoring="keyBalanceMonitoring" :hide-names="keyBalanceMonitoring" :busy="busy" managed class="mb-4" @edit="beginCredentialEdit" @toggle="toggleCredential" @delete="deleteCredential = $event" />
     </template>
     <template v-if="panel === 'delete'"><v-alert variant="tonal" type="warning" class="mb-4">渠道配置及 {{ channel.credentialCount }} 把上游密钥将永久删除，历史请求日志保留。</v-alert><p class="text-body-2 mb-3">请输入完整渠道名称 <strong>{{ channel.name }}</strong> 确认删除。</p><v-text-field v-model="deleteName" label="渠道名称" autocomplete="off" :error="!!deleteName && deleteName !== channel.name" /></template>
     </div>
     <template #actions><span v-if="dirty" class="text-caption text-medium-emphasis">有未保存的更改</span><v-spacer /><v-btn :disabled="busy" @click="close()">{{ isConfig || panel === 'delete' ? '取消' : '关闭' }}</v-btn><v-btn v-if="isConfig" color="primary" :loading="busy" @click="saveConfig">保存配置</v-btn><v-btn v-else-if="panel === 'test'" color="primary" :loading="busy" :disabled="!testModel" @click="runTest()">运行测试</v-btn><v-btn v-else-if="panel === 'delete'" color="error" :disabled="deleteName !== channel.name" :loading="busy" @click="removeChannel">永久删除</v-btn></template>
   </AppDialog>
-  <AppDialog :model-value="credentialEditorOpen" :title="editingCredentialId ? '编辑上游密钥' : '添加上游密钥'" :max-width="560" :busy="busy" @update:model-value="closeCredentialEditor"><p v-if="editingCredential" class="text-caption text-medium-emphasis mb-4">当前密钥：<code>{{ editingCredential.preview }}</code>。API Key 留空只修改名称。</p><v-text-field v-model="label" label="密钥名称" maxlength="128" :disabled="busy" class="mb-4" /><v-text-field v-model="secret" :label="editingCredentialId ? '上游 API Key（留空不修改）' : '上游 API Key'" :type="secretVisible ? 'text' : 'password'" :append-inner-icon="secretVisible ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="new-password" maxlength="16000" :disabled="busy" @click:append-inner="secretVisible = !secretVisible" /><template v-if="editingCredential && keyBalanceMonitoring"><p v-if="secret.trim()" class="text-caption text-medium-emphasis mt-4">保存后将使用新 Key 重新查询余额与到期时间。</p><CredentialBalance v-else :balance="editingCredential.balance" class="mt-4" /></template><template #actions><v-btn :disabled="busy" @click="closeCredentialEditor">取消</v-btn><v-spacer /><v-btn color="primary" :loading="busy" :disabled="!canSaveCredential" @click="saveCredential">{{ editingCredentialId ? '保存修改' : '添加密钥' }}</v-btn></template></AppDialog>
+  <AppDialog :model-value="credentialEditorOpen" :title="editingCredentialId ? '编辑上游密钥' : '添加上游密钥'" :max-width="560" :busy="busy" @update:model-value="closeCredentialEditor"><p v-if="editingCredential" class="text-caption text-medium-emphasis mb-4">当前密钥：<code>{{ editingCredential.preview }}</code>。<template v-if="!keyBalanceMonitoring">API Key 留空只修改名称。</template></p><v-text-field v-if="!keyBalanceMonitoring" v-model="label" label="密钥名称" maxlength="128" :disabled="busy" class="mb-4" /><v-text-field v-model="secret" :label="editingCredentialId ? '上游 API Key（留空不修改）' : '上游 API Key'" :type="secretVisible ? 'text' : 'password'" :append-inner-icon="secretVisible ? 'mdi-eye-off' : 'mdi-eye'" autocomplete="new-password" maxlength="16000" :disabled="busy" @click:append-inner="secretVisible = !secretVisible" /><template v-if="editingCredential && keyBalanceMonitoring"><p v-if="secret.trim()" class="text-caption text-medium-emphasis mt-4">保存后将使用新 Key 重新查询余额与到期时间。</p><CredentialBalance v-else :balance="editingCredential.balance" class="mt-4" /></template><template #actions><v-btn :disabled="busy" @click="closeCredentialEditor">取消</v-btn><v-spacer /><v-btn color="primary" :loading="busy" :disabled="!canSaveCredential" @click="saveCredential">{{ editingCredentialId ? '保存修改' : '添加密钥' }}</v-btn></template></AppDialog>
   <AppDialog v-model="discard" title="放弃未保存的更改？" :max-width="440"><p>本次修改将丢失。</p><template #actions><v-btn @click="discard = false">继续编辑</v-btn><v-btn color="error" @click="close(true)">放弃并关闭</v-btn></template></AppDialog>
-  <AppDialog v-model="credentialDiscard" title="放弃当前密钥草稿？" :max-width="440"><p>当前未保存的名称与密钥将被清除。</p><template #actions><v-btn @click="credentialDiscard = false">继续编辑</v-btn><v-btn color="error" @click="confirmCredentialSwitch">{{ credentialCloseRequested ? '放弃并关闭' : '放弃并切换' }}</v-btn></template></AppDialog>
-  <AppDialog :model-value="!!deleteCredential" title="删除上游密钥" :max-width="440" :busy="busy" @update:model-value="deleteCredential = null"><p>永久删除「{{ deleteCredential?.label }}」？后续请求使用其他可用密钥。</p><code class="d-block mt-3">{{ deleteCredential?.preview }}</code><template #actions><v-btn :disabled="busy" @click="deleteCredential = null">取消</v-btn><v-btn color="error" :loading="busy" @click="removeCredential">删除密钥</v-btn></template></AppDialog>
+  <AppDialog v-model="credentialDiscard" title="放弃当前密钥草稿？" :max-width="440"><p>当前未保存的{{ keyBalanceMonitoring ? 'API Key' : '名称与密钥' }}将被清除。</p><template #actions><v-btn @click="credentialDiscard = false">继续编辑</v-btn><v-btn color="error" @click="confirmCredentialSwitch">{{ credentialCloseRequested ? '放弃并关闭' : '放弃并切换' }}</v-btn></template></AppDialog>
+  <AppDialog :model-value="!!deleteCredential" title="删除上游密钥" :max-width="440" :busy="busy" @update:model-value="deleteCredential = null"><p>永久删除「{{ keyBalanceMonitoring ? deleteCredential?.preview : deleteCredential?.label }}」？后续请求使用其他可用密钥。</p><code v-if="!keyBalanceMonitoring" class="d-block mt-3">{{ deleteCredential?.preview }}</code><template #actions><v-btn :disabled="busy" @click="deleteCredential = null">取消</v-btn><v-btn color="error" :loading="busy" @click="removeCredential">删除密钥</v-btn></template></AppDialog>
   <AppDialog :model-value="!!logDetail" title="测试请求详情" :max-width="850" @update:model-value="logDetail = null"><template v-if="logDetail"><p class="text-body-2">{{ logDetail.log.model }} · {{ dateTime(logDetail.log.createdAt) }}</p><ChannelTestResult :result="{ success: logDetail.log.result !== 'error', status: logDetail.log.status, duration: logDetail.log.duration, ttft: logDetail.log.stream ? logDetail.log.ttft : null, error: logDetail.log.error, requestId: logDetail.log.id, attempts: logDetail.attempts }" /></template></AppDialog>
 </template>
 
