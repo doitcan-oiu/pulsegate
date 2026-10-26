@@ -29,7 +29,7 @@ const summary = computed(() => channelBalancePresentation(props.channel));
       <span v-if="summary.expiredKeys" class="key-issue key-issue--expired">已到期 {{ summary.expiredKeys }}</span>
       <span v-if="summary.exhaustedKeys" class="key-issue key-issue--exhausted">耗尽 {{ summary.exhaustedKeys }}</span>
     </div>
-    <div v-if="summary.updatedText || (summary.hasAmount && summary.stateLabel)" class="balance-update">
+    <div v-if="summary.state !== 'ok' && (summary.updatedText || (summary.hasAmount && summary.stateLabel))" class="balance-update">
       <span v-if="summary.hasAmount && summary.stateLabel" class="balance-state" :class="{ 'text-warning': summary.state === 'cached-error' }" :title="channel.accountBalance?.error">{{ summary.stateLabel }}</span>
       <span v-if="summary.updatedText" :title="summary.updatedTitle">{{ summary.timeLabel }} {{ summary.updatedText }}</span>
     </div>
@@ -37,7 +37,7 @@ const summary = computed(() => channelBalancePresentation(props.channel));
 </template>
 
 <style scoped>
-.channel-balance { display: flex; flex-direction: column; gap: 4px; min-width: 0; width: 100%; max-width: 260px; }
+.channel-balance { display: flex; flex-direction: column; gap: 2px; min-width: 0; width: 100%; max-width: 260px; }
 .balance-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 20px; }
 .balance-monitor { font-size: 11px; font-weight: 600; color: rgba(var(--v-theme-on-surface), .64); }
 .balance-refresh { flex: 0 0 auto; color: rgba(var(--v-theme-on-surface), .6); }

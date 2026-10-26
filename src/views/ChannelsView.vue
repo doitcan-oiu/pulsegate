@@ -115,13 +115,13 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
         <v-tabs v-model="archive" color="primary" density="compact" class="channel-view-tabs"><v-tab :value="false">使用中 <span class="view-count">{{ activeChannels.length }}</span></v-tab><v-tab :value="true">已归档 <span class="view-count">{{ channels.length - activeChannels.length }}</span></v-tab></v-tabs>
         <v-text-field v-model="query" placeholder="搜索渠道、模型或端点" aria-label="搜索渠道" prepend-inner-icon="mdi-magnify" variant="solo-filled" density="compact" hide-details clearable flat class="channel-search" />
         <v-menu v-if="!tableView" v-model="tagOpen" :close-on-content-click="false" :max-width="'calc(100vw - 32px)'">
-          <template #activator="{ props: tagProps }"><v-btn v-bind="tagProps" :variant="filterTags.length || untagged ? 'tonal' : 'text'" :color="filterTags.length || untagged ? 'primary' : undefined" prepend-icon="mdi-file-tree-outline">标签树<span v-if="filterTags.length || untagged" class="filter-count">{{ untagged ? '未分组' : filterTags.length }}</span></v-btn></template>
+          <template #activator="{ props: tagProps }"><v-btn v-bind="tagProps" size="small" :variant="filterTags.length || untagged ? 'tonal' : 'text'" :color="filterTags.length || untagged ? 'primary' : undefined" prepend-icon="mdi-file-tree-outline">标签树<span v-if="filterTags.length || untagged" class="filter-count">{{ untagged ? '未分组' : filterTags.length }}</span></v-btn></template>
           <div class="mobile-tag-panel"><ChannelTagFilter :tags="allTags" :channels="scopedChannels" v-model:selected="filterTags" v-model:untagged="untagged" @manage="tagOpen = false; openManagement('tags')" /></div>
         </v-menu>
-        <v-btn :variant="filtersOpen || filterCount ? 'tonal' : 'text'" :color="filtersOpen || filterCount ? 'primary' : undefined" prepend-icon="mdi-filter-variant" :append-icon="filtersOpen ? 'mdi-chevron-up' : 'mdi-chevron-down'" :aria-expanded="filtersOpen" @click="filtersOpen = !filtersOpen">筛选<span v-if="filterCount" class="filter-count">{{ filterCount }}</span></v-btn>
+        <v-btn size="small" :variant="filtersOpen || filterCount ? 'tonal' : 'text'" :color="filtersOpen || filterCount ? 'primary' : undefined" prepend-icon="mdi-filter-variant" :append-icon="filtersOpen ? 'mdi-chevron-up' : 'mdi-chevron-down'" :aria-expanded="filtersOpen" @click="filtersOpen = !filtersOpen">筛选<span v-if="filterCount" class="filter-count">{{ filterCount }}</span></v-btn>
         <v-btn icon="mdi-table-column" variant="text" size="small" aria-label="显示列与分页设置" title="显示列" @click="columnDialog = true" />
         <v-btn icon="mdi-refresh" variant="text" size="small" :loading="loading" :disabled="busy" aria-label="刷新渠道列表" title="刷新渠道列表" @click="refresh()" />
-        <v-menu><template #activator="{ props: menuProps }"><v-btn v-bind="menuProps" variant="text" append-icon="mdi-chevron-down" :disabled="busy">管理</v-btn></template><v-list density="compact"><v-list-item title="批量导入" prepend-icon="mdi-upload-outline" @click="openManagement('import')" /><v-list-item title="导出渠道配置" prepend-icon="mdi-download-outline" @click="exportChannels()" /><v-list-item title="标签管理" prepend-icon="mdi-tag-outline" @click="openManagement('tags')" /><v-list-item title="批量调整权重" prepend-icon="mdi-scale-balance" @click="openManagement('weights')" /><v-list-item title="负载均衡策略" prepend-icon="mdi-tune" @click="openManagement('strategy')" /><v-list-item title="API Key 权限" prepend-icon="mdi-key-outline" @click="navigate('keys')" /></v-list></v-menu>
+        <v-menu><template #activator="{ props: menuProps }"><v-btn v-bind="menuProps" size="small" variant="text" append-icon="mdi-chevron-down" :disabled="busy">管理</v-btn></template><v-list density="compact"><v-list-item title="批量导入" prepend-icon="mdi-upload-outline" @click="openManagement('import')" /><v-list-item title="导出渠道配置" prepend-icon="mdi-download-outline" @click="exportChannels()" /><v-list-item title="标签管理" prepend-icon="mdi-tag-outline" @click="openManagement('tags')" /><v-list-item title="批量调整权重" prepend-icon="mdi-scale-balance" @click="openManagement('weights')" /><v-list-item title="负载均衡策略" prepend-icon="mdi-tune" @click="openManagement('strategy')" /><v-list-item title="API Key 权限" prepend-icon="mdi-key-outline" @click="navigate('keys')" /></v-list></v-menu>
       </div>
       <v-expand-transition>
         <div v-if="filtersOpen" class="channel-filter-panel">
@@ -220,8 +220,8 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
 .applied-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .1); }
 .channel-bulk { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 16px; background: rgba(var(--v-theme-primary), .1); border-bottom: 1px solid rgba(var(--v-theme-primary), .2); }
 .channel-table :deep(table) { min-width: 1040px; }
-.channel-table th { padding: 11px 12px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .6); }
-.channel-table td { padding: 16px 12px; vertical-align: middle; }
+.channel-table th { padding: 9px 12px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .6); }
+.channel-table td { padding: 10px 12px; vertical-align: middle; }
 .channel-table :deep(th) { background: rgba(var(--v-theme-on-surface), .025); white-space: nowrap; }
 .identity-column { min-width: 220px; max-width: 290px; }
 .column-tags { min-width: 150px; max-width: 190px; }
@@ -242,24 +242,24 @@ function openManagement(mode: string) { if (['weights', 'assign'].includes(mode)
 .channel-empty > p { margin: 10px 0; }
 .channel-card-toolbar { display: flex; align-items: center; gap: 4px; padding: 8px 16px 0; font-size: 12px; color: rgba(var(--v-theme-on-surface), .6); }
 .card-sort { flex: 0 0 140px; max-width: 140px; }
-.channel-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 12px 16px 16px; }
-.channel-card { min-width: 0; border: 1px solid rgba(var(--v-theme-on-surface), .14); border-radius: 8px; padding: 16px; background: rgb(var(--v-theme-surface)); }
+.channel-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 10px 12px 12px; }
+.channel-card { min-width: 0; border: 1px solid rgba(var(--v-theme-on-surface), .14); border-radius: 8px; padding: 12px; background: rgb(var(--v-theme-surface)); }
 .selected-card { border-color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .025); }
 .channel-card-heading { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 8px; align-items: start; }
 .channel-card-heading > .v-checkbox-btn { grid-area: 1 / 1; margin-left: -5px; margin-top: -5px; }
 .channel-card-heading > .channel-identity { grid-area: 1 / 2; }
-.channel-card-tags { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; align-items: start; margin-top: 15px; }
+.channel-card-tags { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; align-items: start; margin-top: 10px; }
 .card-label { padding-top: 4px; font-size: 11px; color: rgba(var(--v-theme-on-surface), .5); white-space: nowrap; }
-.channel-card-balance { padding: 12px; margin-top: 14px; border: 1px solid rgba(var(--v-theme-on-surface), .08); border-radius: 6px; background: rgba(var(--v-theme-on-surface), .02); }
+.channel-card-balance { padding: 8px 10px; margin-top: 10px; border: 1px solid rgba(var(--v-theme-on-surface), .08); border-radius: 6px; background: rgba(var(--v-theme-on-surface), .02); }
 .channel-card-balance :deep(.channel-balance) { max-width: none; }
-.channel-card-health { display: flex; align-items: flex-start; gap: 10px; margin-top: 14px; }
+.channel-card-health { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; }
 .channel-card-health :deep(.channel-health) { flex: 1; min-width: 0; max-width: none; overflow-wrap: anywhere; }
 .channel-card-health > .v-switch { flex: 0 0 auto; }
 .channel-card-models { display: grid; grid-template-columns: 50px minmax(0, 1fr); gap: 8px; margin-top: 12px; }
 .channel-card-models .model-name { max-width: 100%; }
-.channel-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid rgba(var(--v-theme-on-surface), .08); padding-top: 9px; margin-top: 14px; }
+.channel-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid rgba(var(--v-theme-on-surface), .08); padding-top: 6px; margin-top: 8px; }
 .channel-card-footer > .v-btn { padding-inline: 4px; color: rgba(var(--v-theme-on-surface), .6); }
-.card-expanded-details { margin: 12px -16px -16px; border-top: 1px solid rgba(var(--v-theme-on-surface), .08); background: rgba(var(--v-theme-on-surface), .02); }
+.card-expanded-details { margin: 10px -12px -12px; border-top: 1px solid rgba(var(--v-theme-on-surface), .08); background: rgba(var(--v-theme-on-surface), .02); }
 .page-size { max-width: 90px; min-width: 80px; }
 @media (max-width: 1280px) { .channel-toolbar { flex-wrap: wrap; padding-left: 12px; } .channel-view-tabs { flex: 1 1 100%; } .channel-search { margin-left: 0; max-width: none; } }
 @media (max-width: 1439px) { .channels-layout { grid-template-columns: minmax(0, 1fr); } .channel-toolbar { flex-wrap: wrap; padding-left: 12px; } .channel-search { margin-left: 0; } }

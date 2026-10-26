@@ -14,7 +14,7 @@ withDefaults(defineProps<{ channel: GatewayChannel; showProvider?: boolean }>(),
 .channel-title { display: flex; align-items: flex-start; gap: 5px; }
 .channel-title > strong { min-width: 0; font-size: 15px; line-height: 1.5; font-weight: 650; overflow-wrap: anywhere; }
 .channel-title > .v-btn { flex: 0 0 auto; margin-top: -2px; color: rgba(var(--v-theme-on-surface), .5); }
-.channel-subtitle { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 9px; font-size: 11px; color: rgba(var(--v-theme-on-surface), .55); }
+.channel-subtitle { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 5px; font-size: 11px; color: rgba(var(--v-theme-on-surface), .55); }
 .provider-label { color: rgba(var(--v-theme-on-surface), .72); }
 .multiplier { border: 1px solid rgba(var(--v-theme-on-surface), .16); border-radius: 4px; padding: 1px 5px; white-space: nowrap; color: rgba(var(--v-theme-on-surface), .72); font-variant-numeric: tabular-nums; }
 .model-count { white-space: nowrap; }
